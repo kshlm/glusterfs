@@ -149,3 +149,43 @@ gf_cli_sync_start_volume (call_frame_t *frame, xlator_t *this, void *data)
 out:
         return ret;
 }
+
+int
+gf_cli_sync_stop_volume (call_frame_t *frame, xlator_t *this, void *data)
+{
+        int                     ret = 0;
+        gf_cli_req              req = {{0,}};
+        struct syncargs         args = {0,};
+        dict_t                  *dict = NULL;
+        char                    *volname = NULL;
+
+        GF_ASSERT (data);
+
+        dict = data;
+
+        ret = dict_get_str (dict, "volname", &volname);
+        if (ret)
+                goto out;
+
+        ret = dict_allocate_and_serialize (dict, &req.dict.dict_val,
+                                           &req.dict.dict_len);
+        if (ret < 0) {
+                gf_log (this->name, GF_LOG_ERROR, "failed to serialize dict");
+                goto out;
+        }
+
+        ret = cli_sync_volume_cmd (&req, &args, frame,
+                                   GLUSTER_CLI_STOP_VOLUME, this);
+
+        if (ret) {
+                if (args.errstr && strcmp (args.errstr, ""))
+                        cli_err ("volume stop: %s: failed: %s", volname,
+                                 args.errstr);
+                else
+                        cli_err ("volume stop: %s: failed", volname);
+        } else
+                cli_out ("volume stop: %s: success", volname);
+
+out:
+        return ret;
+}

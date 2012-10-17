@@ -31,3 +31,6 @@ cli_perform_volume_cmd (void *req, call_frame_t *frame, rpc_clnt_prog_t *prog,
 
 int
 gf_cli_sync_start_volume (call_frame_t *frame, xlator_t *this, void *data);
+
+int
+gf_cli_sync_stop_volume (call_frame_t *frame, xlator_t *this, void *data);
