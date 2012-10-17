@@ -189,3 +189,179 @@ gf_cli_sync_stop_volume (call_frame_t *frame, xlator_t *this, void *data)
 out:
         return ret;
 }
+
+int
+gf_cli_sync_get_volume (call_frame_t *frame, xlator_t *this, void *data)
+{
+        int                             ret = 0;
+        gf_cli_req                      req = {{0,}};
+        struct syncargs                 args = {0,};
+        cli_cmd_volume_get_ctx_t        *ctx = NULL;
+        dict_t                          *dict = NULL;
+        int                             vol_count = 0;
+        char                            *volname = NULL;
+        int                             type = 0;
+        int                             vol_type = 0;
+        int                             status = 0;
+        int                             brick_count = 0;
+        int                             dist_count = 0;
+        int                             stripe_count = 0;
+        int                             replica_count = 0;
+        int                             transport = 0;
+        char                            *volid = NULL;
+        int                             opt_count = 0;
+        char                            *brick = NULL;
+        char                            key[1024] = {0,};
+        int                             i = 1;
+
+        GF_ASSERT (data);
+
+        ctx = data;
+
+        dict = dict_new ();
+        if (!dict)
+                goto out;
+
+        ret = dict_set_str (dict, "volname", ctx->volname);
+        if (ret)
+                goto out;
+
+        ret = dict_set_int32 (dict, "flags", GF_CLI_GET_VOLUME);
+        if (ret)
+                goto out;
+
+        ret = dict_allocate_and_serialize (dict, &req.dict.dict_val,
+                                           &req.dict.dict_len);
+        if (ret < 0) {
+                gf_log (this->name, GF_LOG_ERROR, "failed to serialize dict");
+                goto out;
+        }
+
+        ret = cli_sync_volume_cmd (&req, &args, frame,
+                                   GLUSTER_CLI_GET_VOLUME, this);
+
+        if (ret)
+                goto out;
+
+        if (!args.dict) {
+                cli_err ("No volumes present");
+                ret = 0;
+                goto out;
+        }
+
+        ret = dict_get_int32 (args.dict, "count", &vol_count);
+        if (ret)
+                goto out;
+
+        if (!vol_count) {
+                cli_err ("Volume %s doesn't exist", ctx->volname);
+                ret = -1;
+                goto out;
+        }
+
+        cli_out (" ");
+
+        ret = dict_get_str (args.dict, "volume0.name", &volname);
+        if (ret)
+                goto out;
+
+        ret = dict_get_int32 (args.dict, "volume0.type", &type);
+        if (ret)
+                goto out;
+
+        ret = dict_get_int32 (args.dict, "volume0.status", &status);
+        if (ret)
+                goto out;
+
+        ret = dict_get_int32 (args.dict, "volume0.brick_count", &brick_count);
+        if (ret)
+                goto out;
+
+        ret = dict_get_int32 (args.dict, "volume0.dist_count", &dist_count);
+        if (ret)
+                goto out;
+
+        ret = dict_get_int32 (args.dict, "volume0.stripe_count", &stripe_count);
+        if (ret)
+                goto out;
+
+        ret = dict_get_int32 (args.dict, "volume0.replica_count", &replica_count);
+        if (ret)
+                goto out;
+
+        ret = dict_get_int32 (args.dict, "volume0.transport", &transport);
+        if (ret)
+                goto out;
+
+        ret = dict_get_str (args.dict, "volume0.volume_id", &volid);
+        if (ret)
+                goto out;
+
+        vol_type = type;
+
+        // Distributed (stripe/replicate/stripe-replica) setups
+        if ((type > 0) && ( dist_count < brick_count))
+                vol_type = type + 3;
+
+        cli_out ("Volume Name: %s", volname);
+        cli_out ("Type: %s", cli_vol_type_str[vol_type]);
+        cli_out ("Volume ID: %s", volid);
+        cli_out ("Status: %s", cli_vol_status_str[status]);
+
+        if (type == GF_CLUSTER_TYPE_STRIPE_REPLICATE) {
+                cli_out ("Number of Bricks: %d x %d x %d = %d",
+                         (brick_count / dist_count),
+                         stripe_count,
+                         replica_count,
+                         brick_count);
+
+        } else if (type == GF_CLUSTER_TYPE_NONE) {
+                cli_out ("Number of Bricks: %d", brick_count);
+
+        } else {
+                /* For both replicate and stripe, dist_count is
+                   good enough */
+                cli_out ("Number of Bricks: %d x %d = %d",
+                         (brick_count / dist_count),
+                         dist_count, brick_count);
+        }
+
+        cli_out ("Transport-type: %s",
+                 ((transport == 0)?"tcp":
+                  (transport == 1)?"rdma":
+                  "tcp,rdma"));
+        i = 1;
+
+        if (brick_count)
+                cli_out ("Bricks:");
+
+        while (i <= brick_count) {
+                memset (key, 0, sizeof (key));
+                snprintf (key, 1024, "volume0.brick%d", i);
+                ret = dict_get_str (args.dict, key, &brick);
+                if (ret)
+                        goto out;
+
+                cli_out ("Brick%d: %s", i, brick);
+                i++;
+        }
+
+        ret = dict_get_int32 (args.dict, "volume0.opt_count", &opt_count);
+        if (ret)
+                goto out;
+
+        if (!opt_count)
+                goto out;
+
+        cli_out ("Options Reconfigured:");
+        //TODO: Output options
+        cli_out ("<TODO>");
+out:
+        if (dict)
+                dict_unref (dict);
+
+        if (args.dict)
+                dict_unref (args.dict);
+
+        return ret;
+}
