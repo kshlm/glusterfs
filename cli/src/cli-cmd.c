@@ -89,6 +89,21 @@ cli_cmd_sent_status_get (int *status)
 }
 
 int
+cli_cmd_sent_status_set (int status)
+{
+        int ret = 0;
+        GF_ASSERT (status);
+
+        ret = cli_cmd_lock ();
+        {
+                if (ret == 0)
+                        cmd_sent = status;
+        }
+        ret = cli_cmd_unlock ();
+        return ret;
+}
+
+int
 cli_cmd_process (struct cli_state *state, int argc, char **argv)
 {
         int                  ret = 0;

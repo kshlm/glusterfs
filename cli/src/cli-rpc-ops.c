@@ -37,6 +37,7 @@
 #include "protocol-common.h"
 #include "cli-mem-types.h"
 #include "compat.h"
+#include "cli-syncrpc-ops.h"
 
 #include "syscall.h"
 #include "glusterfs3.h"
@@ -6106,7 +6107,7 @@ struct rpc_clnt_procedure gluster_cli_actors[GLUSTER_CLI_MAXVALUE] = {
         [GLUSTER_CLI_LIST_FRIENDS]     = {"LIST_FRIENDS", gf_cli_list_friends},
         [GLUSTER_CLI_CREATE_VOLUME]    = {"CREATE_VOLUME", gf_cli_create_volume},
         [GLUSTER_CLI_DELETE_VOLUME]    = {"DELETE_VOLUME", gf_cli_delete_volume},
-        [GLUSTER_CLI_START_VOLUME]     = {"START_VOLUME", gf_cli_start_volume},
+        [GLUSTER_CLI_START_VOLUME]     = {"START_VOLUME", gf_cli_sync_start_volume},
         [GLUSTER_CLI_STOP_VOLUME]      = {"STOP_VOLUME", gf_cli_stop_volume},
         [GLUSTER_CLI_RENAME_VOLUME]    = {"RENAME_VOLUME", gf_cli_rename_volume},
         [GLUSTER_CLI_DEFRAG_VOLUME]    = {"DEFRAG_VOLUME", gf_cli_defrag_volume},
