@@ -43,7 +43,6 @@
 
 #include "glusterd-mountbroker.h"
 
-static uuid_t glusterd_uuid;
 extern struct rpcsvc_program gluster_handshake_prog;
 extern struct rpcsvc_program gluster_pmap_prog;
 extern glusterd_op_info_t opinfo;
@@ -93,28 +92,47 @@ glusterd_uuid_init ()
 
 	ret = glusterd_retrieve_uuid ();
 	if (ret == 0) {
-		uuid_copy (glusterd_uuid, priv->uuid);
 		gf_log (this->name, GF_LOG_INFO,
 			"retrieved UUID: %s", uuid_utoa (priv->uuid));
 		return 0;
 	}
 
-        uuid_generate (glusterd_uuid);
-
-        gf_log (this->name, GF_LOG_INFO, "generated UUID: %s",
-                uuid_utoa (glusterd_uuid));
-
-        uuid_copy (priv->uuid, glusterd_uuid);
-
-        ret = glusterd_store_global_info (this);
+        ret = glusterd_uuid_generate_save ();
 
         if (ret) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "Unable to store generated UUID");
+                gf_log ("glusterd", GF_LOG_ERROR,
+                          "Unable to generate and save new UUID");
                 return ret;
         }
 
         return 0;
+}
+
+int
+glusterd_uuid_generate_save ()
+{
+        int               ret = -1;
+        glusterd_conf_t   *priv = NULL;
+        xlator_t          *this = NULL;
+
+        this = THIS;
+        GF_ASSERT (this);
+        priv = this->private;
+        GF_ASSERT (priv);
+
+        uuid_generate (priv->uuid);
+
+        gf_log (this->name, GF_LOG_INFO, "generated UUID: %s",
+                uuid_utoa (priv->uuid));
+
+        ret = glusterd_store_global_info (this);
+
+        if (ret)
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Unable to store the generated uuid %s",
+                        uuid_utoa (priv->uuid));
+
+        return ret;
 }
 
 int
@@ -156,10 +174,15 @@ glusterd_fetchspec_notify (xlator_t *this)
 
         priv = this->private;
 
-        list_for_each_entry (trans, &priv->xprt_list, list) {
-                rpcsvc_callback_submit (priv->rpc, trans, &glusterd_cbk_prog,
-                                        GF_CBK_FETCHSPEC, NULL, 0);
+        pthread_mutex_lock (&priv->xprt_lock);
+        {
+                list_for_each_entry (trans, &priv->xprt_list, list) {
+                        rpcsvc_callback_submit (priv->rpc, trans,
+                                                &glusterd_cbk_prog,
+                                                GF_CBK_FETCHSPEC, NULL, 0);
+                }
         }
+        pthread_mutex_unlock (&priv->xprt_lock);
 
         ret = 0;
 
@@ -217,12 +240,16 @@ glusterd_rpcsvc_notify (rpcsvc_t *rpc, void *xl, rpcsvc_event_t event,
         {
                 INIT_LIST_HEAD (&xprt->list);
 
+                pthread_mutex_lock (&priv->xprt_lock);
                 list_add_tail (&xprt->list, &priv->xprt_list);
+                pthread_mutex_unlock (&priv->xprt_lock);
                 break;
         }
         case RPCSVC_EVENT_DISCONNECT:
         {
+                pthread_mutex_lock (&priv->xprt_lock);
                 list_del (&xprt->list);
+                pthread_mutex_unlock (&priv->xprt_lock);
                 pmap_registry_remove (this, 0, NULL, GF_PMAP_PORT_NONE, xprt);
                 break;
         }
@@ -538,6 +565,11 @@ configure_syncdaemon (glusterd_conf_t *conf)
         runner_add_arg (&runner, "state-socket-unencoded");
         runner_argprintf (&runner, "%s/${mastervol}/${eSlave}.socket", georepdir);
         runner_add_args (&runner, ".", ".", NULL);
+        RUN_GSYNCD_CMD;
+
+        /* socketdir */
+        runinit_gsyncd_setrx (&runner, conf);
+        runner_add_args (&runner, "socketdir", GLUSTERD_SOCK_DIR, ".", ".", NULL);
         RUN_GSYNCD_CMD;
 
         /* log-file */
@@ -995,6 +1027,7 @@ init (xlator_t *this)
         conf->gfs_mgmt = &gd_brick_prog;
         strncpy (conf->workdir, workdir, PATH_MAX);
 
+        pthread_mutex_init (&conf->xprt_lock, NULL);
         INIT_LIST_HEAD (&conf->xprt_list);
 
         glusterd_friend_sm_init ();

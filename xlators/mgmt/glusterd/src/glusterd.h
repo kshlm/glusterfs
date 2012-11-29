@@ -135,6 +135,7 @@ typedef struct {
         nodesrv_t         *nfs;
         struct pmap_registry *pmap;
         struct list_head  volumes;
+        pthread_mutex_t   xprt_lock;
         struct list_head  xprt_list;
         glusterd_store_handle_t *handle;
         gf_timer_t *timer;
@@ -387,6 +388,8 @@ typedef ssize_t (*gd_serialize_t) (struct iovec outmsg, void *args);
 
 
 int glusterd_uuid_init();
+
+int glusterd_uuid_generate_save ();
 
 #define MY_UUID (__glusterd_uuid())
 
