@@ -78,6 +78,7 @@ typedef enum glusterd_op_ {
         GD_OP_LIST_VOLUME,
         GD_OP_CLEARLOCKS_VOLUME,
         GD_OP_DEFRAG_BRICK_VOLUME,
+        GD_OP_BD_OP,
         GD_OP_MAX,
 } glusterd_op_t;
 
@@ -95,7 +96,7 @@ struct glusterd_volgen {
 
 typedef struct {
         struct rpc_clnt         *rpc;
-        gf_boolean_t            running;
+        gf_boolean_t            online;
 } nodesrv_t;
 
 #define GD_OP_VERSION_KEY     "operating-version"
@@ -229,6 +230,12 @@ struct _auth {
 
 typedef struct _auth auth_t;
 
+typedef enum glusterd_vol_backend_ {
+        GD_VOL_BK_DEFAULT = 0, /* POSIX */
+        GD_VOL_BK_BD = 1,
+} glusterd_vol_backend_t;
+
+
 struct glusterd_volinfo_ {
         char                    volname[GLUSTERD_MAX_VOLUME_NAME];
         int                     type;
@@ -278,6 +285,7 @@ struct glusterd_volinfo_ {
         xlator_t                *xl;
 
         gf_boolean_t             memory_accounting;
+        glusterd_vol_backend_t   backend;
 };
 
 typedef enum gd_node_type_ {
@@ -677,6 +685,7 @@ int glusterd_op_statedump_volume (dict_t *dict, char **op_errstr);
 
 int glusterd_op_stage_clearlocks_volume (dict_t *dict, char **op_errstr);
 int glusterd_op_clearlocks_volume (dict_t *dict, char **op_errstr);
+int glusterd_op_stage_bd (dict_t *dict, char **op_errstr);
 
 /* misc */
 void glusterd_do_replace_brick (void *data);
