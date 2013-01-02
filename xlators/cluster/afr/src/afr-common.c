@@ -49,8 +49,7 @@
 #include "afr-self-heald.h"
 #include "pump.h"
 
-#define AFR_ICTX_OPENDIR_DONE_MASK     0x0000000200000000ULL
-#define AFR_ICTX_SPLIT_BRAIN_MASK      0x0000000100000000ULL
+#define AFR_ICTX_OPENDIR_DONE_MASK     0x0000000100000000ULL
 #define AFR_ICTX_READ_CHILD_MASK       0x00000000FFFFFFFFULL
 
 int
@@ -203,59 +202,86 @@ out:
         return ret;
 }
 
-afr_inode_ctx_t*
-afr_inode_ctx_get_from_addr (uint64_t addr, int32_t child_count)
+void
+afr_inode_ctx_destroy (afr_inode_ctx_t *ctx)
 {
-        int             ret  = -1;
-        afr_inode_ctx_t *ctx = NULL;
-        size_t          size = 0;
+        if (!ctx)
+                return;
+        GF_FREE (ctx->fresh_children);
+        GF_FREE (ctx);
+}
 
-        GF_ASSERT (child_count > 0);
+afr_inode_ctx_t*
+__afr_inode_ctx_get (inode_t *inode, xlator_t *this)
+{
+        int             ret      = 0;
+        uint64_t        ctx_addr = 0;
+        afr_inode_ctx_t *ctx     = NULL;
+        afr_private_t   *priv    = NULL;
 
-        if (!addr) {
-                ctx = GF_CALLOC (1, sizeof (*ctx),
-                                 gf_afr_mt_inode_ctx_t);
-                if (!ctx)
-                        goto out;
-                size = sizeof (*ctx->fresh_children);
-                ctx->fresh_children = GF_CALLOC (child_count, size,
-                                                 gf_afr_mt_int32_t);
-                if (!ctx->fresh_children)
-                        goto out;
-        } else {
-                ctx = (afr_inode_ctx_t*) (long) addr;
+        priv = this->private;
+        ret = __inode_ctx_get (inode, this, &ctx_addr);
+        if (ret < 0)
+                ctx_addr = 0;
+        if (ctx_addr != 0) {
+                ctx = (afr_inode_ctx_t*) (long) ctx_addr;
+                goto out;
         }
-        ret = 0;
+        ctx = GF_CALLOC (1, sizeof (*ctx),
+                         gf_afr_mt_inode_ctx_t);
+        if (!ctx)
+                goto fail;
+        ctx->fresh_children = GF_CALLOC (priv->child_count,
+                                         sizeof (*ctx->fresh_children),
+                                         gf_afr_mt_int32_t);
+        if (!ctx->fresh_children)
+                goto fail;
+        ret = __inode_ctx_put (inode, this, (uint64_t)ctx);
+        if (ret) {
+                gf_log_callingfn (this->name, GF_LOG_ERROR, "failed to "
+                                  "set the inode ctx (%s)",
+                                  uuid_utoa (inode->gfid));
+                goto fail;
+        }
+
 out:
-        if (ret && ctx) {
-                GF_FREE (ctx->fresh_children);
-                GF_FREE (ctx);
-                ctx = NULL;
+        return ctx;
+
+fail:
+        afr_inode_ctx_destroy (ctx);
+        return NULL;
+}
+
+afr_inode_ctx_t*
+afr_inode_ctx_get (inode_t *inode, xlator_t *this)
+{
+        afr_inode_ctx_t *ctx = NULL;
+
+        LOCK (&inode->lock);
+        {
+                ctx = __afr_inode_ctx_get (inode, this);
         }
+        UNLOCK (&inode->lock);
         return ctx;
 }
 
 void
-afr_inode_get_ctx (xlator_t *this, inode_t *inode, afr_inode_params_t *params)
+afr_inode_get_ctx_params (xlator_t *this, inode_t *inode,
+                          afr_inode_params_t *params)
 {
         GF_ASSERT (inode);
         GF_ASSERT (params);
 
-        int             ret = 0;
         afr_inode_ctx_t *ctx = NULL;
         afr_private_t   *priv = NULL;
         int             i = 0;
-        uint64_t        ctx_addr   = 0;
         int32_t         read_child = -1;
         int32_t         *fresh_children = NULL;
 
         priv = this->private;
         LOCK (&inode->lock);
         {
-                ret = __inode_ctx_get (inode, this, &ctx_addr);
-                if (ret < 0)
-                        goto unlock;
-                ctx = afr_inode_ctx_get_from_addr (ctx_addr, priv->child_count);
+                ctx = __afr_inode_ctx_get (inode, this);
                 if (!ctx)
                         goto unlock;
                 switch (params->op) {
@@ -274,12 +300,6 @@ afr_inode_get_ctx (xlator_t *this, inode_t *inode, afr_inode_params_t *params)
                         if (ctx->masks & AFR_ICTX_OPENDIR_DONE_MASK)
                                 params->u.value = _gf_true;
                         break;
-                case AFR_INODE_GET_SPLIT_BRAIN:
-                        params->u.value = _gf_false;
-                        if (ctx->masks & AFR_ICTX_SPLIT_BRAIN_MASK)
-                                params->u.value = _gf_true;
-                        ;
-                        break;
                 default:
                         GF_ASSERT (0);
                         break;
@@ -292,11 +312,16 @@ unlock:
 gf_boolean_t
 afr_is_split_brain (xlator_t *this, inode_t *inode)
 {
-        afr_inode_params_t params = {0};
+        afr_inode_ctx_t *ctx = NULL;
+        gf_boolean_t    spb  = _gf_false;
 
-        params.op = AFR_INODE_GET_SPLIT_BRAIN;
-        afr_inode_get_ctx (this, inode, &params);
-        return params.u.value;
+        ctx = afr_inode_ctx_get (inode, this);
+        if (!ctx)
+                goto out;
+        if ((ctx->mdata_spb == SPB) || (ctx->data_spb == SPB))
+                spb = _gf_true;
+out:
+        return spb;
 }
 
 gf_boolean_t
@@ -305,10 +330,9 @@ afr_is_opendir_done (xlator_t *this, inode_t *inode)
         afr_inode_params_t params = {0};
 
         params.op = AFR_INODE_GET_OPENDIR_DONE;
-        afr_inode_get_ctx (this, inode, &params);
+        afr_inode_get_ctx_params (this, inode, &params);
         return params.u.value;
 }
-
 
 int32_t
 afr_inode_get_read_ctx (xlator_t *this, inode_t *inode, int32_t *fresh_children)
@@ -317,7 +341,7 @@ afr_inode_get_read_ctx (xlator_t *this, inode_t *inode, int32_t *fresh_children)
 
         params.op = AFR_INODE_GET_READ_CTX;
         params.u.read_ctx.children = fresh_children;
-        afr_inode_get_ctx (this, inode, &params);
+        afr_inode_get_ctx_params (this, inode, &params);
         return params.u.read_ctx.read_child;
 }
 
@@ -379,31 +403,14 @@ afr_inode_ctx_set_opendir_done (afr_inode_ctx_t *ctx)
 }
 
 void
-afr_inode_ctx_set_splitbrain (afr_inode_ctx_t *ctx, gf_boolean_t set)
-{
-        uint64_t        remaining_mask = 0;
-        uint64_t        mask = 0;
-
-        if (set) {
-                remaining_mask = (~AFR_ICTX_SPLIT_BRAIN_MASK & ctx->masks);
-                mask = (0xFFFFFFFFFFFFFFFFULL & AFR_ICTX_SPLIT_BRAIN_MASK);
-                ctx->masks = remaining_mask | mask;
-        } else {
-                ctx->masks = (~AFR_ICTX_SPLIT_BRAIN_MASK & ctx->masks);
-        }
-}
-
-void
-afr_inode_set_ctx (xlator_t *this, inode_t *inode, afr_inode_params_t *params)
+afr_inode_set_ctx_params (xlator_t *this, inode_t *inode,
+                          afr_inode_params_t *params)
 {
         GF_ASSERT (inode);
         GF_ASSERT (params);
 
-        int             ret = 0;
         afr_inode_ctx_t *ctx            = NULL;
         afr_private_t   *priv           = NULL;
-        uint64_t        ctx_addr        = 0;
-        gf_boolean_t    set             = _gf_false;
         int32_t         read_child      = -1;
         int32_t         *fresh_children = NULL;
         int32_t         *stale_children = NULL;
@@ -411,10 +418,7 @@ afr_inode_set_ctx (xlator_t *this, inode_t *inode, afr_inode_params_t *params)
         priv = this->private;
         LOCK (&inode->lock);
         {
-                ret = __inode_ctx_get (inode, this, &ctx_addr);
-                if (ret < 0)
-                        ctx_addr = 0;
-                ctx = afr_inode_ctx_get_from_addr (ctx_addr, priv->child_count);
+                ctx = __afr_inode_ctx_get (inode, this);
                 if (!ctx)
                         goto unlock;
                 switch (params->op) {
@@ -434,19 +438,9 @@ afr_inode_set_ctx (xlator_t *this, inode_t *inode, afr_inode_params_t *params)
                 case AFR_INODE_SET_OPENDIR_DONE:
                         afr_inode_ctx_set_opendir_done (ctx);
                         break;
-                case AFR_INODE_SET_SPLIT_BRAIN:
-                        set = params->u.value;
-                        afr_inode_ctx_set_splitbrain (ctx, set);
-                        break;
                 default:
                         GF_ASSERT (0);
                         break;
-                }
-                ret = __inode_ctx_put (inode, this, (uint64_t)ctx);
-                if (ret) {
-                        gf_log_callingfn (this->name, GF_LOG_ERROR, "failed to "
-                                          "set the inode ctx (%s)",
-                                          uuid_utoa (inode->gfid));
                 }
         }
 unlock:
@@ -454,13 +448,16 @@ unlock:
 }
 
 void
-afr_set_split_brain (xlator_t *this, inode_t *inode, gf_boolean_t set)
+afr_set_split_brain (xlator_t *this, inode_t *inode, afr_spb_state_t mdata_spb,
+                     afr_spb_state_t data_spb)
 {
-        afr_inode_params_t      params = {0};
+        afr_inode_ctx_t *ctx = NULL;
 
-        params.op = AFR_INODE_SET_SPLIT_BRAIN;
-        params.u.value          = set;
-        afr_inode_set_ctx (this, inode, &params);
+        ctx = afr_inode_ctx_get (inode, this);
+        if (mdata_spb != DONT_KNOW)
+                ctx->mdata_spb = mdata_spb;
+        if (data_spb != DONT_KNOW)
+                ctx->data_spb = data_spb;
 }
 
 void
@@ -469,7 +466,7 @@ afr_set_opendir_done (xlator_t *this, inode_t *inode)
         afr_inode_params_t params = {0};
 
         params.op = AFR_INODE_SET_OPENDIR_DONE;
-        afr_inode_set_ctx (this, inode, &params);
+        afr_inode_set_ctx_params (this, inode, &params);
 }
 
 void
@@ -488,7 +485,7 @@ afr_inode_set_read_ctx (xlator_t *this, inode_t *inode, int32_t read_child,
         params.op = AFR_INODE_SET_READ_CTX;
         params.u.read_ctx.read_child     = read_child;
         params.u.read_ctx.children = fresh_children;
-        afr_inode_set_ctx (this, inode, &params);
+        afr_inode_set_ctx_params (this, inode, &params);
 }
 
 void
@@ -501,7 +498,7 @@ afr_inode_rm_stale_children (xlator_t *this, inode_t *inode,
 
         params.op = AFR_INODE_RM_STALE_CHILDREN;
         params.u.read_ctx.children = stale_children;
-        afr_inode_set_ctx (this, inode, &params);
+        afr_inode_set_ctx_params (this, inode, &params);
 }
 
 gf_boolean_t
@@ -767,6 +764,13 @@ out:
 }
 
 void
+afr_xattr_array_destroy (dict_t **xattr, unsigned int child_count)
+{
+        afr_reset_xattr (xattr, child_count);
+        GF_FREE (xattr);
+}
+
+void
 afr_local_sh_cleanup (afr_local_t *local, xlator_t *this)
 {
         afr_self_heal_t *sh = NULL;
@@ -782,10 +786,7 @@ afr_local_sh_cleanup (afr_local_t *local, xlator_t *this)
         if (sh->inode)
                 inode_unref (sh->inode);
 
-        if (sh->xattr) {
-                afr_reset_xattr (sh->xattr, priv->child_count);
-                GF_FREE (sh->xattr);
-        }
+        afr_xattr_array_destroy (sh->xattr, priv->child_count);
 
         GF_FREE (sh->child_errno);
 
@@ -2462,6 +2463,7 @@ __afr_fd_ctx_set (xlator_t *this, fd_t *fd)
 	pthread_mutex_init (&fd_ctx->delay_lock, NULL);
         INIT_LIST_HEAD (&fd_ctx->paused_calls);
         INIT_LIST_HEAD (&fd_ctx->entries);
+        fd_ctx->call_child = -1;
 
         ret = __fd_ctx_set (fd, this, (uint64_t)(long) fd_ctx);
         if (ret)
@@ -2489,100 +2491,71 @@ afr_fd_ctx_set (xlator_t *this, fd_t *fd)
 /* {{{ flush */
 
 int
-afr_flush_unwind (call_frame_t *frame, xlator_t *this)
+afr_flush_cbk(call_frame_t *frame, void *cookie, xlator_t *this,
+              int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         afr_local_t *   local = NULL;
-        call_frame_t   *main_frame = NULL;
-
-        local = frame->local;
-
-        LOCK (&frame->lock);
-        {
-                if (local->transaction.main_frame)
-                        main_frame = local->transaction.main_frame;
-                local->transaction.main_frame = NULL;
-        }
-        UNLOCK (&frame->lock);
-
-        if (main_frame) {
-                AFR_STACK_UNWIND (flush, main_frame,
-                                  local->op_ret, local->op_errno,
-                                  NULL);
-        }
-
-        return 0;
-}
-
-
-int
-afr_flush_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno, dict_t *xdata)
-{
-        afr_local_t *   local = NULL;
-        afr_private_t * priv  = NULL;
         int call_count  = -1;
-        int child_index = (long) cookie;
-        int need_unwind = 0;
 
         local = frame->local;
-        priv  = this->private;
 
         LOCK (&frame->lock);
         {
-                if (afr_fop_failed (op_ret, op_errno))
-                        afr_transaction_fop_failed (frame, this, child_index);
-
                 if (op_ret != -1) {
                         if (local->success_count == 0) {
                                 local->op_ret = op_ret;
                         }
                         local->success_count++;
-
-                        if (local->success_count == priv->wait_count) {
-                                need_unwind = 1;
-                        }
                 }
 
                 local->op_errno = op_errno;
         }
         UNLOCK (&frame->lock);
 
-        if (need_unwind)
-                afr_flush_unwind (frame, this);
+	call_count = afr_frame_return (frame);
 
-        call_count = afr_frame_return (frame);
-
-        if (call_count == 0) {
-                local->transaction.resume (frame, this);
-        }
+	if (call_count == 0)
+		AFR_STACK_UNWIND(flush, frame, local->op_ret,
+				 local->op_errno, NULL);
 
         return 0;
 }
 
-
 int
-afr_flush_wind (call_frame_t *frame, xlator_t *this)
+afr_flush (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
 {
-        afr_local_t *local = NULL;
-        afr_private_t *priv = NULL;
-        int i = 0;
-        int call_count = -1;
+        afr_private_t *priv  = NULL;
+        afr_local_t   *local = NULL;
+        int            ret        = -1;
+        int            op_errno   = 0;
+	int	       call_count = -1;
+	int	       i = 0;
 
-        local = frame->local;
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (this->private, out);
+
         priv = this->private;
 
-        call_count = afr_up_children_count (local->child_up, priv->child_count);
+	AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+	local = frame->local;
 
-        if (call_count == 0) {
-                local->transaction.resume (frame, this);
-                return 0;
-        }
+	ret = afr_local_init(local, priv, &op_errno);
+	if (ret < 0)
+		goto out;
 
-        local->call_count = call_count;
+	local->fd = fd_ref(fd);
+        call_count = local->call_count;
+
+	/*
+	 * Ideally we should synchronize flush against completion of writing
+	 * the delayed changelog, but for now we just push it out first...
+	 */
+	afr_delayed_changelog_wake_up(this, fd);
 
         for (i = 0; i < priv->child_count; i++) {
                 if (local->child_up[i]) {
-                        STACK_WIND_COOKIE (frame, afr_flush_wind_cbk,
+                        STACK_WIND_COOKIE (frame, afr_flush_cbk,
                                            (void *) (long) i,
                                            priv->children[i],
                                            priv->children[i]->fops->flush,
@@ -2593,84 +2566,11 @@ afr_flush_wind (call_frame_t *frame, xlator_t *this)
                 }
         }
 
-        return 0;
-}
+	ret = 0;
 
-
-int
-afr_flush_done (call_frame_t *frame, xlator_t *this)
-{
-        afr_local_t *local = NULL;
-
-        local = frame->local;
-
-        local->transaction.unwind (frame, this);
-
-        AFR_STACK_DESTROY (frame);
-
-        return 0;
-}
-
-
-int
-afr_flush (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
-{
-        afr_private_t *priv  = NULL;
-        afr_local_t   *local = NULL;
-        call_frame_t  *transaction_frame = NULL;
-        int            ret        = -1;
-        int            op_errno   = 0;
-
-        VALIDATE_OR_GOTO (frame, out);
-        VALIDATE_OR_GOTO (this, out);
-        VALIDATE_OR_GOTO (this->private, out);
-
-        priv = this->private;
-
-        transaction_frame = copy_frame (frame);
-        if (!transaction_frame) {
-                op_errno = ENOMEM;
-                goto out;
-        }
-
-        AFR_LOCAL_ALLOC_OR_GOTO (transaction_frame->local, out);
-        local = transaction_frame->local;
-
-        ret = afr_local_init (local, priv, &op_errno);
-        if (ret < 0)
-                goto out;
-
-        local->op = GF_FOP_FLUSH;
-
-        local->transaction.fop    = afr_flush_wind;
-        local->transaction.done   = afr_flush_done;
-        local->transaction.unwind = afr_flush_unwind;
-
-        local->fd                 = fd_ref (fd);
-
-        local->transaction.main_frame = frame;
-        local->transaction.start  = 0;
-        local->transaction.len    = 0;
-
-        ret = afr_open_fd_fix (transaction_frame, this, _gf_false);
-        if (ret) {
-                op_errno = -ret;
-                goto out;
-        }
-        ret = afr_transaction (transaction_frame, this, AFR_DATA_TRANSACTION);
-        if (ret < 0) {
-            op_errno = -ret;
-            goto out;
-        }
-
-        ret = 0;
 out:
-        if (ret < 0) {
-                if (transaction_frame)
-                        AFR_STACK_DESTROY (transaction_frame);
-
-                AFR_STACK_UNWIND (flush, frame, -1, op_errno, NULL);
-        }
+	if (ret < 0)
+		AFR_STACK_UNWIND(flush, frame, -1, op_errno, NULL);
 
         return 0;
 }
@@ -4333,4 +4233,43 @@ xlator_subvolume_count (xlator_t *this)
         for (list = this->children; list; list = list->next)
                 i++;
         return i;
+}
+
+inline gf_boolean_t
+afr_is_errno_set (int *child_errno, int child)
+{
+        return child_errno[child];
+}
+
+inline gf_boolean_t
+afr_is_errno_unset (int *child_errno, int child)
+{
+        return !afr_is_errno_set (child_errno, child);
+}
+
+void
+afr_prepare_new_entry_pending_matrix (int32_t **pending,
+                                      gf_boolean_t (*is_pending) (int *, int),
+                                      int *ctx, struct iatt *buf,
+                                      unsigned int child_count)
+{
+        int midx = 0;
+        int idx  = 0;
+        int i    = 0;
+
+        midx = afr_index_for_transaction_type (AFR_METADATA_TRANSACTION);
+        if (IA_ISDIR (buf->ia_type))
+                idx = afr_index_for_transaction_type (AFR_ENTRY_TRANSACTION);
+        else if (IA_ISREG (buf->ia_type))
+                idx = afr_index_for_transaction_type (AFR_DATA_TRANSACTION);
+        else
+                idx = -1;
+        for (i = 0; i < child_count; i++) {
+                if (is_pending (ctx, i)) {
+                        pending[i][midx] = hton32 (1);
+                        if (idx == -1)
+                                continue;
+                        pending[i][idx] = hton32 (1);
+                }
+        }
 }

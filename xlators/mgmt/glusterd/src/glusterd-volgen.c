@@ -108,6 +108,7 @@ static struct volopt_map_entry glusterd_volopt_map[] = {
         {"cluster.rebalance-stats",              "cluster/distribute", NULL, NULL, NO_DOC, 0, 2},
         {"cluster.subvols-per-directory",        "cluster/distribute", "directory-layout-spread", NULL, NO_DOC, 0, 2},
         {"cluster.readdir-optimize",             "cluster/distribute", NULL, NULL, NO_DOC, 0, 2},
+        {"cluster.nufa",                         "cluster/distribute", "!nufa", NULL, NO_DOC, 0, 2},
 
         /* AFR xlator options */
         {"cluster.entry-change-log",             "cluster/replicate",  NULL, NULL, NO_DOC, 0, 1},
@@ -126,10 +127,11 @@ static struct volopt_map_entry glusterd_volopt_map[] = {
         {"cluster.metadata-change-log",          "cluster/replicate",  NULL, NULL, NO_DOC, 0, 1},
         {"cluster.data-self-heal-algorithm",     "cluster/replicate",  "data-self-heal-algorithm", NULL, DOC, 0, 1},
         {"cluster.eager-lock",                   "cluster/replicate",  NULL, NULL, NO_DOC, 0, 1},
-        {"cluster.quorum-type",                  "cluster/replicate",  "quorum-type", NULL, NO_DOC, 0, 1},
-        {"cluster.quorum-count",                 "cluster/replicate",  "quorum-count", NULL, NO_DOC, 0, 1},
+        {"cluster.quorum-type",                  "cluster/replicate",  "quorum-type", NULL, DOC, 0, 1},
+        {"cluster.quorum-count",                 "cluster/replicate",  "quorum-count", NULL, DOC, 0, 1},
         {"cluster.choose-local",                 "cluster/replicate",  NULL, NULL, DOC, 0, 2},
         {"cluster.self-heal-readdir-size",       "cluster/replicate",  NULL, NULL, DOC, 0, 2},
+        {"cluster.readdir-failover",             "cluster/replicate",  NULL, NULL, DOC, 0, 2},
 
         /* Stripe xlator options */
         {"cluster.stripe-block-size",            "cluster/stripe",     "block-size", NULL, DOC, 0, 1},
@@ -254,8 +256,8 @@ static struct volopt_map_entry glusterd_volopt_map[] = {
         {"storage.owner-gid",                    "storage/posix",             "brick-gid", NULL, DOC, 0, 2},
         {"config.memory-accounting",             "configuration",             "!config", NULL, DOC, 0, 2},
         {"config.transport",                     "configuration",             "!config", NULL, DOC, 0, 2},
-        {GLUSTERD_QUORUM_TYPE_KEY,               "mgmt/glusterd",             NULL,         "off", DOC, 0},
-        {GLUSTERD_QUORUM_RATIO_KEY,              "mgmt/glusterd",             NULL,         "0", DOC, 0},
+        {GLUSTERD_QUORUM_TYPE_KEY,               "mgmt/glusterd",             NULL, "off", DOC, 0, 2},
+        {GLUSTERD_QUORUM_RATIO_KEY,              "mgmt/glusterd",             NULL, "0", DOC, 0, 2},
         {NULL,                                                                }
 };
 
@@ -2398,9 +2400,19 @@ volgen_graph_build_dht_cluster (volgen_graph_t *graph,
         int                     ret                      = -1;
         char                    *decommissioned_children = NULL;
         xlator_t                *dht                     = NULL;
+        char                    *optstr                  = NULL;
+        gf_boolean_t             use_nufa                = _gf_false;
 
+        if (dict_get_str(volinfo->dict,"cluster.nufa",&optstr) == 0) {
+                /* Keep static analyzers quiet by "using" the value. */
+                ret = gf_string2boolean(optstr,&use_nufa);
+        }
+                        
         clusters = volgen_graph_build_clusters (graph,  volinfo,
-                                                "cluster/distribute", "%s-dht",
+                                                use_nufa
+                                                        ? "cluster/nufa"
+                                                        : "cluster/distribute",
+                                                "%s-dht",
                                                 child_count, child_count);
         if (clusters < 0)
                 goto out;

@@ -34,7 +34,9 @@ from gluster.swift.common import utils
 #
 _xattrs = {}
 _xattr_op_cnt = defaultdict(int)
-_xattr_err = {}
+_xattr_set_err = {}
+_xattr_get_err = {}
+_xattr_rem_err = {}
 
 def _xkey(path, key):
     return "%s:%s" % (path, key)
@@ -42,9 +44,9 @@ def _xkey(path, key):
 def _setxattr(path, key, value):
     _xattr_op_cnt['set'] += 1
     xkey = _xkey(path, key)
-    if xkey in _xattr_err:
+    if xkey in _xattr_set_err:
         e = IOError()
-        e.errno = _xattr_err[xkey]
+        e.errno = _xattr_set_err[xkey]
         raise e
     global _xattrs
     _xattrs[xkey] = value
@@ -52,9 +54,9 @@ def _setxattr(path, key, value):
 def _getxattr(path, key):
     _xattr_op_cnt['get'] += 1
     xkey = _xkey(path, key)
-    if xkey in _xattr_err:
+    if xkey in _xattr_get_err:
         e = IOError()
-        e.errno = _xattr_err[xkey]
+        e.errno = _xattr_get_err[xkey]
         raise e
     global _xattrs
     if xkey in _xattrs:
@@ -68,9 +70,9 @@ def _getxattr(path, key):
 def _removexattr(path, key):
     _xattr_op_cnt['remove'] += 1
     xkey = _xkey(path, key)
-    if xkey in _xattr_err:
+    if xkey in _xattr_rem_err:
         e = IOError()
-        e.errno = _xattr_err[xkey]
+        e.errno = _xattr_rem_err[xkey]
         raise e
     global _xattrs
     if xkey in _xattrs:
@@ -85,8 +87,10 @@ def _initxattr():
     _xattrs = {}
     global _xattr_op_cnt
     _xattr_op_cnt = defaultdict(int)
-    global _xattr_err
-    _xattr_err = {}
+    global _xattr_set_err, _xattr_get_err, _xattr_rem_err
+    _xattr_set_err = {}
+    _xattr_get_err = {}
+    _xattr_rem_err = {}
 
     # Save the current methods
     global _xattr_set;    _xattr_set    = xattr.set
@@ -141,7 +145,7 @@ class TestUtils(unittest.TestCase):
         path = "/tmp/foo/w"
         orig_d = { 'bar' : 'foo' }
         xkey = _xkey(path, utils.METADATA_KEY)
-        _xattr_err[xkey] = errno.EOPNOTSUPP
+        _xattr_set_err[xkey] = errno.EOPNOTSUPP
         try:
             utils.write_metadata(path, orig_d)
         except IOError as e:
@@ -182,7 +186,7 @@ class TestUtils(unittest.TestCase):
         path = "/tmp/foo/c"
         xkey = _xkey(path, utils.METADATA_KEY)
         _xattrs[xkey] = pickle.dumps({ 'a': 'y' }, utils.PICKLE_PROTOCOL)
-        _xattr_err[xkey] = errno.EOPNOTSUPP
+        _xattr_rem_err[xkey] = errno.EOPNOTSUPP
         try:
             utils.clean_metadata(path)
         except IOError as e:
@@ -211,7 +215,7 @@ class TestUtils(unittest.TestCase):
         expected_d = { 'a': 'y' }
         xkey = _xkey(path, utils.METADATA_KEY)
         _xattrs[xkey] = pickle.dumps(expected_d, utils.PICKLE_PROTOCOL)
-        _xattr_err[xkey] = errno.EOPNOTSUPP
+        _xattr_get_err[xkey] = errno.EOPNOTSUPP
         try:
             res_d = utils.read_metadata(path)
         except IOError as e:
@@ -417,9 +421,9 @@ class TestUtils(unittest.TestCase):
             o_count = 3
             b_used = 47
             return o_list, o_count, b_used
-        td = tempfile.mkdtemp()
         orig_gcd = utils.get_container_details
         utils.get_container_details = _mock_get_container_details
+        td = tempfile.mkdtemp()
         try:
             exp_md = {
                 utils.X_TYPE: (utils.CONTAINER, 0),
@@ -439,9 +443,9 @@ class TestUtils(unittest.TestCase):
             c_list = [ '123', 'abc' ]
             c_count = 2
             return c_list, c_count
-        td = tempfile.mkdtemp()
         orig_gad = utils.get_account_details
         utils.get_account_details = _mock_get_account_details
+        td = tempfile.mkdtemp()
         try:
             exp_md = {
                 utils.X_TYPE: (utils.ACCOUNT, 0),
@@ -752,12 +756,13 @@ class TestUtils(unittest.TestCase):
             utils.do_stat = orig_ds
 
     def test_get_container_details_from_fs(self):
-        td = tempfile.mkdtemp()
-        tf = tarfile.open("common/data/account_tree.tar.bz2", "r:bz2")
         orig_cwd = os.getcwd()
-        os.chdir(td)
-        tf.extractall()
+        td = tempfile.mkdtemp()
         try:
+            tf = tarfile.open("common/data/account_tree.tar.bz2", "r:bz2")
+            os.chdir(td)
+            tf.extractall()
+
             ad = utils._get_account_details_from_fs(td, None)
             assert ad.mtime == os.path.getmtime(td)
             assert ad.container_count == 3
@@ -775,12 +780,13 @@ class TestUtils(unittest.TestCase):
         assert cd.dir_list == []
 
     def test_get_account_details_from_fs(self):
-        td = tempfile.mkdtemp()
-        tf = tarfile.open("common/data/container_tree.tar.bz2", "r:bz2")
         orig_cwd = os.getcwd()
-        os.chdir(td)
-        tf.extractall()
+        td = tempfile.mkdtemp()
         try:
+            tf = tarfile.open("common/data/container_tree.tar.bz2", "r:bz2")
+            os.chdir(td)
+            tf.extractall()
+
             cd = utils._get_container_details_from_fs(td)
             assert cd.bytes_used == 30, repr(cd.bytes_used)
             assert cd.object_count == 8, repr(cd.object_count)
@@ -816,3 +822,162 @@ class TestUtils(unittest.TestCase):
         assert ad.mtime == os.path.getmtime(tf.name)
         assert ad.container_count == 0
         assert ad.container_list == []
+
+    def test_write_pickle(self):
+        td = tempfile.mkdtemp()
+        try:
+            fpp = os.path.join(td, 'pp')
+            utils.write_pickle('pickled peppers', fpp)
+            with open(fpp, "rb") as f:
+                contents = f.read()
+            s = pickle.loads(contents)
+            assert s == 'pickled peppers', repr(s)
+        finally:
+            shutil.rmtree(td)
+
+    def test_write_pickle_ignore_tmp(self):
+        tf = tempfile.NamedTemporaryFile()
+        td = tempfile.mkdtemp()
+        try:
+            fpp = os.path.join(td, 'pp')
+            # Also test an explicity pickle protocol
+            utils.write_pickle('pickled peppers', fpp, tmp=tf.name, pickle_protocol=2)
+            with open(fpp, "rb") as f:
+                contents = f.read()
+            s = pickle.loads(contents)
+            assert s == 'pickled peppers', repr(s)
+            with open(tf.name, "rb") as f:
+                contents = f.read()
+            assert contents == ''
+        finally:
+            shutil.rmtree(td)
+
+    def test_check_user_xattr_bad_path(self):
+        assert False == utils.check_user_xattr("/tmp/foo/bar/check/user/xattr")
+
+    def test_check_user_xattr_bad_set(self):
+        td = tempfile.mkdtemp()
+        xkey = _xkey(td, 'user.test.key1')
+        _xattr_set_err[xkey] = errno.EOPNOTSUPP
+        try:
+            assert False == utils.check_user_xattr(td)
+        except IOError:
+            pass
+        else:
+            self.fail("Expected IOError")
+        finally:
+            shutil.rmtree(td)
+
+    def test_check_user_xattr_bad_remove(self):
+        td = tempfile.mkdtemp()
+        xkey = _xkey(td, 'user.test.key1')
+        _xattr_rem_err[xkey] = errno.EOPNOTSUPP
+        try:
+            utils.check_user_xattr(td)
+        except IOError:
+            self.fail("Unexpected IOError")
+        finally:
+            shutil.rmtree(td)
+
+    def test_check_user_xattr(self):
+        td = tempfile.mkdtemp()
+        try:
+            assert utils.check_user_xattr(td)
+        finally:
+            shutil.rmtree(td)
+
+    def test_validate_container_empty(self):
+        ret = utils.validate_container({})
+        assert ret == False
+
+    def test_validate_container_missing_keys(self):
+        ret = utils.validate_container({ 'foo': 'bar' })
+        assert ret == False
+
+    def test_validate_container_bad_type(self):
+        md = { utils.X_TYPE: ('bad', 0),
+               utils.X_TIMESTAMP: ('na', 0),
+               utils.X_PUT_TIMESTAMP: ('na', 0),
+               utils.X_OBJECTS_COUNT: ('na', 0),
+               utils.X_BYTES_USED: ('na', 0) }
+        ret = utils.validate_container(md)
+        assert ret == False
+
+    def test_validate_container_good_type(self):
+        md = { utils.X_TYPE: (utils.CONTAINER, 0),
+               utils.X_TIMESTAMP: ('na', 0),
+               utils.X_PUT_TIMESTAMP: ('na', 0),
+               utils.X_OBJECTS_COUNT: ('na', 0),
+               utils.X_BYTES_USED: ('na', 0) }
+        ret = utils.validate_container(md)
+        assert ret
+
+    def test_validate_account_empty(self):
+        ret = utils.validate_account({})
+        assert ret == False
+
+    def test_validate_account_missing_keys(self):
+        ret = utils.validate_account({ 'foo': 'bar' })
+        assert ret == False
+
+    def test_validate_account_bad_type(self):
+        md = { utils.X_TYPE: ('bad', 0),
+               utils.X_TIMESTAMP: ('na', 0),
+               utils.X_PUT_TIMESTAMP: ('na', 0),
+               utils.X_OBJECTS_COUNT: ('na', 0),
+               utils.X_BYTES_USED: ('na', 0),
+               utils.X_CONTAINER_COUNT: ('na', 0) }
+        ret = utils.validate_account(md)
+        assert ret == False
+
+    def test_validate_account_good_type(self):
+        md = { utils.X_TYPE: (utils.ACCOUNT, 0),
+               utils.X_TIMESTAMP: ('na', 0),
+               utils.X_PUT_TIMESTAMP: ('na', 0),
+               utils.X_OBJECTS_COUNT: ('na', 0),
+               utils.X_BYTES_USED: ('na', 0),
+               utils.X_CONTAINER_COUNT: ('na', 0) }
+        ret = utils.validate_account(md)
+        assert ret
+
+    def test_validate_object_empty(self):
+        ret = utils.validate_object({})
+        assert ret == False
+
+    def test_validate_object_missing_keys(self):
+        ret = utils.validate_object({ 'foo': 'bar' })
+        assert ret == False
+
+    def test_validate_object_bad_type(self):
+        md = { utils.X_TIMESTAMP: 'na',
+               utils.X_CONTENT_TYPE: 'na',
+               utils.X_ETAG: 'bad',
+               utils.X_CONTENT_LENGTH: 'na',
+               utils.X_TYPE: 'bad',
+               utils.X_OBJECT_TYPE: 'na' }
+        ret = utils.validate_object(md)
+        assert ret == False
+
+    def test_validate_object_good_type(self):
+        md = { utils.X_TIMESTAMP: 'na',
+               utils.X_CONTENT_TYPE: 'na',
+               utils.X_ETAG: 'bad',
+               utils.X_CONTENT_LENGTH: 'na',
+               utils.X_TYPE: utils.OBJECT,
+               utils.X_OBJECT_TYPE: 'na' }
+        ret = utils.validate_object(md)
+        assert ret
+
+    def test_is_marker_empty(self):
+        assert False == utils.is_marker(None)
+
+    def test_is_marker_missing(self):
+        assert False == utils.is_marker( { 'foo': 'bar' } )
+
+    def test_is_marker_not_marker(self):
+        md = { utils.X_OBJECT_TYPE: utils.DIR }
+        assert False == utils.is_marker(md)
+
+    def test_is_marker(self):
+        md = { utils.X_OBJECT_TYPE: utils.MARKER_DIR }
+        assert utils.is_marker(md)

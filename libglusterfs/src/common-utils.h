@@ -76,6 +76,7 @@ void trap (void);
  * nfs port in volume status.
  */
 #define GF_NFS3_PORT    38467
+#define GF_CLIENT_PORT_CEILING 1024
 
 enum _gf_boolean
 {
@@ -171,7 +172,6 @@ void gf_print_trace (int32_t signal, glusterfs_ctx_t *ctx);
                 }                                                       \
         } while (0)
 
-
 #define GF_IF_INTERNAL_XATTR_GOTO(pattern, dict, op_errno, label)       \
         do {                                                            \
                 if (!dict) {                                            \
@@ -179,13 +179,9 @@ void gf_print_trace (int32_t signal, glusterfs_ctx_t *ctx);
                                 "setxattr dict is null");               \
                         goto label;                                     \
                 }                                                       \
-                int _handle_keyvalue_pair (dict_t *d, char *k,          \
-                                           data_t *v, void *tmp)        \
-                {                                                       \
-                        return 0;                                       \
-                }                                                       \
-                if (dict_foreach_fnmatch (dict, pattern,                  \
-                                          _handle_keyvalue_pair, NULL) > 0) { \
+                if (dict_foreach_fnmatch (dict, pattern,                \
+                                          dict_null_foreach_fn,         \
+                                          NULL) > 0) {                  \
                         op_errno = EPERM;                               \
                         gf_log (this->name, GF_LOG_ERROR,               \
                                 "attempt to set internal"               \
@@ -344,6 +340,28 @@ iov_unload (char *buf, const struct iovec *vector, int count)
 		memcpy (buf + copied, vector[i].iov_base, vector[i].iov_len);
 		copied += vector[i].iov_len;
 	}
+}
+
+
+static inline size_t
+iov_load (const struct iovec *vector, int count, char *buf, int size)
+{
+	size_t left = size;
+	size_t cp = 0;
+	int    ret = 0;
+	int    i = 0;
+
+	while (left && i < count) {
+		cp = min (vector[i].iov_len, left);
+		if (vector[i].iov_base != buf + (size - left))
+			memcpy (vector[i].iov_base, buf + (size - left), cp);
+		ret += cp;
+		left -= cp;
+		if (left)
+			i++;
+	}
+
+	return ret;
 }
 
 
@@ -553,5 +571,8 @@ uint64_t get_mem_size ();
 int gf_strip_whitespace (char *str, int len);
 int gf_canonicalize_path (char *path);
 char *generate_glusterfs_ctx_id (void);
+char *gf_get_reserved_ports();
+int gf_process_reserved_ports (gf_boolean_t ports[]);
+gf_boolean_t gf_ports_reserved (char *blocked_port, gf_boolean_t *ports);
 
 #endif /* _COMMON_UTILS_H */

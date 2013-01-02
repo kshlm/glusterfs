@@ -140,7 +140,6 @@ struct dht_local {
         struct {
                 uint32_t         hole_cnt;
                 uint32_t         overlaps_cnt;
-                uint32_t         missing;
                 uint32_t         down;
                 uint32_t         misc;
                 dht_selfheal_dir_cbk_t   dir_cbk;
@@ -264,6 +263,7 @@ struct dht_conf {
         /* to keep track of nodes which are decomissioned */
         xlator_t     **decommissioned_bricks;
         int            decommission_in_progress;
+        int            decommission_subvols_cnt;
 
         /* defrag related */
         gf_defrag_info_t *defrag;
@@ -380,7 +380,7 @@ int                                      dht_layout_normalize (xlator_t *this, l
 int dht_layout_anomalies (xlator_t      *this, loc_t *loc, dht_layout_t *layout,
                           uint32_t      *holes_p, uint32_t *overlaps_p,
                           uint32_t      *missing_p, uint32_t *down_p,
-                          uint32_t      *misc_p);
+                          uint32_t      *misc_p, uint32_t *no_space_p);
 int dht_layout_dir_mismatch (xlator_t   *this, dht_layout_t *layout,
                              xlator_t   *subvol, loc_t *loc, dict_t *xattr);
 
@@ -722,4 +722,6 @@ int
 dht_dir_attr_heal_done (int ret, call_frame_t *sync_frame, void *data);
 int
 dht_dir_has_layout (dict_t *xattr);
+gf_boolean_t
+dht_is_subvol_in_layout (dht_layout_t *layout, xlator_t *xlator);
 #endif/* _DHT_H */

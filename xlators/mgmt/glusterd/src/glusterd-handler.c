@@ -370,7 +370,7 @@ glusterd_add_volume_detail_to_dict (glusterd_volinfo_t *volinfo,
                 goto out;
 
         snprintf (key, 256, "volume%d.rebalance", count);
-        ret = dict_set_int32 (volumes, key, volinfo->defrag_cmd);
+        ret = dict_set_int32 (volumes, key, volinfo->rebal.defrag_cmd);
         if (ret)
                 goto out;
 
@@ -445,7 +445,8 @@ out:
 }
 
 int32_t
-glusterd_op_txn_begin (rpcsvc_request_t *req, glusterd_op_t op, void *ctx)
+glusterd_op_txn_begin (rpcsvc_request_t *req, glusterd_op_t op, void *ctx,
+                       char *err_str, size_t err_len)
 {
         int32_t                  ret    = -1;
         xlator_t                *this   = NULL;
@@ -464,6 +465,8 @@ glusterd_op_txn_begin (rpcsvc_request_t *req, glusterd_op_t op, void *ctx)
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "Unable to acquire local lock, ret: %d", ret);
+                snprintf (err_str, err_len, "Another transaction is in progress. "
+                          "Please try again after sometime.");
                 goto out;
         }
 
@@ -500,7 +503,9 @@ glusterd_handle_cluster_lock (rpcsvc_request_t *req)
 
         GF_ASSERT (req);
 
-        if (!xdr_to_generic (req->msg[0], &lock_req, (xdrproc_t)xdr_gd1_mgmt_cluster_lock_req)) {
+        ret = xdr_to_generic (req->msg[0], &lock_req,
+                              (xdrproc_t)xdr_gd1_mgmt_cluster_lock_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -594,7 +599,10 @@ glusterd_handle_stage_op (rpcsvc_request_t *req)
         glusterd_peerinfo_t             *peerinfo = NULL;
 
         GF_ASSERT (req);
-        if (!xdr_to_generic (req->msg[0], &op_req, (xdrproc_t)xdr_gd1_mgmt_stage_op_req)) {
+
+        ret = xdr_to_generic (req->msg[0], &op_req,
+                              (xdrproc_t)xdr_gd1_mgmt_stage_op_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -633,7 +641,9 @@ glusterd_handle_commit_op (rpcsvc_request_t *req)
 
         GF_ASSERT (req);
 
-        if (!xdr_to_generic (req->msg[0], &op_req, (xdrproc_t)xdr_gd1_mgmt_commit_op_req)) {
+        ret = xdr_to_generic (req->msg[0], &op_req,
+                              (xdrproc_t)xdr_gd1_mgmt_commit_op_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -680,8 +690,9 @@ glusterd_handle_cli_probe (rpcsvc_request_t *req)
         GF_ASSERT (req);
         this = THIS;
 
-        if (!xdr_to_generic (req->msg[0], &cli_req,
-                             (xdrproc_t)xdr_gf1_cli_probe_req)) {
+        ret = xdr_to_generic (req->msg[0], &cli_req,
+                              (xdrproc_t)xdr_gf1_cli_probe_req);
+        if (ret < 0)  {
                 //failed to decode msg;
                 gf_log ("", GF_LOG_ERROR, "xdr decoding error");
                 req->rpc_err = GARBAGE_ARGS;
@@ -760,8 +771,9 @@ glusterd_handle_cli_deprobe (rpcsvc_request_t *req)
         GF_ASSERT (priv);
         GF_ASSERT (req);
 
-        if (!xdr_to_generic (req->msg[0], &cli_req,
-            (xdrproc_t)xdr_gf1_cli_deprobe_req)) {
+        ret = xdr_to_generic (req->msg[0], &cli_req,
+                              (xdrproc_t)xdr_gf1_cli_deprobe_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -841,7 +853,9 @@ glusterd_handle_cli_list_friends (rpcsvc_request_t *req)
 
         GF_ASSERT (req);
 
-        if (!xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf1_cli_peer_list_req)) {
+        ret = xdr_to_generic (req->msg[0], &cli_req,
+                              (xdrproc_t)xdr_gf1_cli_peer_list_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -888,7 +902,8 @@ glusterd_handle_cli_get_volume (rpcsvc_request_t *req)
 
         GF_ASSERT (req);
 
-        if (!xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req)) {
+        ret = xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -939,13 +954,13 @@ glusterd_handle_cli_bd_op (rpcsvc_request_t *req)
         gf_cli_req       cli_req    = { {0,} };
         dict_t           *dict      = NULL;
         char             *volname   = NULL;
-        char             *op_errstr = NULL;
+        char             op_errstr[2048] = {0,};
         glusterd_op_t    cli_op     = GD_OP_BD_OP;
 
         GF_ASSERT (req);
 
-        if (!xdr_to_generic (req->msg[0], &cli_req,
-                                (xdrproc_t)xdr_gf_cli_req)) {
+        ret = xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req);
+        if (ret < 0) {
                 /* failed to decode msg */
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -977,7 +992,8 @@ glusterd_handle_cli_bd_op (rpcsvc_request_t *req)
                 goto out;
         }
 
-        ret = glusterd_op_begin (req, GD_OP_BD_OP, dict);
+        ret = glusterd_op_begin (req, GD_OP_BD_OP, dict, op_errstr,
+                                 sizeof (op_errstr));
         gf_cmd_log ("bd op: %s", ((ret == 0) ? "SUCCESS": "FAILED"));
 out:
         if (ret && dict)
@@ -987,11 +1003,11 @@ out:
         glusterd_op_sm ();
 
         if (ret) {
-                if (!op_errstr)
-                        op_errstr = gf_strdup ("operation failed");
+                if (op_errstr[0] == '\0')
+                        snprintf (op_errstr, sizeof (op_errstr),
+                                  "Operation failed");
                 ret = glusterd_op_send_cli_response (cli_op, ret, 0,
                                 req, NULL, op_errstr);
-                GF_FREE (op_errstr);
         }
 
         return ret;
@@ -1016,7 +1032,8 @@ glusterd_handle_cli_uuid_reset (rpcsvc_request_t *req)
         priv = this->private;
         GF_ASSERT (priv);
 
-        if (!xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req)) {
+        ret = xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -1158,11 +1175,12 @@ out:
 }
 
 int32_t
-glusterd_op_begin (rpcsvc_request_t *req, glusterd_op_t op, void *ctx)
+glusterd_op_begin (rpcsvc_request_t *req, glusterd_op_t op, void *ctx,
+                   char *err_str, size_t err_len)
 {
         int             ret = -1;
 
-        ret = glusterd_op_txn_begin (req, op, ctx);
+        ret = glusterd_op_txn_begin (req, op, ctx, err_str, err_len);
 
         return ret;
 }
@@ -1175,10 +1193,14 @@ glusterd_handle_reset_volume (rpcsvc_request_t *req)
         dict_t                          *dict = NULL;
         glusterd_op_t                   cli_op = GD_OP_RESET_VOLUME;
         char                            *volname = NULL;
+        char                            err_str[2048] = {0,};
+        xlator_t                        *this = NULL;
 
         GF_ASSERT (req);
+        this = THIS;
 
-        if (!xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req)) {
+        ret = xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -1192,8 +1214,10 @@ glusterd_handle_reset_volume (rpcsvc_request_t *req)
                                         cli_req.dict.dict_len,
                                         &dict);
                 if (ret < 0) {
-                        gf_log ("glusterd", GF_LOG_ERROR, "failed to "
+                        gf_log (this->name, GF_LOG_ERROR, "failed to "
                                     "unserialize req-buffer to dictionary");
+                        snprintf (err_str, sizeof (err_str), "Unable to decode "
+                                  "the command");
                         goto out;
                 } else {
                         dict->extra_stdfree = cli_req.dict.dict_val;
@@ -1202,18 +1226,24 @@ glusterd_handle_reset_volume (rpcsvc_request_t *req)
 
         ret = dict_get_str (dict, "volname", &volname);
         if (ret) {
-                gf_log (THIS->name, GF_LOG_ERROR, "failed to get volname");
+                snprintf (err_str, sizeof (err_str), "Failed to get volume "
+                          "name");
+                gf_log (this->name, GF_LOG_ERROR, "%s", err_str);
                 goto out;
         }
 
-        ret = glusterd_op_begin (req, GD_OP_RESET_VOLUME, dict);
+        ret = glusterd_op_begin (req, GD_OP_RESET_VOLUME, dict,
+                                 err_str, sizeof (err_str));
 
 out:
         glusterd_friend_sm ();
         glusterd_op_sm ();
         if (ret) {
+                if (err_str[0] == '\0')
+                        snprintf (err_str, sizeof (err_str),
+                                  "Operation failed");
                 ret = glusterd_op_send_cli_response (cli_op, ret, 0, req,
-                                                     dict, "operation failed");
+                                                     dict, err_str);
                 if (dict)
                         dict_unref (dict);
         }
@@ -1234,10 +1264,15 @@ glusterd_handle_set_volume (rpcsvc_request_t *req)
         char                            *volname = NULL;
         char                            *op_errstr = NULL;
         gf_boolean_t                    help = _gf_false;
+        char                            err_str[2048] = {0,};
+        xlator_t                        *this = NULL;
+
+        this = THIS;
 
         GF_ASSERT (req);
 
-        if (!xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req)) {
+        ret = xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -1251,9 +1286,11 @@ glusterd_handle_set_volume (rpcsvc_request_t *req)
                                         cli_req.dict.dict_len,
                                         &dict);
                 if (ret < 0) {
-                        gf_log ("glusterd", GF_LOG_ERROR,
+                        gf_log (this->name, GF_LOG_ERROR,
                                 "failed to "
                                 "unserialize req-buffer to dictionary");
+                        snprintf (err_str, sizeof (err_str), "Unable to decode "
+                                  "the command");
                         goto out;
                 } else {
                         dict->extra_stdfree = cli_req.dict.dict_val;
@@ -1262,8 +1299,9 @@ glusterd_handle_set_volume (rpcsvc_request_t *req)
 
         ret = dict_get_str (dict, "volname", &volname);
         if (ret) {
-                gf_log ("", GF_LOG_WARNING, "Unable to get volume name, while"
-                        "handling volume set command");
+                snprintf (err_str, sizeof (err_str), "Failed to get volume "
+                          "name while handling volume set command");
+                gf_log (this->name, GF_LOG_ERROR, "%s", err_str);
                 goto out;
         }
 
@@ -1276,19 +1314,24 @@ glusterd_handle_set_volume (rpcsvc_request_t *req)
 
         ret = dict_get_str (dict, "key1", &key);
         if (ret) {
-                gf_log ("", GF_LOG_WARNING, "Unable to get key, while "
-                        "handling volume set for %s",volname);
+                snprintf (err_str, sizeof (err_str), "Failed to get key while"
+                          " handling volume set for %s", volname);
+                gf_log (this->name, GF_LOG_ERROR, "%s", err_str);
                 goto out;
         }
 
         ret = dict_get_str (dict, "value1", &value);
         if (ret) {
-                gf_log ("", GF_LOG_WARNING, "Unable to get value, while"
-                        "handling volume set for %s",volname);
+                snprintf (err_str, sizeof (err_str), "Failed to get value while"
+                          " handling volume set for %s", volname);
+                gf_log (this->name, GF_LOG_ERROR, "%s", err_str);
                 goto out;
         }
+        gf_log (this->name, GF_LOG_DEBUG, "Received volume set request for "
+                "volume %s", volname);
 
-        ret = glusterd_op_begin (req, GD_OP_SET_VOLUME, dict);
+        ret = glusterd_op_begin (req, GD_OP_SET_VOLUME, dict,
+                                 err_str, sizeof (err_str));
 
 out:
         glusterd_friend_sm ();
@@ -1297,9 +1340,13 @@ out:
         if (help)
                 ret = glusterd_op_send_cli_response (cli_op, ret, 0, req, dict,
                                                      (op_errstr)? op_errstr:"");
-        else if (ret)
+        else if (ret) {
+                if (err_str[0] == '\0')
+                        snprintf (err_str, sizeof (err_str),
+                                  "Operation failed");
                 ret = glusterd_op_send_cli_response (cli_op, ret, 0, req,
-                                                     dict, "operation failed");
+                                                     dict, err_str);
+        }
         if (op_errstr)
                 GF_FREE (op_errstr);
 
@@ -1317,10 +1364,13 @@ glusterd_handle_sync_volume (rpcsvc_request_t *req)
         char                             *volname = NULL;
         gf1_cli_sync_volume              flags = 0;
         char                             *hostname = NULL;
+        xlator_t                         *this = NULL;
 
         GF_ASSERT (req);
+        this = THIS;
 
-        if (!xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req)) {
+        ret = xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -1334,9 +1384,11 @@ glusterd_handle_sync_volume (rpcsvc_request_t *req)
                                         cli_req.dict.dict_len,
                                         &dict);
                 if (ret < 0) {
-                        gf_log ("glusterd", GF_LOG_ERROR,
+                        gf_log (this->name, GF_LOG_ERROR,
                                 "failed to "
                                 "unserialize req-buffer to dictionary");
+                        snprintf (msg, sizeof (msg), "Unable to decode the "
+                                  "command");
                         goto out;
                 } else {
                         dict->extra_stdfree = cli_req.dict.dict_val;
@@ -1345,7 +1397,8 @@ glusterd_handle_sync_volume (rpcsvc_request_t *req)
 
         ret = dict_get_str (dict, "hostname", &hostname);
         if (ret) {
-                gf_log (THIS->name, GF_LOG_ERROR, "failed to get hostname");
+                snprintf (msg, sizeof (msg), "Failed to get hostname");
+                gf_log (this->name, GF_LOG_ERROR, "%s", msg);
                 goto out;
         }
 
@@ -1353,24 +1406,26 @@ glusterd_handle_sync_volume (rpcsvc_request_t *req)
         if (ret) {
                 ret = dict_get_int32 (dict, "flags", (int32_t*)&flags);
                 if (ret) {
-                        gf_log (THIS->name, GF_LOG_ERROR, "Unable to get volume"
-                                "name, or flags");
+                        snprintf (msg, sizeof (msg), "Failed to get volume name"
+                                  " or flags");
+                        gf_log (this->name, GF_LOG_ERROR, "%s", msg);
                         goto out;
                 }
         }
 
-        gf_log ("glusterd", GF_LOG_INFO, "Received volume sync req "
-                "for volume %s",
-                (flags & GF_CLI_SYNC_ALL) ? "all" : volname);
+        gf_log (this->name, GF_LOG_INFO, "Received volume sync req "
+                "for volume %s", (flags & GF_CLI_SYNC_ALL) ? "all" : volname);
 
         if (!glusterd_is_local_addr (hostname)) {
                 ret = -1;
                 snprintf (msg, sizeof (msg), "sync from localhost"
                           " not allowed");
+                gf_log (this->name, GF_LOG_ERROR, "%s", msg);
                 goto out;
         }
 
-        ret = glusterd_op_begin (req, GD_OP_SYNC_VOLUME, dict);
+        ret = glusterd_op_begin (req, GD_OP_SYNC_VOLUME, dict,
+                                 msg, sizeof (msg));
 
 out:
         if (ret) {
@@ -1433,7 +1488,9 @@ glusterd_handle_fsm_log (rpcsvc_request_t *req)
 
         GF_ASSERT (req);
 
-        if (!xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf1_cli_fsm_log_req)) {
+        ret = xdr_to_generic (req->msg[0], &cli_req,
+                              (xdrproc_t)xdr_gf1_cli_fsm_log_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 snprintf (msg, sizeof (msg), "Garbage request");
@@ -1524,8 +1581,9 @@ glusterd_handle_cluster_unlock (rpcsvc_request_t *req)
 
         GF_ASSERT (req);
 
-        if (!xdr_to_generic (req->msg[0], &unlock_req,
-                             (xdrproc_t)xdr_gd1_mgmt_cluster_unlock_req)) {
+        ret = xdr_to_generic (req->msg[0], &unlock_req,
+                              (xdrproc_t)xdr_gd1_mgmt_cluster_unlock_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -1644,7 +1702,9 @@ glusterd_handle_incoming_friend_req (rpcsvc_request_t *req)
         gf_boolean_t            run_fsm = _gf_true;
 
         GF_ASSERT (req);
-        if (!xdr_to_generic (req->msg[0], &friend_req, (xdrproc_t)xdr_gd1_mgmt_friend_req)) {
+        ret = xdr_to_generic (req->msg[0], &friend_req,
+                              (xdrproc_t)xdr_gd1_mgmt_friend_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -1681,7 +1741,9 @@ glusterd_handle_incoming_unfriend_req (rpcsvc_request_t *req)
         char               remote_hostname[UNIX_PATH_MAX + 1] = {0,};
 
         GF_ASSERT (req);
-        if (!xdr_to_generic (req->msg[0], &friend_req, (xdrproc_t)xdr_gd1_mgmt_friend_req)) {
+        ret = xdr_to_generic (req->msg[0], &friend_req,
+                              (xdrproc_t)xdr_gd1_mgmt_friend_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -1781,7 +1843,9 @@ glusterd_handle_friend_update (rpcsvc_request_t *req)
         priv = this->private;
         GF_ASSERT (priv);
 
-        if (!xdr_to_generic (req->msg[0], &friend_req, (xdrproc_t)xdr_gd1_mgmt_friend_update)) {
+        ret = xdr_to_generic (req->msg[0], &friend_req,
+                              (xdrproc_t)xdr_gd1_mgmt_friend_update);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -1904,7 +1968,9 @@ glusterd_handle_probe_query (rpcsvc_request_t *req)
 
         GF_ASSERT (req);
 
-        if (!xdr_to_generic (req->msg[0], &probe_req, (xdrproc_t)xdr_gd1_mgmt_probe_req)) {
+        ret = xdr_to_generic (req->msg[0], &probe_req,
+                              (xdrproc_t)xdr_gd1_mgmt_probe_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -1990,10 +2056,14 @@ glusterd_handle_cli_profile_volume (rpcsvc_request_t *req)
         glusterd_op_t                   cli_op = GD_OP_PROFILE_VOLUME;
         char                            *volname = NULL;
         int32_t                         op = 0;
+        char                            err_str[2048] = {0,};
+        xlator_t                        *this = NULL;
 
         GF_ASSERT (req);
+        this = THIS;
 
-        if (!xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req)) {
+        ret = xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -2009,19 +2079,22 @@ glusterd_handle_cli_profile_volume (rpcsvc_request_t *req)
 
         ret = dict_get_str (dict, "volname", &volname);
         if (ret) {
-                gf_log (THIS->name, GF_LOG_ERROR, "failed to get volname");
+                snprintf (err_str, sizeof (err_str), "Unable to get volume "
+                          "name");
+                gf_log (this->name, GF_LOG_ERROR, "%s", err_str);
                 goto out;
         }
 
-        gf_log (THIS->name, GF_LOG_INFO, "Received volume profile req "
+        gf_log (this->name, GF_LOG_INFO, "Received volume profile req "
                 "for volume %s", volname);
         ret = dict_get_int32 (dict, "op", &op);
         if (ret) {
-                gf_log (THIS->name, GF_LOG_ERROR, "failed to get op");
+                snprintf (err_str, sizeof (err_str), "Unable to get operation");
+                gf_log (this->name, GF_LOG_ERROR, "%s", err_str);
                 goto out;
         }
 
-        ret = glusterd_op_begin (req, cli_op, dict);
+        ret = glusterd_op_begin (req, cli_op, dict, err_str, sizeof (err_str));
 
 out:
         glusterd_friend_sm ();
@@ -2029,13 +2102,16 @@ out:
 
         free (cli_req.dict.dict_val);
         if (ret) {
+                if (err_str[0] == '\0')
+                        snprintf (err_str, sizeof (err_str),
+                                  "Operation failed");
                 ret = glusterd_op_send_cli_response (cli_op, ret, 0, req,
-                                                     dict, "operation failed");
+                                                     dict, err_str);
                 if (dict)
                         dict_unref (dict);
         }
 
-        gf_log (THIS->name, GF_LOG_DEBUG, "Returning %d", ret);
+        gf_log (this->name, GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
 
@@ -2076,7 +2152,9 @@ glusterd_handle_mount (rpcsvc_request_t *req)
 
         GF_ASSERT (req);
 
-        if (!xdr_to_generic (req->msg[0], &mnt_req, (xdrproc_t)xdr_gf1_cli_mount_req)) {
+        ret = xdr_to_generic (req->msg[0], &mnt_req,
+                              (xdrproc_t)xdr_gf1_cli_mount_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 rsp.op_ret = -1;
@@ -2145,7 +2223,9 @@ glusterd_handle_umount (rpcsvc_request_t *req)
         GF_ASSERT (req);
         GF_ASSERT (this);
 
-        if (!xdr_to_generic (req->msg[0], &umnt_req, (xdrproc_t)xdr_gf1_cli_umount_req)) {
+        ret = xdr_to_generic (req->msg[0], &umnt_req,
+                              (xdrproc_t)xdr_gf1_cli_umount_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 rsp.op_ret = -1;
@@ -2813,11 +2893,14 @@ glusterd_handle_status_volume (rpcsvc_request_t *req)
         char                           *volname = 0;
         gf_cli_req                      cli_req = {{0,}};
         glusterd_op_t                   cli_op  = GD_OP_STATUS_VOLUME;
+        char                            err_str[2048] = {0,};
+        xlator_t                       *this = NULL;
 
         GF_ASSERT (req);
+        this = THIS;
 
-        if (!xdr_to_generic (req->msg[0], &cli_req,
-                             (xdrproc_t)xdr_gf_cli_req)) {
+        ret = xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -2830,8 +2913,10 @@ glusterd_handle_status_volume (rpcsvc_request_t *req)
                 ret = dict_unserialize (cli_req.dict.dict_val,
                                         cli_req.dict.dict_len, &dict);
                 if (ret < 0) {
-                        gf_log (THIS->name, GF_LOG_ERROR, "failed to "
+                        gf_log (this->name, GF_LOG_ERROR, "failed to "
                                 "unserialize buffer");
+                        snprintf (err_str, sizeof (err_str), "Unable to decode "
+                                  "the command");
                         goto out;
                 }
 
@@ -2844,25 +2929,29 @@ glusterd_handle_status_volume (rpcsvc_request_t *req)
         if (!(cmd & GF_CLI_STATUS_ALL)) {
                 ret = dict_get_str (dict, "volname", &volname);
                 if (ret) {
-                        gf_log (THIS->name, GF_LOG_ERROR,
-                                "failed to get volname");
+                        snprintf (err_str, sizeof (err_str), "Unable to get "
+                                  "volume name");
+                        gf_log (this->name, GF_LOG_ERROR, "%s", err_str);
                         goto out;
                 }
-                gf_log (THIS->name, GF_LOG_INFO,
-                        "Received status volume req "
-                        "for volume %s", volname);
+                gf_log (this->name, GF_LOG_INFO,
+                        "Received status volume req for volume %s", volname);
 
         }
 
-        ret = glusterd_op_begin (req, GD_OP_STATUS_VOLUME, dict);
+        ret = glusterd_op_begin (req, GD_OP_STATUS_VOLUME, dict,
+                                 err_str, sizeof (err_str));
 
 out:
         glusterd_friend_sm ();
         glusterd_op_sm ();
 
         if (ret) {
+                if (err_str[0] == '\0')
+                        snprintf (err_str, sizeof (err_str),
+                                  "Operation failed");
                 ret = glusterd_op_send_cli_response (cli_op, ret, 0, req,
-                                                     dict, "operation failed");
+                                                     dict, err_str);
                 if (dict)
                         dict_unref (dict);
         }
@@ -2879,12 +2968,15 @@ glusterd_handle_cli_clearlocks_volume (rpcsvc_request_t *req)
         glusterd_op_t                   cli_op = GD_OP_CLEARLOCKS_VOLUME;
         char                            *volname = NULL;
         dict_t                          *dict = NULL;
+        char                            err_str[2048] = {0,};
+        xlator_t                        *this = NULL;
 
         GF_ASSERT (req);
+        this = THIS;
 
         ret = -1;
-        if (!xdr_to_generic (req->msg[0], &cli_req,
-                             (xdrproc_t)xdr_gf_cli_req)) {
+        ret = xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req);
+        if (ret < 0) {
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
         }
@@ -2896,36 +2988,43 @@ glusterd_handle_cli_clearlocks_volume (rpcsvc_request_t *req)
                                         cli_req.dict.dict_len,
                                         &dict);
                 if (ret < 0) {
-                        gf_log (THIS->name, GF_LOG_ERROR,
+                        gf_log (this->name, GF_LOG_ERROR,
                                 "failed to unserialize req-buffer to"
                                 " dictionary");
+                        snprintf (err_str, sizeof (err_str), "unable to decode "
+                                  "the command");
                         goto out;
                 }
 
         } else {
                 ret = -1;
-                gf_log (THIS->name, GF_LOG_ERROR, "Empty cli request.");
+                gf_log (this->name, GF_LOG_ERROR, "Empty cli request.");
                 goto out;
         }
 
         ret = dict_get_str (dict, "volname", &volname);
         if (ret) {
-                gf_log (THIS->name, GF_LOG_ERROR, "failed to get volname");
+                snprintf (err_str, sizeof (err_str), "Unable to get volume "
+                          "name");
+                gf_log (this->name, GF_LOG_ERROR, "%s", err_str);
                 goto out;
         }
 
-        gf_log (THIS->name, GF_LOG_INFO, "Received clear-locks volume req "
+        gf_log (this->name, GF_LOG_INFO, "Received clear-locks volume req "
                 "for volume %s", volname);
 
-        ret = glusterd_op_begin (req, cli_op, dict);
+        ret = glusterd_op_begin (req, cli_op, dict, err_str, sizeof (err_str));
 
 out:
         glusterd_friend_sm ();
         glusterd_op_sm ();
 
         if (ret) {
+                if (err_str[0] == '\0')
+                        snprintf (err_str, sizeof (err_str),
+                                  "Operation failed");
                 ret = glusterd_op_send_cli_response (cli_op, ret, 0, req,
-                                                     dict, "operation failed");
+                                                     dict, err_str);
                 if (dict)
                         dict_unref (dict);
         }
@@ -3104,14 +3203,17 @@ glusterd_peer_rpc_notify (struct rpc_clnt *rpc, void *mydata,
                         quorum_action = _gf_true;
                         peerinfo->quorum_action = _gf_false;
                 }
-                peerinfo->connected = 0;
+
+                // Remove peer if it is not a friend and connection/handshake
+                // fails, and notify cli. Happens only during probe.
+                if (peerinfo->state.state == GD_FRIEND_STATE_DEFAULT)
+                        glusterd_friend_remove_notify (peerctx);
 
                 /*
                   local glusterd (thinks that it) is the owner of the cluster
                   lock and 'fails' the operation on the first disconnect from
                   a peer.
                 */
-
                 if (peerinfo->connected) {
                         glusterd_get_lock_owner (&owner);
                         if (!uuid_compare (MY_UUID, owner)) {
@@ -3121,28 +3223,21 @@ glusterd_peer_rpc_notify (struct rpc_clnt *rpc, void *mydata,
                                         gf_log (this->name, GF_LOG_ERROR,
                                                 "Unable to enqueue cluster "
                                                 "unlock event");
-                                break;
+                        } else {
+                                peer_uuid = GF_CALLOC (1, sizeof (*peer_uuid),
+                                                gf_common_mt_char);
+                                if (!peer_uuid) {
+                                        ret = -1;
+                                        break;
+                                }
+
+                                uuid_copy (*peer_uuid, peerinfo->uuid);
+                                ret = glusterd_op_sm_inject_event
+                                        (GD_OP_EVENT_LOCAL_UNLOCK_NO_RESP, peer_uuid);
+                                if (ret)
+                                        gf_log (this->name, GF_LOG_ERROR, "Unable"
+                                                        " to enque local lock flush event.");
                         }
-
-                        peer_uuid = GF_CALLOC (1, sizeof (*peer_uuid),
-                                               gf_common_mt_char);
-                        if (!peer_uuid) {
-                                ret = -1;
-                                break;
-                        }
-
-                        uuid_copy (*peer_uuid, peerinfo->uuid);
-                        ret = glusterd_op_sm_inject_event
-                              (GD_OP_EVENT_LOCAL_UNLOCK_NO_RESP, peer_uuid);
-                        if (ret)
-                                gf_log (this->name, GF_LOG_ERROR, "Unable"
-                                        " to enque local lock flush event.");
-
-                        //Inject friend disconnected here
-                        if (peerinfo->state.state == GD_FRIEND_STATE_DEFAULT)  {
-                                glusterd_friend_remove_notify (peerctx);
-                        }
-
                 }
 
                 peerinfo->connected = 0;

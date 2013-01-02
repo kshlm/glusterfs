@@ -389,7 +389,7 @@ afr_sh_data_erase_pending_cbk (call_frame_t *frame, void *cookie,
                         goto out;
                 }
                 GF_ASSERT (sh->old_loop_frame);
-                afr_sh_data_lock (frame, this, 0, 0,
+                afr_sh_data_lock (frame, this, 0, 0, _gf_true,
                                   afr_post_sh_big_lock_success,
                                   afr_post_sh_big_lock_failure);
         }
@@ -412,6 +412,9 @@ sh_algo_from_name (xlator_t *this, char *name)
 {
         int i = 0;
 
+        if (name == NULL)
+                goto out;
+
         while (afr_self_heal_algorithms[i].name) {
                 if (!strcmp (name, afr_self_heal_algorithms[i].name)) {
                         return &afr_self_heal_algorithms[i];
@@ -420,6 +423,7 @@ sh_algo_from_name (xlator_t *this, char *name)
                 i++;
         }
 
+out:
         return NULL;
 }
 
@@ -712,12 +716,13 @@ afr_sh_data_fxattrop_fstat_done (call_frame_t *frame, xlator_t *this)
                         "split-brain). Please delete the file from all but "
                         "the preferred subvolume.", local->loc.path);
 
-                sh->data_spb = _gf_true;
+                afr_set_split_brain (this, sh->inode, DONT_KNOW, SPB);
+
                 afr_sh_data_fail (frame, this);
                 return 0;
         }
 
-        sh->data_spb = _gf_false;
+        afr_set_split_brain (this, sh->inode, DONT_KNOW, NO_SPB);
         ret = afr_sh_inode_set_read_ctx (sh, this);
         if (ret) {
                 gf_log (this->name, GF_LOG_DEBUG,
@@ -1131,8 +1136,13 @@ afr_sh_data_post_nonblocking_inodelk_cbk (call_frame_t *frame, xlator_t *this)
                         "failed for %s. by %s",
                         local->loc.path, lkowner_utoa (&frame->root->lk_owner));
 
-                int_lock->lock_cbk = afr_sh_data_post_blocking_inodelk_cbk;
-                afr_blocking_lock (frame, this);
+		if (!sh->data_lock_block) {
+			sh->data_lock_failure_handler(frame, this);
+		} else {
+			int_lock->lock_cbk =
+				afr_sh_data_post_blocking_inodelk_cbk;
+			afr_blocking_lock (frame, this);
+		}
         } else {
 
                 gf_log (this->name, GF_LOG_DEBUG, "Non Blocking data inodelks "
@@ -1205,7 +1215,7 @@ afr_post_sh_big_lock_failure (call_frame_t *frame, xlator_t *this)
 
 int
 afr_sh_data_lock (call_frame_t *frame, xlator_t *this,
-                  off_t start, off_t len,
+                  off_t start, off_t len, gf_boolean_t block,
                   afr_lock_cbk_t success_handler,
                   afr_lock_cbk_t failure_handler)
 {
@@ -1217,6 +1227,7 @@ afr_sh_data_lock (call_frame_t *frame, xlator_t *this,
 
         sh->data_lock_success_handler = success_handler;
         sh->data_lock_failure_handler = failure_handler;
+	sh->data_lock_block = block;
         return afr_sh_data_lock_rec (frame, this, start, len);
 }
 
@@ -1229,6 +1240,7 @@ afr_sh_data_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         afr_private_t   *priv = NULL;
         int              call_count = 0;
         int              child_index = 0;
+	gf_boolean_t	 block = _gf_true;
 
         local = frame->local;
         sh = &local->self_heal;
@@ -1270,7 +1282,13 @@ afr_sh_data_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         "fd for %s opened, commencing sync",
                         local->loc.path);
 
-                afr_sh_data_lock (frame, this, 0, 0,
+		/*
+		 * The read and write self-heal trigger codepaths do not provide
+		 * an unwind callback. We run a trylock in these codepaths
+		 * because we are sensitive to locking latency.
+		 */
+		block = sh->unwind ? _gf_true : _gf_false;
+                afr_sh_data_lock (frame, this, 0, 0, block,
                                   afr_sh_data_big_lock_success,
                                   afr_sh_data_fail);
         }
@@ -1384,18 +1402,11 @@ afr_self_heal_data (call_frame_t *frame, xlator_t *this)
         local = frame->local;
         sh = &local->self_heal;
 
-        /* Self-heal completion cbk changes inode split-brain status based on
-         * govinda_gOvinda, mdata_spb, data_spb value.
-         * Initialize data_spb with current split-brain status.
-         * If for some reason self-heal fails(locking phase etc), it makes sure
-         * we retain the split-brain status before this self-heal started.
-         */
-        sh->data_spb = afr_is_split_brain (this, sh->inode);
         if (afr_can_start_data_self_heal (sh, priv)) {
                 if (IA_ISREG (sh->type)) {
                         afr_sh_data_open (frame, this);
                 } else {
-                        afr_sh_data_lock (frame, this, 0, 0,
+                        afr_sh_data_lock (frame, this, 0, 0, _gf_true,
                                           afr_sh_non_reg_lock_success,
                                           afr_sh_data_fail);
                 }

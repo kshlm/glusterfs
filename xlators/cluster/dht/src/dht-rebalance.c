@@ -1080,17 +1080,24 @@ gf_defrag_migrate_data (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
 
         while ((ret = syncop_readdirp (this, fd, 131072, offset, NULL,
                                        &entries)) != 0) {
-                if (ret < 0)
-                        break;
+
+                if (ret < 0) {
+
+                        gf_log (this->name, GF_LOG_ERROR, "Readdir returned %s."
+                                " Aborting migrate-data",
+                                strerror(readdir_operrno));
+                        goto out;
+                }
 
                 /* Need to keep track of ENOENT errno, that means, there is no
                    need to send more readdirp() */
                 readdir_operrno = errno;
 
-                free_entries = _gf_true;
-
                 if (list_empty (&entries.list))
                         break;
+
+                free_entries = _gf_true;
+
                 list_for_each_entry_safe (entry, tmp, &entries.list, list) {
                         if (defrag->defrag_status != GF_DEFRAG_STATUS_STARTED) {
                                 ret = 1;
@@ -1284,6 +1291,7 @@ gf_defrag_fix_layout (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
         dict_t                  *dict           = NULL;
         off_t                    offset         = 0;
         struct iatt              iatt           = {0,};
+        int                      readdirp_errno = 0;
 
         ret = syncop_lookup (this, loc, NULL, &iatt, NULL, NULL);
         if (ret) {
@@ -1319,12 +1327,22 @@ gf_defrag_fix_layout (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
         while ((ret = syncop_readdirp (this, fd, 131072, offset, NULL,
                 &entries)) != 0)
         {
-                if ((ret < 0) || (ret && (errno == ENOENT)))
-                        break;
-                free_entries = _gf_true;
+
+                if (ret < 0) {
+                        gf_log (this->name, GF_LOG_ERROR, "Readdir returned %s"
+                                ". Aborting fix-layout",strerror(errno));
+                        goto out;
+                }
+
+                /* Need to keep track of ENOENT errno, that means, there is no
+                   need to send more readdirp() */
+                readdirp_errno = errno;
 
                 if (list_empty (&entries.list))
                         break;
+
+                free_entries = _gf_true;
+
                 list_for_each_entry_safe (entry, tmp, &entries.list, list) {
                         if (defrag->defrag_status != GF_DEFRAG_STATUS_STARTED) {
                                 ret = 1;
@@ -1383,6 +1401,7 @@ gf_defrag_fix_layout (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
                                         "failed for %s", entry_loc.path);
                                 defrag->defrag_status =
                                 GF_DEFRAG_STATUS_FAILED;
+                                defrag->total_failures ++;
                                 goto out;
                         }
                         ret = gf_defrag_fix_layout (this, defrag, &entry_loc,
@@ -1391,6 +1410,7 @@ gf_defrag_fix_layout (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
                         if (ret) {
                                 gf_log (this->name, GF_LOG_ERROR, "Fix layout "
                                         "failed for %s", entry_loc.path);
+                                defrag->total_failures++;
                                 goto out;
                         }
 
@@ -1398,6 +1418,8 @@ gf_defrag_fix_layout (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
                 gf_dirent_free (&entries);
                 free_entries = _gf_false;
                 INIT_LIST_HEAD (&entries.list);
+                if (readdirp_errno == ENOENT)
+                        break;
         }
 
         ret = 0;
@@ -1481,6 +1503,7 @@ gf_defrag_start_crawl (void *data)
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR, "fix layout on %s failed",
                         loc.path);
+                defrag->total_failures++;
                 goto out;
         }
 

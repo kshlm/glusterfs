@@ -890,6 +890,24 @@ out:
         return 0;
 }
 
+/* print every key */
+static int
+_gf_server_log_setxattr_failure (dict_t *d, char *k, data_t *v,
+                                 void *tmp)
+{
+        server_state_t *state = NULL;
+        call_frame_t   *frame = NULL;
+
+        frame = tmp;
+        state = CALL_STATE(frame);
+
+        gf_log (THIS->name, GF_LOG_INFO,
+                "%"PRId64": SETXATTR %s (%s) ==> %s",
+                frame->root->unique, state->loc.path,
+                uuid_utoa (state->resolve.gfid), k);
+        return 0;
+}
+
 int
 server_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno, dict_t *xdata)
@@ -905,19 +923,14 @@ server_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret == -1) {
-                /* print every key */
-                int _log_setxattr_failure (dict_t *d, char *k, data_t *v,
-                                           void *tmp)
-                {
-                        gf_log (this->name, ((op_errno == ENOTSUP) ?
-                                             GF_LOG_DEBUG : GF_LOG_INFO),
-                                "%"PRId64": SETXATTR %s (%s) ==> %s (%s)",
-                                frame->root->unique, state->loc.path,
-                                uuid_utoa (state->resolve.gfid), k,
-                                strerror (op_errno));
-                        return 0;
-                }
-                dict_foreach (state->dict, _log_setxattr_failure, NULL);
+                if (op_errno != ENOTSUP)
+                        dict_foreach (state->dict,
+                                      _gf_server_log_setxattr_failure,
+                                      frame);
+
+                gf_log (THIS->name, ((op_errno == ENOTSUP) ?
+                                     GF_LOG_DEBUG : GF_LOG_INFO),
+                        "%s", strerror (op_errno));
                 goto out;
         }
 
@@ -933,6 +946,24 @@ out:
         return 0;
 }
 
+/* print every key here */
+static int
+_gf_server_log_fsetxattr_failure (dict_t *d, char *k, data_t *v,
+                                 void *tmp)
+{
+        call_frame_t   *frame = NULL;
+        server_state_t *state = NULL;
+
+        frame = tmp;
+        state = CALL_STATE(frame);
+
+        gf_log (THIS->name, GF_LOG_INFO,
+                "%"PRId64": FSETXATTR %"PRId64" (%s) ==> %s",
+                frame->root->unique, state->resolve.fd_no,
+                uuid_utoa (state->resolve.gfid), k);
+
+        return 0;
+}
 
 int
 server_fsetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
@@ -949,19 +980,14 @@ server_fsetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret == -1) {
-                /* print every key here */
-                int _log_setxattr_failure (dict_t *d, char *k, data_t *v,
-                                           void *tmp)
-                {
-                        gf_log (this->name, ((op_errno == ENOTSUP) ?
-                                             GF_LOG_DEBUG : GF_LOG_INFO),
-                                "%"PRId64": FSETXATTR %"PRId64" (%s) ==> %s (%s)",
-                                frame->root->unique, state->resolve.fd_no,
-                                uuid_utoa (state->resolve.gfid), k,
-                                strerror (op_errno));
-                        return 0;
+                if (op_errno != ENOTSUP) {
+                        dict_foreach (state->dict,
+                                      _gf_server_log_fsetxattr_failure,
+                                      frame);
                 }
-                dict_foreach (state->dict, _log_setxattr_failure, NULL);
+                gf_log (THIS->name, ((op_errno == ENOTSUP) ?
+                                     GF_LOG_DEBUG : GF_LOG_INFO),
+                        "%s", strerror (op_errno));
                 goto out;
         }
 
@@ -2916,7 +2942,8 @@ server3_3_stat (rpcsvc_request_t *req)
 
         /* Initialize args first, then decode */
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_stat_req)) {
+        ret = xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_stat_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -2971,7 +2998,9 @@ server3_3_setattr (rpcsvc_request_t *req)
         if (!req)
                 return 0;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_setattr_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_setattr_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3028,7 +3057,9 @@ server3_3_fsetattr (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_fsetattr_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_fsetattr_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3085,7 +3116,9 @@ server3_3_readlink (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_readlink_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_readlink_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3143,7 +3176,9 @@ server3_3_create (rpcsvc_request_t *req)
 
         args.bname = alloca (req->msg[0].iov_len);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_create_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_create_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3209,7 +3244,8 @@ server3_3_open (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_open_req)) {
+        ret = xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_open_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3264,7 +3300,8 @@ server3_3_readv (rpcsvc_request_t *req)
         if (!req)
                 goto out;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_read_req)) {
+        ret = xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_read_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3325,8 +3362,9 @@ server3_3_writev (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        len = xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_write_req);
-        if (len == 0) {
+        len = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_write_req);
+        if (len < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3457,7 +3495,9 @@ server3_3_release (rpcsvc_request_t *req)
         gf_common_rsp        rsp  = {0,};
         int                  ret  = -1;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_release_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_release_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3487,7 +3527,9 @@ server3_3_releasedir (rpcsvc_request_t *req)
         gf_common_rsp        rsp  = {0,};
         int                  ret  = -1;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_release_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_release_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3522,7 +3564,9 @@ server3_3_fsync (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_fsync_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_fsync_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3578,7 +3622,9 @@ server3_3_flush (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_flush_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_flush_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3633,7 +3679,9 @@ server3_3_ftruncate (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_ftruncate_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_ftruncate_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3688,7 +3736,9 @@ server3_3_fstat (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_fstat_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_fstat_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3742,7 +3792,9 @@ server3_3_truncate (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_truncate_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_truncate_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3799,7 +3851,9 @@ server3_3_unlink (rpcsvc_request_t *req)
 
         args.bname = alloca (req->msg[0].iov_len);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_unlink_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_unlink_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3858,7 +3912,9 @@ server3_3_setxattr (rpcsvc_request_t *req)
 
         args.dict.dict_val = alloca (req->msg[0].iov_len);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_setxattr_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_setxattr_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -3930,7 +3986,9 @@ server3_3_fsetxattr (rpcsvc_request_t *req)
                 return ret;
 
         args.dict.dict_val = alloca (req->msg[0].iov_len);
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_fsetxattr_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_fsetxattr_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4000,7 +4058,9 @@ server3_3_fxattrop (rpcsvc_request_t *req)
                 return ret;
 
         args.dict.dict_val = alloca (req->msg[0].iov_len);
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_fxattrop_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_fxattrop_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4072,7 +4132,9 @@ server3_3_xattrop (rpcsvc_request_t *req)
 
         args.dict.dict_val = alloca (req->msg[0].iov_len);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_xattrop_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_xattrop_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4140,7 +4202,9 @@ server3_3_getxattr (rpcsvc_request_t *req)
 
         args.name = alloca (256);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_getxattr_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_getxattr_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4200,7 +4264,9 @@ server3_3_fgetxattr (rpcsvc_request_t *req)
                 return ret;
 
         args.name = alloca (256);
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_fgetxattr_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_fgetxattr_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4260,7 +4326,9 @@ server3_3_removexattr (rpcsvc_request_t *req)
 
         args.name = alloca (256);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_removexattr_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_removexattr_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4315,8 +4383,9 @@ server3_3_fremovexattr (rpcsvc_request_t *req)
 
         args.name = alloca (4096);
 
-        if (!xdr_to_generic (req->msg[0], &args,
-                             (xdrproc_t)xdr_gfs3_fremovexattr_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_fremovexattr_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4373,7 +4442,9 @@ server3_3_opendir (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_opendir_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_opendir_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4427,7 +4498,9 @@ server3_3_readdirp (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_readdirp_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_readdirp_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4495,7 +4568,9 @@ server3_3_readdir (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_readdir_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_readdir_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4560,7 +4635,9 @@ server3_3_fsyncdir (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_fsyncdir_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_fsyncdir_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4618,7 +4695,9 @@ server3_3_mknod (rpcsvc_request_t *req)
 
         args.bname = alloca (req->msg[0].iov_len);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_mknod_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_mknod_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4681,7 +4760,9 @@ server3_3_mkdir (rpcsvc_request_t *req)
 
         args.bname = alloca (req->msg[0].iov_len);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_mkdir_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_mkdir_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4742,7 +4823,9 @@ server3_3_rmdir (rpcsvc_request_t *req)
 
         args.bname = alloca (req->msg[0].iov_len);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_rmdir_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_rmdir_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4802,7 +4885,9 @@ server3_3_inodelk (rpcsvc_request_t *req)
 
         args.volume = alloca (256);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_inodelk_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_inodelk_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4887,7 +4972,9 @@ server3_3_finodelk (rpcsvc_request_t *req)
                 return ret;
 
         args.volume = alloca (256);
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_finodelk_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_finodelk_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -4976,7 +5063,9 @@ server3_3_entrylk (rpcsvc_request_t *req)
         args.volume = alloca (256);
         args.name   = alloca (256);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_entrylk_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_entrylk_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -5038,7 +5127,9 @@ server3_3_fentrylk (rpcsvc_request_t *req)
         args.name   = alloca (256);
         args.volume = alloca (256);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_fentrylk_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_fentrylk_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -5097,7 +5188,9 @@ server3_3_access (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_access_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_access_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -5155,7 +5248,9 @@ server3_3_symlink (rpcsvc_request_t *req)
         args.bname    = alloca (req->msg[0].iov_len);
         args.linkname = alloca (4096);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_symlink_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_symlink_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -5216,7 +5311,8 @@ server3_3_link (rpcsvc_request_t *req)
 
         args.newbname = alloca (req->msg[0].iov_len);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_link_req)) {
+        ret = xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_link_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -5276,7 +5372,9 @@ server3_3_rename (rpcsvc_request_t *req)
         args.oldbname = alloca (req->msg[0].iov_len);
         args.newbname = alloca (req->msg[0].iov_len);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_rename_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_rename_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -5333,7 +5431,8 @@ server3_3_lk (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_lk_req)) {
+        ret = xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_lk_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -5437,7 +5536,9 @@ server3_3_rchecksum (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_rchecksum_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_rchecksum_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
@@ -5507,7 +5608,9 @@ server3_3_lookup (rpcsvc_request_t *req)
         args.bname           = alloca (req->msg[0].iov_len);
         args.xdata.xdata_val = alloca (req->msg[0].iov_len);
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_lookup_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_lookup_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto err;
@@ -5571,7 +5674,9 @@ server3_3_statfs (rpcsvc_request_t *req)
         if (!req)
                 return ret;
 
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gfs3_statfs_req)) {
+        ret = xdr_to_generic (req->msg[0], &args,
+                              (xdrproc_t)xdr_gfs3_statfs_req);
+        if (ret < 0) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;

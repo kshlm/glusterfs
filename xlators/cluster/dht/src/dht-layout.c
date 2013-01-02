@@ -114,7 +114,7 @@ dht_layout_unref (xlator_t *this, dht_layout_t *layout)
         dht_conf_t  *conf = NULL;
         int          ref = 0;
 
-        if (layout->preset || !this->private)
+        if (!layout || layout->preset || !this->private)
                 return;
 
         conf = this->private;
@@ -419,6 +419,19 @@ dht_layout_entry_cmp_volname (dht_layout_t *layout, int i, int j)
                         layout->list[j].xlator->name));
 }
 
+
+gf_boolean_t
+dht_is_subvol_in_layout (dht_layout_t *layout, xlator_t *xlator)
+{
+        int i = 0;
+
+        for (i = 0; i < layout->cnt; i++) {
+                if (!strcmp (layout->list[i].xlator->name, xlator->name))
+                        return _gf_true;
+        }
+        return _gf_false;
+}
+
 int64_t
 dht_layout_entry_cmp (dht_layout_t *layout, int i, int j)
 {
@@ -478,7 +491,8 @@ dht_layout_sort_volname (dht_layout_t *layout)
 int
 dht_layout_anomalies (xlator_t *this, loc_t *loc, dht_layout_t *layout,
                       uint32_t *holes_p, uint32_t *overlaps_p,
-                      uint32_t *missing_p, uint32_t *down_p, uint32_t *misc_p)
+                      uint32_t *missing_p, uint32_t *down_p, uint32_t *misc_p,
+                      uint32_t *no_space_p)
 {
         uint32_t    overlaps = 0;
         uint32_t    missing  = 0;
@@ -491,6 +505,7 @@ dht_layout_anomalies (xlator_t *this, loc_t *loc, dht_layout_t *layout,
         uint32_t    prev_stop = 0;
         uint32_t    last_stop = 0;
         char        is_virgin = 1;
+        uint32_t    no_space  = 0;
 
         /* TODO: explain what is happening */
 
@@ -508,7 +523,7 @@ dht_layout_anomalies (xlator_t *this, loc_t *loc, dht_layout_t *layout,
                                 down++;
                                 break;
                         case ENOSPC:
-                                down++;
+                                no_space++;
                                 break;
                         default:
                                 misc++;
@@ -547,6 +562,9 @@ dht_layout_anomalies (xlator_t *this, loc_t *loc, dht_layout_t *layout,
         if (misc_p)
                 *misc_p = misc;
 
+        if (no_space_p)
+                *no_space_p = no_space;
+
         return ret;
 }
 
@@ -571,7 +589,7 @@ dht_layout_normalize (xlator_t *this, loc_t *loc, dht_layout_t *layout)
 
         ret = dht_layout_anomalies (this, loc, layout,
                                     &holes, &overlaps,
-                                    &missing, &down, &misc);
+                                    &missing, &down, &misc, NULL);
         if (ret == -1) {
                 gf_log (this->name, GF_LOG_WARNING,
                         "error while finding anomalies in %s -- not good news",

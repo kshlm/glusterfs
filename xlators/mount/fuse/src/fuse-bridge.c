@@ -10,6 +10,11 @@
 
 #include <sys/wait.h>
 #include "fuse-bridge.h"
+#include "mount-gluster-compat.h"
+
+#ifdef __NetBSD__
+#undef open /* in perfuse.h, pulled from mount-gluster-compat.h */
+#endif
 
 static int gf_fuse_conn_err_log;
 static int gf_fuse_xattr_enotsup_log;
@@ -627,7 +632,7 @@ fuse_attr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         fuse_log_eh (this, "op_ret: %d, op_errno: %d, %"PRIu64": %s() %s => "
                    "gfid: %s", op_ret, op_errno, frame->root->unique,
                    gf_fop_list[frame->root->op], state->loc.path,
-                   uuid_utoa (state->loc.inode->gfid));
+                   state->loc.inode ? uuid_utoa (state->loc.inode->gfid) : "");
         if (op_ret == 0) {
                 gf_log ("glusterfs-fuse", GF_LOG_TRACE,
                         "%"PRIu64": %s() %s => %"PRId64, frame->root->unique,
@@ -911,7 +916,7 @@ fuse_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         fuse_log_eh(this, "op_ret: %d, op_errno: %d, %"PRIu64", %s() %s => "
                     "gfid: %s", op_ret, op_errno, frame->root->unique,
                     gf_fop_list[frame->root->op], state->loc.path,
-                    uuid_utoa (state->loc.inode->gfid));
+                    state->loc.inode ? uuid_utoa (state->loc.inode->gfid) : "");
 
         if (op_ret == 0) {
                 gf_log ("glusterfs-fuse", GF_LOG_TRACE,
@@ -1170,7 +1175,7 @@ fuse_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         fuse_log_eh (this, "op_ret: %d, op_errno: %d, %"PRIu64": %s() %s => "
                      "gfid: %s", op_ret, op_errno, frame->root->unique,
                      gf_fop_list[frame->root->op], state->loc.path,
-                     uuid_utoa (state->loc.inode->gfid));
+                     state->loc.inode ? uuid_utoa (state->loc.inode->gfid) : "");
 
         if (op_ret == 0) {
                 inode_unlink (state->loc.inode, state->loc.parent,
@@ -1583,10 +1588,10 @@ fuse_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      "path: %s parent: %s ==> path: %s parent: %s"
                      "gfid: %s", op_ret, op_errno, frame->root->unique,
                      gf_fop_list[frame->root->op], state->loc.path,
-                     uuid_utoa (state->loc.parent->gfid),
+                     state->loc.parent?uuid_utoa (state->loc.parent->gfid):"",
                      state->loc2.path,
-                     uuid_utoa (state->loc2.parent->gfid),
-                     uuid_utoa (state->loc.inode->gfid));
+                     state->loc2.parent?uuid_utoa (state->loc2.parent->gfid):"",
+                     state->loc.inode?uuid_utoa (state->loc.inode->gfid):"");
 
         if (op_ret == 0) {
                 gf_log ("glusterfs-fuse", GF_LOG_TRACE,
@@ -2863,10 +2868,10 @@ send_fuse_xattr (xlator_t *this, fuse_in_header_t *finh, const char *value,
  * when it tries to setxattr() for selinux xattrs
  */
 static int
-fuse_filter_xattr(xlator_t *this, char *key)
+fuse_filter_xattr(char *key)
 {
         int need_filter = 0;
-        struct fuse_private *priv = this->private;
+        struct fuse_private *priv = THIS->private;
 
         if ((priv->client_pid == GF_CLIENT_PID_GSYNCD)
             && fnmatch ("*.selinux*", key, FNM_PERIOD) == 0)
@@ -2887,6 +2892,7 @@ fuse_xattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         data_t         *value_data = NULL;
         int             ret = -1;
         int32_t         len = 0;
+        int32_t         len_next = 0;
 
         state = frame->root->state;
         finh  = state->finh;
@@ -2917,32 +2923,20 @@ fuse_xattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         /* we need to invoke fuse_filter_xattr() twice. Once
                          * while counting size and then while filling buffer
                          */
-                        int _get_total_len (dict_t *d, char *k, data_t *v,
-                                            void *tmp)
-                        {
-                                if (!fuse_filter_xattr (this, k))
-                                        len += strlen (k) + 1;
-                                return 0;
-                        }
-                        dict_foreach (dict, _get_total_len, NULL);
+                        len = dict_keys_join (NULL, 0, dict, fuse_filter_xattr);
+                        if (len < 0)
+                                goto out;
 
                         value = alloca (len + 1);
                         if (!value)
                                 goto out;
 
-                        len = 0;
-
-                        int _set_listxattr_keys (dict_t *d, char *k, data_t *v,
-                                                 void *tmp)
-                        {
-                                if (!fuse_filter_xattr (this, k)) {
-                                        strcpy (value + len, k);
-                                        value[len + strlen (k)] = '\0';
-                                        len += strlen (k) + 1;
-                                }
-                                return 0;
-                        }
-                        dict_foreach (dict, _set_listxattr_keys, NULL);
+                        len_next = dict_keys_join (value, len, dict,
+                                                   fuse_filter_xattr);
+                        if (len_next != len)
+                                gf_log (THIS->name, GF_LOG_ERROR,
+                                        "sizes not equal %d != %d",
+                                        len, len_next);
 
                         send_fuse_xattr (this, finh, value, len, state->size);
                 } /* if(state->name)...else */

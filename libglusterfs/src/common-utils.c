@@ -407,6 +407,14 @@ gf_print_trace (int32_t signum, glusterfs_ctx_t *ctx)
 
         fd = fileno (ctx->log.gf_log_logfile);
 
+        /* Now every gf_log call will just write to a buffer and when the
+         * buffer becomes full, its written to the log-file. Suppose the process
+         * crashes and prints the backtrace in the log-file, then the previous
+         * log information will still be in the buffer itself. So flush the
+         * contents of the buffer to the log file before printing the backtrace
+         * which helps in debugging.
+         */
+        fflush (ctx->log.gf_log_logfile);
         /* Pending frames, (if any), list them in order */
         ret = write (fd, "pending frames:\n", 16);
         if (ret < 0)
@@ -658,6 +666,8 @@ gf_string2time (const char *str, uint32_t *n)
         old_errno = errno;
         errno = 0;
         value = strtol (str, &tail, 0);
+        if (str == tail)
+                errno = EINVAL;
 
         if (errno == ERANGE || errno == EINVAL)
                 return -1;
@@ -701,6 +711,8 @@ gf_string2percent (const char *str, double *n)
         old_errno = errno;
         errno = 0;
         value = strtod (str, &tail);
+        if (str == tail)
+                errno = EINVAL;
 
         if (errno == ERANGE || errno == EINVAL)
                 return -1;
@@ -734,6 +746,8 @@ _gf_string2long (const char *str, long *n, int base)
         old_errno = errno;
         errno = 0;
         value = strtol (str, &tail, base);
+        if (str == tail)
+                errno = EINVAL;
 
         if (errno == ERANGE || errno == EINVAL)
                 return -1;
@@ -774,6 +788,8 @@ _gf_string2ulong (const char *str, unsigned long *n, int base)
         old_errno = errno;
         errno = 0;
         value = strtoul (str, &tail, base);
+        if (str == tail)
+                errno = EINVAL;
 
         if (errno == ERANGE || errno == EINVAL)
                 return -1;
@@ -814,6 +830,8 @@ _gf_string2uint (const char *str, unsigned int *n, int base)
         old_errno = errno;
         errno = 0;
         value = strtoul (str, &tail, base);
+        if (str == tail)
+                errno = EINVAL;
 
         if (errno == ERANGE || errno == EINVAL)
                 return -1;
@@ -845,6 +863,8 @@ _gf_string2double (const char *str, double *n)
         old_errno = errno;
         errno = 0;
         value = strtod (str, &tail);
+        if (str == tail)
+                errno = EINVAL;
 
         if (errno == ERANGE || errno == EINVAL)
                 return -1;
@@ -876,6 +896,8 @@ _gf_string2longlong (const char *str, long long *n, int base)
         old_errno = errno;
         errno = 0;
         value = strtoll (str, &tail, base);
+        if (str == tail)
+                errno = EINVAL;
 
         if (errno == ERANGE || errno == EINVAL)
                 return -1;
@@ -916,6 +938,8 @@ _gf_string2ulonglong (const char *str, unsigned long long *n, int base)
         old_errno = errno;
         errno = 0;
         value = strtoull (str, &tail, base);
+        if (str == tail)
+                errno = EINVAL;
 
         if (errno == ERANGE || errno == EINVAL)
                 return -1;
@@ -1280,6 +1304,8 @@ gf_string2bytesize (const char *str, uint64_t *n)
         old_errno = errno;
         errno = 0;
         value = strtod (str, &tail);
+        if (str == tail)
+                errno = EINVAL;
 
         if (errno == ERANGE || errno == EINVAL)
                 return -1;
@@ -1336,6 +1362,8 @@ gf_string2percent_or_bytesize (const char *str,
         old_errno = errno;
         errno = 0;
         value = strtoull (str, &tail, 10);
+        if (str == tail)
+                errno = EINVAL;
 
         if (errno == ERANGE || errno == EINVAL)
                 return -1;
@@ -2166,3 +2194,146 @@ generate_glusterfs_ctx_id (void)
         return gf_strdup (tmp_str);
 }
 
+char *
+gf_get_reserved_ports ()
+{
+        char    *ports_info  = NULL;
+#if defined GF_LINUX_HOST_OS
+        int     proc_fd      = -1;
+        char    *proc_file   = "/proc/sys/net/ipv4/ip_local_reserved_ports";
+        char    buffer[4096] = {0,};
+        int32_t ret          = -1;
+
+        proc_fd = open (proc_file, O_RDONLY);
+        if (proc_fd == -1) {
+                /* What should be done in this case? error out from here
+                 * and thus stop the glusterfs process from starting or
+                 * continue with older method of using any of the available
+                 * port? For now 2nd option is considered.
+                 */
+                gf_log ("glusterfs", GF_LOG_WARNING, "could not open "
+                        "the file /proc/sys/net/ipv4/ip_local_reserved_ports "
+                        "for getting reserved ports info (%s)",
+                        strerror (errno));
+                goto out;
+        }
+
+        ret = read (proc_fd, buffer, sizeof (buffer));
+        if (ret < 0) {
+                gf_log ("glusterfs", GF_LOG_WARNING, "could not "
+                        "read the file %s for getting reserved ports "
+                        "info (%s)", proc_file, strerror (errno));
+                goto out;
+        }
+        ports_info = gf_strdup (buffer);
+
+out:
+        if (proc_fd != -1)
+                close (proc_fd);
+#endif /* GF_LINUX_HOST_OS */
+        return ports_info;
+}
+
+int
+gf_process_reserved_ports (gf_boolean_t *ports)
+{
+        int      ret         = -1;
+#if defined GF_LINUX_HOST_OS
+        char    *ports_info  = NULL;
+        char    *tmp         = NULL;
+        char    *blocked_port = NULL;
+
+        ports_info = gf_get_reserved_ports ();
+        if (!ports_info) {
+                gf_log ("glusterfs", GF_LOG_WARNING, "Not able to get reserved "
+                        "ports, hence there is a possibility that glusterfs "
+                        "may consume reserved port");
+                goto out;
+        }
+
+        blocked_port = strtok_r (ports_info, ",",&tmp);
+        if (!blocked_port || !strcmp (blocked_port, ports_info)) {
+                if (!blocked_port)
+                        blocked_port = ports_info;
+                gf_ports_reserved (blocked_port, ports);
+                blocked_port = strtok_r (NULL, ",", &tmp);
+        }
+
+        while (blocked_port) {
+                gf_ports_reserved (blocked_port, ports);
+                blocked_port = strtok_r (NULL, ",", &tmp);
+        }
+
+        ret = 0;
+
+out:
+        GF_FREE (ports_info);
+#endif /* GF_LINUX_HOST_OS */
+        return ret;
+}
+
+gf_boolean_t
+gf_ports_reserved (char *blocked_port, gf_boolean_t *ports)
+{
+        gf_boolean_t    result   = _gf_false;
+        char            *range_port = NULL;
+        int16_t         tmp_port1, tmp_port2 = -1;
+
+        if (strstr (blocked_port, "-") == NULL) {
+                /* get rid of the new line character*/
+                if (blocked_port[strlen(blocked_port) -1] == '\n')
+                        blocked_port[strlen(blocked_port) -1] = '\0';
+                if (gf_string2int16 (blocked_port, &tmp_port1) == 0) {
+                        if (tmp_port1 > (GF_CLIENT_PORT_CEILING - 1)
+                            || tmp_port1 < 0) {
+                                gf_log ("glusterfs-socket", GF_LOG_WARNING,
+                                        "invalid port %d", tmp_port1);
+                                result = _gf_true;
+                                goto out;
+                        } else {
+                                gf_log ("glusterfs", GF_LOG_DEBUG,
+                                        "blocking port %d", tmp_port1);
+                                ports[tmp_port1] = _gf_true;
+                        }
+                } else {
+                        gf_log ("glusterfs-socket", GF_LOG_WARNING, "%s is "
+                                "not a valid port identifier", blocked_port);
+                        result = _gf_true;
+                        goto out;
+                }
+        } else {
+                range_port = strtok (blocked_port, "-");
+                if (!range_port){
+                        result = _gf_true;
+                        goto out;
+                }
+                if (gf_string2int16 (range_port, &tmp_port1) == 0) {
+                        if (tmp_port1 > (GF_CLIENT_PORT_CEILING - 1))
+                                tmp_port1 = GF_CLIENT_PORT_CEILING - 1;
+                        if (tmp_port1 < 0)
+                                tmp_port1 = 0;
+                }
+                range_port = strtok (NULL, "-");
+                if (!range_port) {
+                        result = _gf_true;
+                        goto out;
+                }
+                /* get rid of the new line character*/
+                if (range_port[strlen(range_port) -1] == '\n')
+                        range_port[strlen(range_port) - 1] = '\0';
+                if (gf_string2int16 (range_port, &tmp_port2) == 0) {
+                        if (tmp_port2 >
+                            (GF_CLIENT_PORT_CEILING - 1))
+                                tmp_port2 = GF_CLIENT_PORT_CEILING - 1;
+                        if (tmp_port2 < 0)
+                                tmp_port2 = 0;
+                }
+                gf_log ("glusterfs", GF_LOG_DEBUG, "lower: %d, higher: %d",
+                        tmp_port1, tmp_port2);
+                for (; tmp_port1 <= tmp_port2; tmp_port1++)
+                        ports[tmp_port1] = _gf_true;
+        }
+
+out:
+        return result;
+}
