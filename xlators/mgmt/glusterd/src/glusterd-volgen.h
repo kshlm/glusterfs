@@ -99,6 +99,10 @@ struct volopt_map_entry {
         uint32_t op_version;
         char *description;
         vme_option_validation validate_fn;
+        /* If client_option is true, the option affects clients.
+         * this is used to calculate client-op-version of volumes
+         */
+        gf_boolean_t client_option;
 };
 
 int glusterd_create_rb_volfiles (glusterd_volinfo_t *volinfo,
