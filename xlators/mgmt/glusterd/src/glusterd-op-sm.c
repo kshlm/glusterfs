@@ -1459,6 +1459,28 @@ out:
         return ret;
 }
 
+void
+_gd_update_volume_op_version (glusterd_volinfo_t *volinfo)
+{
+        int             op_version = 0;
+        data_pair_t     *pair = NULL;
+
+        GF_ASSERT (volinfo);
+
+        dict_for_each_pair (volinfo->dict, pair) {
+                op_version = glusterd_get_op_version_for_key (pair->key);
+
+                if (op_version > volinfo->op_version)
+                        volinfo->op_version = op_version;
+
+                if (gd_is_client_option (pair->key) &&
+                    (op_version > volinfo->client_op_version))
+                        volinfo->client_op_version = op_version;
+        }
+
+        return;
+}
+
 static int
 glusterd_op_set_volume (dict_t *dict)
 {
@@ -1520,6 +1542,7 @@ glusterd_op_set_volume (dict_t *dict)
                 goto out;
         }
 
+        // TODO: Remove this once v3.3 compatability is not required
         check_op_version = dict_get_str_boolean (dict, "check-op-version",
                                                  _gf_false);
 
@@ -1648,6 +1671,7 @@ glusterd_op_set_volume (dict_t *dict)
                                 goto out;
                         }
                 }
+                _gd_update_volume_op_version (volinfo);
 
         } else {
                 list_for_each_entry (voliter, &priv->volumes, vol_list) {
@@ -1674,6 +1698,7 @@ glusterd_op_set_volume (dict_t *dict)
                                         goto out;
                                 }
                         }
+                        _gd_update_volume_op_version (volinfo);
                 }
         }
 

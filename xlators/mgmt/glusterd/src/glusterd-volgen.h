@@ -140,4 +140,7 @@ glusterd_check_nfs_volfile_identical (gf_boolean_t *identical);
 
 uint32_t
 glusterd_get_op_version_for_key (char *key);
+
+gf_boolean_t
+gd_is_client_option (char *key);
 #endif
