@@ -2550,6 +2550,8 @@ glusterd_store_retrieve_volume (char    *volname)
         if (ret)
                 goto out;
 
+        gd_update_volume_op_versions (volinfo);
+
         list_add_tail (&volinfo->vol_list, &priv->volumes);
 
 out:

@@ -2993,6 +2993,8 @@ glusterd_import_friend_volume (dict_t *vols, size_t count)
         if (ret)
                 goto out;
 
+        gd_update_volume_op_versions (new_volinfo);
+
         list_add_tail (&new_volinfo->vol_list, &priv->volumes);
 out:
         gf_log ("", GF_LOG_DEBUG, "Returning with ret: %d", ret);
@@ -7444,3 +7446,32 @@ out:
         return ret;
 
 }
+
+void
+gd_update_volume_op_versions (glusterd_volinfo_t *volinfo)
+{
+        int             op_version = 0;
+        int             local_op_version = 0;
+        int             local_client_op_version = 0;
+        data_pair_t     *pair = NULL;
+
+        GF_ASSERT (volinfo);
+
+        dict_for_each_pair (volinfo->dict, pair) {
+                op_version = glusterd_get_op_version_for_key (pair->key);
+
+                if (op_version > local_op_version)
+                        volinfo->op_version = op_version;
+
+                if (gd_is_client_option (pair->key) &&
+                    (op_version > local_client_op_version))
+                        volinfo->client_op_version = op_version;
+        }
+
+        volinfo->op_version = local_op_version;
+        volinfo->client_op_version = local_client_op_version;
+
+        return;
+}
+
+

@@ -1337,6 +1337,8 @@ glusterd_op_reset_volume (dict_t *dict, char **op_errstr)
                             key);
         }
 
+        gd_update_volume_op_versions (volinfo);
+
 out:
         GF_FREE (key_fixed);
         if (quorum_action)
@@ -1457,28 +1459,6 @@ out:
                 glusterd_do_quorum_action ();
         GF_FREE (next_version);
         return ret;
-}
-
-void
-_gd_update_volume_op_version (glusterd_volinfo_t *volinfo)
-{
-        int             op_version = 0;
-        data_pair_t     *pair = NULL;
-
-        GF_ASSERT (volinfo);
-
-        dict_for_each_pair (volinfo->dict, pair) {
-                op_version = glusterd_get_op_version_for_key (pair->key);
-
-                if (op_version > volinfo->op_version)
-                        volinfo->op_version = op_version;
-
-                if (gd_is_client_option (pair->key) &&
-                    (op_version > volinfo->client_op_version))
-                        volinfo->client_op_version = op_version;
-        }
-
-        return;
 }
 
 static int
@@ -1671,7 +1651,7 @@ glusterd_op_set_volume (dict_t *dict)
                                 goto out;
                         }
                 }
-                _gd_update_volume_op_version (volinfo);
+                gd_update_volume_op_versions (volinfo);
 
         } else {
                 list_for_each_entry (voliter, &priv->volumes, vol_list) {
@@ -1698,7 +1678,7 @@ glusterd_op_set_volume (dict_t *dict)
                                         goto out;
                                 }
                         }
-                        _gd_update_volume_op_version (volinfo);
+                        gd_update_volume_op_versions (volinfo);
                 }
         }
 
