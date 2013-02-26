@@ -108,6 +108,99 @@ out:
         return ret;
 }
 
+/* Checks if the client supports the volume, ie. client can understand all the
+ * options in the volfile
+ */
+static gf_boolean_t
+_client_supports_volume (gf_getspec_req *args, peer_info_t *peerinfo,
+                         int32_t *op_errno)
+{
+        gf_boolean_t       retval                = _gf_false;
+        int                ret                   = 0;
+        int                client_min_op_version = 1; // OP-VERSIONs start at 1
+        int                client_max_op_version = 1;
+        char               *volume               = NULL;
+        glusterd_volinfo_t *volinfo              = NULL;
+        dict_t             *dict                 = NULL;
+
+        GF_ASSERT (args);
+        GF_ASSERT (peerinfo);
+        GF_ASSERT (op_errno);
+
+        ret = glusterd_volinfo_find (volume, &volinfo);
+        if (ret) {
+                /* Not finding volinfo implies the volfile requested for, is not
+                 * a gluster volume. These requests shouldn't be checked for
+                 * op_version and should be allowed
+                 */
+                retval = _gf_true;
+                goto out;
+        }
+
+        if (!args->xdata.xdata_len) {
+                // For clients <= 3.3, only allow if op_version = 1
+                if (1 != volinfo->client_op_version) {
+                        *op_errno = ENOTSUP;
+                        gf_log ("glusterd", GF_LOG_INFO,
+                                "Client %s doesn't support required op-version. "
+                                "Rejecting getspec request.",
+                                peerinfo->identifier);
+                        goto out;
+                }
+        } else {
+                /* For glusterfs clients > v3.3, allow clients only if they
+                 * support client_op_version of the volume
+                 */
+                dict = dict_new ();
+                if (!dict) {
+                        goto out;
+                }
+
+                ret = dict_unserialize (args->xdata.xdata_val,
+                                        args->xdata.xdata_len, &dict);
+                if (ret) {
+                        gf_log ("glusterd", GF_LOG_ERROR,
+                                "Failed to unserialize request dictionary");
+                        goto out;
+                }
+
+                ret = dict_get_int32 (dict, "min-op-version",
+                                      &client_min_op_version);
+                if (ret) {
+                        gf_log ("glusterd", GF_LOG_ERROR,
+                                "Failed to get client-min-op-version");
+                        goto out;
+                }
+
+                ret = dict_get_int32 (dict, "max-op-version",
+                                      &client_max_op_version);
+                if (ret) {
+                        gf_log ("glusterd", GF_LOG_ERROR,
+                                "Failed to get client-max-op-version");
+                        goto out;
+                }
+
+                if ((client_min_op_version > volinfo->client_op_version) ||
+                    (client_max_op_version < volinfo->client_op_version)) {
+                        *op_errno = ENOTSUP;
+                        gf_log ("glusterd", GF_LOG_INFO,
+                                "Client %s doesn't support required op-version. "
+                                "Rejecting getspec request.",
+                                peerinfo->identifier);
+                        goto out;
+                }
+
+        }
+
+        retval = _gf_true;
+        // Store the op-versions supported by the client
+        peerinfo->max_op_version = client_max_op_version;
+        peerinfo->min_op_version = client_min_op_version;
+
+out:
+        return retval;
+}
+
 int
 server_getspec (rpcsvc_request_t *req)
 {
@@ -124,17 +217,7 @@ server_getspec (rpcsvc_request_t *req)
         gf_getspec_req        args                   = {0,};
         gf_getspec_rsp        rsp                    = {0,};
         char                  addrstr[RPCSVC_PEER_STRLEN] = {0};
-        dict_t               *dict                   = NULL;
-        xlator_t             *this                   = NULL;
-        glusterd_conf_t      *conf                   = NULL;
-        int                   client_min_op_version  = 1;       // OP-VERSIONs start at 1
-        int                   client_max_op_version  = 1;
-
-        this = THIS;
-        GF_ASSERT (this);
-
-        conf = this->private;
-        GF_ASSERT (conf);
+        peer_info_t          *peerinfo               = NULL;
 
         ret = xdr_to_generic (req->msg[0], &args,
                               (xdrproc_t)xdr_gf_getspec_req);
@@ -144,76 +227,21 @@ server_getspec (rpcsvc_request_t *req)
                 goto fail;
         }
 
-        if (!args.xdata.xdata_len) {
-                // For clients <= 3.3.0, only allow if op_version = 1
-                if (1 != conf->op_version) {
-                        ret = -1;
-                        op_errno = ENOTSUP;
-                        gf_log (this->name, GF_LOG_INFO,
-                                "Client %s doesn't support required op-version. "
-                                "Rejecting getspec request.",
-                                req->trans->peerinfo.identifier);
-                        goto fail;
-                }
-        } else {
-                // For clients > 3.3, only allow if they can support
-                // clusters' op_version
-                dict = dict_new ();
-                if (!dict) {
-                        ret = -1;
-                        goto fail;
-                }
+        peerinfo = &req->trans->peerinfo;
 
-                ret = dict_unserialize (args.xdata.xdata_val,
-                                        args.xdata.xdata_len, &dict);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Failed to unserialize request dictionary");
-                        goto fail;
-                }
-
-                ret = dict_get_int32 (dict, "min-op-version",
-                                      &client_min_op_version);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Failed to get client-min-op-version");
-                        goto fail;
-                }
-
-                ret = dict_get_int32 (dict, "max-op-version",
-                                      &client_max_op_version);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Failed to get client-max-op-version");
-                        goto fail;
-                }
-
-                if ((client_min_op_version > conf->op_version) ||
-                    (client_max_op_version < conf->op_version)) {
-                        ret = -1;
-                        op_errno = ENOTSUP;
-                        //TODO: Add client identifier
-                        gf_log (this->name, GF_LOG_INFO,
-                                "Client %s doesn't support required op-version. "
-                                "Rejecting getspec request.",
-                                req->trans->peerinfo.identifier);
-                        goto fail;
-                }
-
+        if (!_client_supports_volume (&args, peerinfo, &op_errno)) {
+                ret = -1;
+                goto fail;
         }
 
-        // Store the op-versions supported by the client
-        req->trans->peerinfo.max_op_version = client_max_op_version;
-        req->trans->peerinfo.min_op_version = client_min_op_version;
-
         volume = args.key;
-
-        // Store the name of volume  being mounted
+        /* Need to strip leading '/' from volnames. This was introduced to
+         * support nfs style mount parameters for native gluster mount
+         */
         if (volume[0] == '/')
-                strncpy (req->trans->peerinfo.volname, &volume[1],
-                         strlen(&volume[1]));
+                strncpy (peerinfo->volname, &volume[1], strlen(&volume[1]));
         else
-                strncpy (req->trans->peerinfo.volname, volume, strlen(volume));
+                strncpy (peerinfo->volname, volume, strlen(volume));
 
         trans = req->trans;
         ret = rpcsvc_transport_peername (trans, (char *)&addrstr,
