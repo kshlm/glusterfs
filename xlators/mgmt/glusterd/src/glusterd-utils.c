@@ -7453,9 +7453,17 @@ gd_update_volume_op_versions (glusterd_volinfo_t *volinfo)
         int             op_version = 0;
         int             local_op_version = 0;
         int             local_client_op_version = 0;
+        glusterd_conf_t *conf = NULL;
         data_pair_t     *pair = NULL;
 
         GF_ASSERT (volinfo);
+
+        conf = THIS->private;
+        GF_ASSERT (conf);
+
+        /* Default volume op_versions to cluster_op_version */
+        local_op_version = conf->op_version;
+        local_client_op_version = conf->op_version;
 
         dict_for_each_pair (volinfo->dict, pair) {
                 op_version = glusterd_get_op_version_for_key (pair->key);
