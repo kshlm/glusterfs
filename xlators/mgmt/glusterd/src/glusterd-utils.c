@@ -7461,11 +7461,11 @@ gd_update_volume_op_versions (glusterd_volinfo_t *volinfo)
                 op_version = glusterd_get_op_version_for_key (pair->key);
 
                 if (op_version > local_op_version)
-                        volinfo->op_version = op_version;
+                        local_op_version = op_version;
 
                 if (gd_is_client_option (pair->key) &&
                     (op_version > local_client_op_version))
-                        volinfo->client_op_version = op_version;
+                        local_client_op_version = op_version;
         }
 
         volinfo->op_version = local_op_version;
@@ -7473,5 +7473,3 @@ gd_update_volume_op_versions (glusterd_volinfo_t *volinfo)
 
         return;
 }
-
-
