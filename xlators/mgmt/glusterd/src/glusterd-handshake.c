@@ -127,6 +127,7 @@ _client_supports_volume (gf_getspec_req *args, peer_info_t *peerinfo,
         GF_ASSERT (peerinfo);
         GF_ASSERT (op_errno);
 
+        volume = args->key;
         ret = glusterd_volinfo_find (volume, &volinfo);
         if (ret) {
                 /* Not finding volinfo implies the volfile requested for, is not
