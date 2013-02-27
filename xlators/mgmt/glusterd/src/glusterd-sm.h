@@ -107,6 +107,8 @@ struct glusterd_peerinfo_ {
         glusterd_sm_tr_log_t            sm_log;
         gf_boolean_t                    quorum_action;
         gd_quorum_contrib_t             quorum_contrib;
+        int                             min_op_version;
+        int                             max_op_version;
 };
 
 typedef struct glusterd_peerinfo_ glusterd_peerinfo_t;

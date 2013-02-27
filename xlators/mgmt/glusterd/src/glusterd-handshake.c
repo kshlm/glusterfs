@@ -720,6 +720,9 @@ gd_validate_peer_op_version (xlator_t *this, glusterd_peerinfo_t *peerinfo,
                 goto out;
         }
 
+        /* Store supported op-versions of peer */
+        peerinfo->min_op_version = peer_min_op_version;
+        peerinfo->max_op_version = peer_max_op_version;
         ret = 0;
 out:
         gf_log (this->name , GF_LOG_DEBUG, "Peer %s %s", peerinfo->hostname,
@@ -1063,7 +1066,7 @@ glusterd_peer_dump_version_cbk (struct rpc_req *req, struct iovec *iov,
                         peerinfo->hostname);
                 ret = glusterd_mgmt_handshake (this, peerctx);
                 goto out;
-        } else if (conf->op_version > 1) {
+        } else if (conf->op_version > GD_OP_VERSION_MIN) {
                 ret = -1;
                 snprintf (msg, sizeof (msg),
                           "Peer %s does not support required op-version",
