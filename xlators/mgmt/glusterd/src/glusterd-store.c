@@ -1742,8 +1742,8 @@ glusterd_restore_op_version (xlator_t *this)
         gf_log (this->name, GF_LOG_INFO, "op-version not found in store, "
                 "setting it to minimum op-version : %d", GD_OP_VERSION_MIN);
 
-        /* If op-version is missing, set it to  GD_OP_VERSION_MIN */
-        conf->op_version = GD_OP_VERSION_MIN;
+        /* If op-version is missing, set it to GD_OP_VERSION_MAX */
+        conf->op_version = GD_OP_VERSION_MAX;
         ret = 0;
 out:
         return ret;

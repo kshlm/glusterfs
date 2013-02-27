@@ -515,4 +515,7 @@ glusterd_is_same_address (char *name1, char *name2);
 
 void
 gd_update_volume_op_versions (glusterd_volinfo_t *volinfo);
+
+void
+gd_update_cluster_op_version ();
 #endif

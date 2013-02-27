@@ -7481,3 +7481,36 @@ gd_update_volume_op_versions (glusterd_volinfo_t *volinfo)
 
         return;
 }
+
+/*
+ * Each peer in the cluster will calculate the cluster-op-version by itself
+ * using the op-versions saved during the handshake process.
+ *
+ * Cluster op-version is calculated as MIN(max-op-version of all peers)
+ */
+void
+gd_update_cluster_op_version ()
+{
+        xlator_t            *this = NULL;
+        glusterd_conf_t     *conf = NULL;
+        glusterd_peerinfo_t *peer = NULL;
+        int                 new_op_version = GD_OP_VERSION_MAX;
+
+        this = THIS;
+        GF_ASSERT (this);
+        conf = this->private;
+        GF_ASSERT (conf);
+
+        list_for_each_entry (peer, &priv->peers, uuid_list) {
+                if (peer->max_op_version < new_op_version)
+                        new_op_version = peer->max_op_version;
+        }
+
+        if (new_op_version != conf->op_version) {
+                gf_log (this->name, GF_LOG_INFO,
+                        "Cluster op-version changed from %d -> %d",
+                        conf->op_version, new_op_version);
+                conf->op_version = new_op_version;
+                glusterd_store_global_info (this);
+        }
+}
