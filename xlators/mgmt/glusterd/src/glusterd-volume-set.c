@@ -487,7 +487,7 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .voltype       = "cluster/stripe",
           .option        = "block-size",
           .op_version    = 1,
-          .validate_fn = validate_stripe
+          .validate_fn = validate_stripe,
           .client_option = _gf_true
         },
         { .key           = "cluster.stripe-coalesce",
