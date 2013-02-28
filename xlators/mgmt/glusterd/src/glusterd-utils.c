@@ -1033,6 +1033,10 @@ glusterd_friend_cleanup (glusterd_peerinfo_t *peerinfo)
         }
         glusterd_peer_destroy (peerinfo);
 
+        /* Update cluster op-version once a peer has been cleaned-up */
+        gd_update_cluster_op_version ();
+
+
         if (quorum_action)
                 glusterd_do_quorum_action ();
         return 0;
