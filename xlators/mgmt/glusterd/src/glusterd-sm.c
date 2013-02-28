@@ -980,15 +980,16 @@ out:
         return affects;
 }
 
-/* Recalculate the cluster op-version only when a peer moves into the BEFRIENDED
- * state
+/* Recalculate the cluster op-version only when a peer moves in to/out of the
+ * BEFRIENDED state
  */
 static void
 gd_check_and_update_cluster_op_version (glusterd_friend_sm_state_t old_state,
                                         glusterd_friend_sm_state_t new_state)
 {
-        if ((GD_FRIEND_STATE_BEFRIENDED == new_state) &&
-             (old_state != new_state)) {
+        if (((GD_FRIEND_STATE_BEFRIENDED == new_state) ||
+            (GD_FRIEND_STATE_BEFRIENDED == old_state)) &&
+            (old_state != new_state)) {
                 gd_update_cluster_op_version ();
         }
 }
