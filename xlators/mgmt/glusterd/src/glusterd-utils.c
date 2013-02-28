@@ -7491,7 +7491,7 @@ gd_update_volume_op_versions (glusterd_volinfo_t *volinfo)
  * Each peer in the cluster will calculate the cluster-op-version by itself
  * using the op-versions saved during the handshake process.
  *
- * Cluster op-version is calculated as MIN(max-op-version of all peers)
+ * Cluster op-version is calculated as MIN(max-op-version of befriended peers)
  */
 void
 gd_update_cluster_op_version ()
@@ -7507,6 +7507,8 @@ gd_update_cluster_op_version ()
         GF_ASSERT (conf);
 
         list_for_each_entry (peer, &priv->peers, uuid_list) {
+                if (GD_FRIEND_STATE_BEFRIENDED != peerinfo->state)
+                        continue;
                 if (peer->max_op_version < new_op_version)
                         new_op_version = peer->max_op_version;
         }
