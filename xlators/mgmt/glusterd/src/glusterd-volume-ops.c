@@ -1602,7 +1602,7 @@ glusterd_op_create_volume (dict_t *dict, char **op_errstr)
         list_add_tail (&volinfo->vol_list, &priv->volumes);
         vol_added = _gf_true;
 
-        gd_update_volume_op_version (volinfo);
+        gd_update_volume_op_versions (volinfo);
 out:
         GF_FREE(free_ptr);
         if (!vol_added && volinfo)
