@@ -117,9 +117,9 @@ _client_supports_volume (gf_getspec_req *args, peer_info_t *peerinfo,
 {
         gf_boolean_t       retval                = _gf_false;
         int                ret                   = 0;
+        gf_boolean_t       is_volume             = _gf_true;
         int                client_min_op_version = 1; // OP-VERSIONs start at 1
         int                client_max_op_version = 1;
-        char               *volume               = NULL;
         glusterd_volinfo_t *volinfo              = NULL;
         dict_t             *dict                 = NULL;
 
@@ -127,20 +127,19 @@ _client_supports_volume (gf_getspec_req *args, peer_info_t *peerinfo,
         GF_ASSERT (peerinfo);
         GF_ASSERT (op_errno);
 
-        volume = args->key;
-        ret = glusterd_volinfo_find (volume, &volinfo);
+
+        ret = glusterd_volinfo_find (peerinfo->volname, &volinfo);
         if (ret) {
                 /* Not finding volinfo implies the volfile requested for, is not
                  * a gluster volume. These requests shouldn't be checked for
                  * op_version and should be allowed
                  */
-                retval = _gf_true;
-                goto out;
+                is_volume = _gf_false;
         }
 
         if (!args->xdata.xdata_len) {
                 // For clients <= 3.3, only allow if op_version = 1
-                if (1 != volinfo->client_op_version) {
+                if (is_volume && (1 != volinfo->client_op_version)) {
                         *op_errno = ENOTSUP;
                         gf_log ("glusterd", GF_LOG_INFO,
                                 "Client %s doesn't support required op-version. "
@@ -181,8 +180,15 @@ _client_supports_volume (gf_getspec_req *args, peer_info_t *peerinfo,
                         goto out;
                 }
 
-                if ((client_min_op_version > volinfo->client_op_version) ||
-                    (client_max_op_version < volinfo->client_op_version)) {
+                /* Only check when the volfile being requested is a volume.
+                 * A non volume volfile is requested by the local gluster
+                 * services like shd and nfs-server. These need not be checked
+                 * as they will be running at the same op-version as glusterd
+                 * and will be able to support all the features
+                 */
+                if (is_volume &&
+                    ((client_min_op_version > volinfo->client_op_version) ||
+                     (client_max_op_version < volinfo->client_op_version))) {
                         *op_errno = ENOTSUP;
                         gf_log ("glusterd", GF_LOG_INFO,
                                 "Client %s doesn't support required op-version. "
@@ -230,11 +236,6 @@ server_getspec (rpcsvc_request_t *req)
 
         peerinfo = &req->trans->peerinfo;
 
-        if (!_client_supports_volume (&args, peerinfo, &op_errno)) {
-                ret = -1;
-                goto fail;
-        }
-
         volume = args.key;
         /* Need to strip leading '/' from volnames. This was introduced to
          * support nfs style mount parameters for native gluster mount
@@ -243,6 +244,11 @@ server_getspec (rpcsvc_request_t *req)
                 strncpy (peerinfo->volname, &volume[1], strlen(&volume[1]));
         else
                 strncpy (peerinfo->volname, volume, strlen(volume));
+
+        if (!_client_supports_volume (&args, peerinfo, &op_errno)) {
+                ret = -1;
+                goto fail;
+        }
 
         trans = req->trans;
         ret = rpcsvc_transport_peername (trans, (char *)&addrstr,
