@@ -1067,7 +1067,7 @@ glusterd_friend_sm ()
                                 goto out;
                         }
 
-                        gd_check_and_update_op_version
+                        gd_check_and_update_cluster_op_version
                                 (old_state, state[event_type].next_state);
 
                         if (gd_does_peer_affect_quorum (old_state, event_type,

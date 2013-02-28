@@ -1072,7 +1072,7 @@ glusterd_peer_dump_version_cbk (struct rpc_req *req, struct iovec *iov,
                         peerinfo->hostname);
                 ret = glusterd_mgmt_handshake (this, peerctx);
                 goto out;
-        } else if (conf->op_version > GD_OP_VERSION_MIN) {
+        } else if (conf->op_version > 1) {
                 ret = -1;
                 snprintf (msg, sizeof (msg),
                           "Peer %s does not support required op-version",

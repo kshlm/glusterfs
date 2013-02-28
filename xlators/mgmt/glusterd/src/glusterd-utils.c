@@ -7510,14 +7510,14 @@ gd_update_cluster_op_version ()
         conf = this->private;
         GF_ASSERT (conf);
 
-        list_for_each_entry (peer, &priv->peers, uuid_list) {
-                if (GD_FRIEND_STATE_BEFRIENDED != peerinfo->state)
+        list_for_each_entry (peer, &conf->peers, uuid_list) {
+                if (GD_FRIEND_STATE_BEFRIENDED != peer->state.state)
                         continue;
                 if (peer->max_op_version < new_op_version)
                         new_op_version = peer->max_op_version;
         }
 
-        if (new_op_version != conf->op_version) {
+        if (conf->op_version != new_op_version) {
                 gf_log (this->name, GF_LOG_INFO,
                         "Cluster op-version changed from %d -> %d",
                         conf->op_version, new_op_version);
