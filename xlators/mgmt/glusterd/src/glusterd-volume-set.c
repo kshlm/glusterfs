@@ -19,7 +19,6 @@
 static int
 check_dict_key_value (dict_t *dict, char *key, char *value)
 {
-        char                 errstr[2048]  = "";
         glusterd_conf_t     *priv          = NULL;
         int                  ret           = 0;
         xlator_t            *this          = NULL;
@@ -30,25 +29,19 @@ check_dict_key_value (dict_t *dict, char *key, char *value)
         GF_ASSERT (priv);
 
         if (!dict) {
-                snprintf (errstr, 2048, "Received Empty Dict.");
-                gf_log (this->name, GF_LOG_ERROR,
-                        "%s.", errstr);
+                gf_log (this->name, GF_LOG_ERROR, "Received Empty Dict.");
                 ret = -1;
                 goto out;
         }
 
         if (!key) {
-                snprintf (errstr, 2048, "Received Empty Key.");
-                gf_log (this->name, GF_LOG_ERROR,
-                        "%s.", errstr);
+                gf_log (this->name, GF_LOG_ERROR, "Received Empty Key.");
                 ret = -1;
                 goto out;
         }
 
         if (!value) {
-                snprintf (errstr, 2048, "Received Empty Value.");
-                gf_log (this->name, GF_LOG_ERROR,
-                        "%s.", errstr);
+                gf_log (this->name, GF_LOG_ERROR, "Received Empty Value.");
                 ret = -1;
                 goto out;
         }
@@ -62,7 +55,6 @@ out:
 static int
 get_volname_volinfo (dict_t *dict, char **volname, glusterd_volinfo_t **volinfo)
 {
-        char                 errstr[2048]  = "";
         glusterd_conf_t     *priv          = NULL;
         int                  ret           = 0;
         xlator_t            *this          = NULL;
@@ -74,17 +66,13 @@ get_volname_volinfo (dict_t *dict, char **volname, glusterd_volinfo_t **volinfo)
 
         ret = dict_get_str (dict, "volname", volname);
         if (ret) {
-                snprintf (errstr, 2048, "Unable to get volume name");
-                gf_log (this->name, GF_LOG_ERROR,
-                        "%s.", errstr);
+                gf_log (this->name, GF_LOG_ERROR, "Unable to get volume name");
                 goto out;
         }
 
         ret = glusterd_volinfo_find (*volname, volinfo);
         if (ret) {
-                snprintf (errstr, 2048, "Unable to allocate memory");
-                gf_log (this->name, GF_LOG_ERROR,
-                        "%s.", errstr);
+                gf_log (this->name, GF_LOG_ERROR, "Unable to allocate memory");
                 goto out;
         }
 
@@ -246,6 +234,54 @@ out:
         return ret;
 }
 
+static int
+validate_subvols_per_directory (dict_t *dict, char *key, char *value,
+                                char **op_errstr)
+{
+        char                 errstr[2048]  = "";
+        char                *volname       = NULL;
+        glusterd_conf_t     *priv          = NULL;
+        glusterd_volinfo_t  *volinfo       = NULL;
+        int                  ret           = 0;
+        int                  subvols       = 0;
+        xlator_t            *this          = NULL;
+
+        this = THIS;
+        GF_ASSERT (this);
+        priv = this->private;
+        GF_ASSERT (priv);
+
+        ret = check_dict_key_value (dict, key, value);
+        if (ret)
+                goto out;
+
+        ret = get_volname_volinfo (dict, &volname, &volinfo);
+        if (ret)
+                goto out;
+
+        subvols = atoi(value);
+
+        /* Checking if the subvols-per-directory exceed the total
+           number of subvolumes. */
+        if (subvols > volinfo->subvol_count) {
+                snprintf (errstr, sizeof(errstr),
+                          "subvols-per-directory(%d) is greater "
+                          "than the number of subvolumes(%d).",
+                          subvols, volinfo->subvol_count);
+                gf_log (this->name, GF_LOG_ERROR,
+                        "%s.", errstr);
+                *op_errstr = gf_strdup (errstr);
+                ret = -1;
+                goto out;
+        }
+
+out:
+        gf_log (this->name, GF_LOG_DEBUG, "Returning %d", ret);
+
+        return ret;
+}
+
+
 /* dispatch table for VOLUME SET
  * -----------------------------
  *
@@ -334,7 +370,8 @@ struct volopt_map_entry glusterd_volopt_map[] = {
         { .key           = "cluster.subvols-per-directory",
           .voltype       = "cluster/distribute",
           .option        = "directory-layout-spread",
-          .op_version    = 2,
+          .op_version  = 2,
+          .validate_fn = validate_subvols_per_directory
           .client_option = _gf_true
         },
         { .key           = "cluster.readdir-optimize",
@@ -617,22 +654,19 @@ struct volopt_map_entry glusterd_volopt_map[] = {
         { .key           = "performance.write-behind-window-size",
           .voltype       = "performance/write-behind",
           .option        = "cache-size",
-          .flags         = 1,
           .op_version    = 1,
           .client_option = _gf_true
         },
         { .key           = "performance.strict-o-direct",
           .voltype       = "performance/write-behind",
           .option        = "strict-O_DIRECT",
-          .flags         = 2,
-          .op_version    = 1,
+          .op_version  = 2
           .client_option = _gf_true
         },
         { .key           = "performance.strict-write-ordering",
           .voltype       = "performance/write-behind",
           .option        = "strict-write-ordering",
-          .flags         = 2,
-          .op_version    = 1,
+          .op_version  = 2
           .client_option = _gf_true
         },
         { .key           = "performance.lazy-open",
@@ -644,7 +678,6 @@ struct volopt_map_entry glusterd_volopt_map[] = {
         { .key           = "performance.read-ahead-page-count",
           .voltype       = "performance/read-ahead",
           .option        = "page-count",
-          .flags         = 1,
           .op_version    = 1,
           .client_option = _gf_true
         },
@@ -889,7 +922,6 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .option        = "deem-statfs",
           .value         = "off",
           .type          = DOC,
-          .flags         = 0,
           .op_version    = 2,
           .validate_fn   = validate_quota,
           .client_option = _gf_true
