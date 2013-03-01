@@ -402,7 +402,6 @@ glusterd_op_stage_set_volume (dict_t *dict, char **op_errstr)
         uint32_t                        key_op_version          = 0;
         uint32_t                        local_key_op_version    = 0;
         gf_boolean_t                    origin_glusterd         = _gf_true;
-        gf_boolean_t                    check_op_version        = _gf_true;
         gf_boolean_t                    all_vol                 = _gf_false;
         struct volopt_map_entry         *vme                    = NULL;
 
@@ -416,38 +415,7 @@ glusterd_op_stage_set_volume (dict_t *dict, char **op_errstr)
         if (!val_dict)
                 goto out;
 
-        /* Check if we can support the required op-version
-         * This check is not done on the originator glusterd. The originator
-         * glusterd sets this value.
-         */
         origin_glusterd = is_origin_glusterd ();
-
-        if (!origin_glusterd) {
-                /* Check for v3.3.x origin glusterd */
-                check_op_version = dict_get_str_boolean (dict,
-                                                         "check-op-version",
-                                                         _gf_false);
-
-                if (check_op_version) {
-                        ret = dict_get_uint32 (dict, "new-op-version",
-                                               &new_op_version);
-                        if (ret) {
-                                gf_log (this->name, GF_LOG_ERROR,
-                                        "Failed to get new_op_version");
-                                goto out;
-                        }
-
-                        if ((new_op_version > GD_OP_VERSION_MAX) ||
-                            (new_op_version < GD_OP_VERSION_MIN)) {
-                                ret = -1;
-                                snprintf (errstr, sizeof (errstr),
-                                          "Required op_version (%d) is not "
-                                          "supported", new_op_version);
-                                gf_log (this->name, GF_LOG_ERROR, "%s", errstr);
-                                goto out;
-                        }
-                }
-        }
 
         ret = dict_get_int32 (dict, "count", &dict_count);
         if (ret) {
@@ -511,8 +479,6 @@ glusterd_op_stage_set_volume (dict_t *dict, char **op_errstr)
         } else {
                 all_vol = _gf_true;
         }
-
-        local_new_op_version = priv->op_version;
 
         for ( count = 1; ret != 1 ; count++ ) {
                 global_opt = _gf_false;
@@ -600,8 +566,6 @@ glusterd_op_stage_set_volume (dict_t *dict, char **op_errstr)
                         goto out;
 
                 local_key_op_version = glusterd_get_op_version_for_key (key);
-                if (local_key_op_version > local_new_op_version)
-                        local_new_op_version = local_key_op_version;
 
                 sprintf (str, "op-version%d", count);
                 if (origin_glusterd) {
@@ -611,14 +575,27 @@ glusterd_op_stage_set_volume (dict_t *dict, char **op_errstr)
                                         "Failed to set key-op-version in dict");
                                 goto out;
                         }
-                } else if (check_op_version) {
+                } else {
                         ret = dict_get_uint32 (dict, str, &key_op_version);
                         if (ret) {
-                                gf_log (this->name, GF_LOG_ERROR,
-                                        "Failed to get key-op-version from"
-                                        " dict");
-                                goto out;
+                                /* TODO: Remove this and uncomment below code
+                                 * once 3.3 compatability is not required
+                                 */
+                                key_op_version = 1;
+
+                                /*
+                                 *gf_log (this->name, GF_LOG_ERROR,
+                                 *        "Failed to get key-op-version from"
+                                 *        " dict");
+                                 *goto out;
+                                 */
                         }
+                        /* Check if you have the have the same option as
+                         * everyone else
+                         */
+                        /* TODO: Once op-version ranges are established
+                         * the simple check here must be changed
+                         */
                         if (local_key_op_version != key_op_version) {
                                 ret = -1;
                                 snprintf (errstr, sizeof (errstr),
@@ -677,29 +654,6 @@ glusterd_op_stage_set_volume (dict_t *dict, char **op_errstr)
                                                         op_errstr);
         if (ret)
                 goto out;
-
-        if (origin_glusterd) {
-                ret = dict_set_uint32 (dict, "new-op-version",
-                                       local_new_op_version);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Failed to set new-op-version in dict");
-                        goto out;
-                }
-                /* Set this value in dict so other peers know to check for
-                 * op-version. This is a hack for 3.3.x compatibility
-                 *
-                 * TODO: Remove this and the other places this is referred once
-                 * 3.3.x compatibility is not required
-                 */
-                ret = dict_set_uint32 (dict, "check-op-version",
-                                       _gf_true);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Failed to set check-op-version in dict");
-                        goto out;
-                }
-        }
 
         ret = 0;
 
@@ -1479,8 +1433,7 @@ glusterd_op_set_volume (dict_t *dict)
         glusterd_volinfo_t                      *voliter = NULL;
         int32_t                                  dict_count = 0;
         gf_boolean_t                             check_op_version = _gf_false;
-        uint32_t                                 new_op_version = 0;
-        gf_boolean_t                            quorum_action  = _gf_false;
+        gf_boolean_t                             quorum_action  = _gf_false;
 
         this = THIS;
         GF_ASSERT (this);
@@ -1520,19 +1473,6 @@ glusterd_op_set_volume (dict_t *dict)
                 gf_log (this->name, GF_LOG_ERROR, FMTSTR_CHECK_VOL_EXISTS,
                         volname);
                 goto out;
-        }
-
-        // TODO: Remove this once v3.3 compatability is not required
-        check_op_version = dict_get_str_boolean (dict, "check-op-version",
-                                                 _gf_false);
-
-        if (check_op_version) {
-                ret = dict_get_uint32 (dict, "new-op-version", &new_op_version);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Unable to get new op-version from dict");
-                        goto out;
-                }
         }
 
         for (count = 1; ret != -1 ; count++) {
@@ -1682,15 +1622,6 @@ glusterd_op_set_volume (dict_t *dict)
                 }
         }
 
-        if (new_op_version > priv->op_version) {
-                priv->op_version = new_op_version;
-                ret = glusterd_store_global_info (this);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Failed to store op-version");
-                        goto out;
-                }
-        }
 
  out:
         GF_FREE (key_fixed);
