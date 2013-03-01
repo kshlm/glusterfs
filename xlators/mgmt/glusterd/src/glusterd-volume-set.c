@@ -370,8 +370,8 @@ struct volopt_map_entry glusterd_volopt_map[] = {
         { .key           = "cluster.subvols-per-directory",
           .voltype       = "cluster/distribute",
           .option        = "directory-layout-spread",
-          .op_version  = 2,
-          .validate_fn = validate_subvols_per_directory
+          .op_version    = 2,
+          .validate_fn   = validate_subvols_per_directory,
           .client_option = _gf_true
         },
         { .key           = "cluster.readdir-optimize",
@@ -660,13 +660,13 @@ struct volopt_map_entry glusterd_volopt_map[] = {
         { .key           = "performance.strict-o-direct",
           .voltype       = "performance/write-behind",
           .option        = "strict-O_DIRECT",
-          .op_version  = 2
+          .op_version    = 2,
           .client_option = _gf_true
         },
         { .key           = "performance.strict-write-ordering",
           .voltype       = "performance/write-behind",
           .option        = "strict-write-ordering",
-          .op_version  = 2
+          .op_version    = 2,
           .client_option = _gf_true
         },
         { .key           = "performance.lazy-open",
