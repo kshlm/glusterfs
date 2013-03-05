@@ -1082,6 +1082,10 @@ glusterd_peer_dump_version_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
         }
 
+        /* Set op-versions for the peer */
+        peerinfo->min_op_version = 1;
+        peerinfo->max_op_version = 1;
+
         /* Make sure we assign the proper program to peer */
         ret = glusterd_set_clnt_mgmt_program (peerinfo, rsp.prog);
         if (ret) {
