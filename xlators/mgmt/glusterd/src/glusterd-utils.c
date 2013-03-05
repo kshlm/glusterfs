@@ -7534,3 +7534,23 @@ gd_update_cluster_op_version ()
                 glusterd_store_global_info (this);
         }
 }
+
+int
+gd_get_max_vol_op_version () {
+        xlator_t           *this = NULL;
+        glusterd_conf_t    *conf = NULL;
+        glusterd_volinfo_t *volume = NULL;
+        int                max_op_version = 0;
+
+        this = THIS;
+        GF_ASSERT (this);
+        conf = this->private;
+        GF_ASSERT (this);
+
+        list_for_each_entry (volume, &conf->volumes, vol_list) {
+                if (max_op_version < volume->op_version)
+                        max_op_version = volume->op_version;
+        }
+
+        return max_op_version;
+}

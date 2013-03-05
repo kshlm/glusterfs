@@ -394,24 +394,12 @@ gd_validate_cluster_op_version (xlator_t *this, int cluster_op_version,
 
         conf = this->private;
 
-        if (cluster_op_version > GD_OP_VERSION_MAX) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "operating version %d is more than the maximum "
-                        "supported (%d) on the machine (as per peer request "
-                        "from %s)", cluster_op_version, GD_OP_VERSION_MAX,
-                        peerid);
-                goto out;
+        if (cluster_op_version < gd_get_max_vol_op_version()) {
+                ret = -1;
+                gf_log ("glusterd", GF_LOG_ERROR,
+                        "Volumes with higher op-version already exist, cannot"
+                        "use obtained op-version");
         }
-
-        if (cluster_op_version < conf->op_version) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "operating version %d is less than the currently "
-                        "running version (%d) on the machine (as per peer "
-                        "request from %s)", cluster_op_version,
-                        conf->op_version, peerid);
-                goto out;
-        }
-
         ret = 0;
 out:
         return ret;
@@ -711,16 +699,6 @@ gd_validate_peer_op_version (xlator_t *this, glusterd_peerinfo_t *peerinfo,
         if ((peer_max_op_version < conf->op_version) ||
             (peer_min_op_version > conf->op_version)) {
                 ret = gf_asprintf (errstr, "Peer %s does not support required "
-                                   "op-version", peerinfo->hostname);
-                ret = -1;
-                goto out;
-        }
-
-        /* If peer is already operating at a higher op_version reject it.
-         * Cluster cannot be moved to higher op_version to accomodate a peer.
-         */
-        if (peer_op_version > conf->op_version) {
-                ret = gf_asprintf (errstr, "Peer %s is already at a higher "
                                    "op-version", peerinfo->hostname);
                 ret = -1;
                 goto out;

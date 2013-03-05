@@ -521,4 +521,7 @@ gd_update_volume_op_versions (glusterd_volinfo_t *volinfo);
 
 void
 gd_update_cluster_op_version ();
+
+int
+gd_get_max_vol_op_version ();
 #endif
