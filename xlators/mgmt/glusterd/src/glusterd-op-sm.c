@@ -397,7 +397,6 @@ glusterd_op_stage_set_volume (dict_t *dict, char **op_errstr)
         glusterd_volinfo_t              *voliter                = NULL;
         glusterd_conf_t                 *priv                   = NULL;
         xlator_t                        *this                   = NULL;
-        uint32_t                        new_op_version          = 0;
         uint32_t                        local_new_op_version    = 0;
         uint32_t                        key_op_version          = 0;
         uint32_t                        local_key_op_version    = 0;
@@ -1432,7 +1431,6 @@ glusterd_op_set_volume (dict_t *dict)
         gf_boolean_t                             global_opt    = _gf_false;
         glusterd_volinfo_t                      *voliter = NULL;
         int32_t                                  dict_count = 0;
-        gf_boolean_t                             check_op_version = _gf_false;
         gf_boolean_t                             quorum_action  = _gf_false;
 
         this = THIS;
