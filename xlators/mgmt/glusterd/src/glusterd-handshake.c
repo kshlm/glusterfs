@@ -389,7 +389,7 @@ int
 gd_validate_cluster_op_version (xlator_t *this, int cluster_op_version,
                                 char *peerid)
 {
-        int              ret  = -1;
+        int              ret  = 0;
         glusterd_conf_t *conf = NULL;
 
         conf = this->private;
@@ -399,9 +399,9 @@ gd_validate_cluster_op_version (xlator_t *this, int cluster_op_version,
                 gf_log ("glusterd", GF_LOG_ERROR,
                         "Volumes with higher op-version already exist, cannot"
                         "use obtained op-version");
+
         }
-        ret = 0;
-out:
+
         return ret;
 }
 
@@ -664,7 +664,13 @@ out:
         return ret;
 }
 
-
+/* Check if peer can become a member of the cluster.
+ * A peer can become a member only if,
+ *  a. The peer can support already existing volmes in the cluster, this means
+ *     peer has a max-op-version greater than MAX(volume-op-versions)
+ *  b. The peer can move to the cluster-op-version, this means peer has a
+ *     min-op-version lesser than cluster-op-version
+ */
 int
 gd_validate_peer_op_version (xlator_t *this, glusterd_peerinfo_t *peerinfo,
                              dict_t *dict, char **errstr)
@@ -695,15 +701,18 @@ gd_validate_peer_op_version (xlator_t *this, glusterd_peerinfo_t *peerinfo,
                 goto out;
 
         ret = -1;
-        /* Check if peer can support our op_version */
-        if ((peer_max_op_version < conf->op_version) ||
-            (peer_min_op_version > conf->op_version)) {
-                ret = gf_asprintf (errstr, "Peer %s does not support required "
-                                   "op-version", peerinfo->hostname);
-                ret = -1;
+
+        if (peer_max_op_version < gd_get_max_vol_op_version ()) {
+                gf_log (this->name, GF_LOG_INFO, "Peer %s cannot support "
+                        "existing volumes in the cluster", peerinfo->hostname);
                 goto out;
         }
-
+        if (peer_min_op_version > conf->op_version) {
+                gf_log (this->name, GF_LOG_INFO, "Peer %s cannot move to "
+                        "current cluster-op-version %d", peerinfo->hostname,
+                        conf->op_version);
+                goto out;
+        }
         /* Store supported op-versions of peer */
         peerinfo->min_op_version = peer_min_op_version;
         peerinfo->max_op_version = peer_max_op_version;
