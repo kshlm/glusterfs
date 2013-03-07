@@ -326,7 +326,8 @@ glusterd_sm_tr_log_transition_add (glusterd_sm_tr_log_t *log,
 int
 glusterd_peerinfo_new (glusterd_peerinfo_t **peerinfo,
                        glusterd_friend_sm_state_t state, uuid_t *uuid,
-                       const char *hostname, int port);
+                       const char *hostname, int port, int max_op_version,
+                       int min_op_version);
 int
 glusterd_sm_tr_log_init (glusterd_sm_tr_log_t *log,
                          char * (*state_name_get) (int),

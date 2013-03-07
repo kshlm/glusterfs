@@ -5365,7 +5365,8 @@ out:
 int
 glusterd_peerinfo_new (glusterd_peerinfo_t **peerinfo,
                        glusterd_friend_sm_state_t state, uuid_t *uuid,
-                       const char *hostname, int port)
+                       const char *hostname, int port, int max_op_version,
+                       int min_op_version)
 {
         glusterd_peerinfo_t      *new_peer = NULL;
         int                      ret = -1;
@@ -5398,6 +5399,9 @@ glusterd_peerinfo_new (glusterd_peerinfo_t **peerinfo,
         if (new_peer->state.state == GD_FRIEND_STATE_BEFRIENDED)
                 new_peer->quorum_contrib = QUORUM_WAITING;
         new_peer->port = port;
+        new_peer->max_op_version = max_op_version;
+        new_peer->min_op_version = min_op_version;
+
         *peerinfo = new_peer;
 out:
         if (ret && new_peer)

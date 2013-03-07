@@ -2920,6 +2920,18 @@ glusterd_store_peer_write (int fd, glusterd_peerinfo_t *peerinfo)
         if (ret)
                 goto out;
 
+        snprintf (buf, sizeof (buf), "%d", peerinfo->max_op_version);
+        ret = glusterd_store_save_value (fd, GLUSTERD_STORE_KEY_PEER_MAX_OPV,
+                                         buf);
+        if (ret)
+                goto out;
+
+        snprintf (buf, sizeof (buf), "%d", peerinfo->min_op_version);
+        ret = glusterd_store_save_value (fd, GLUSTERD_STORE_KEY_PEER_MIN_OPV,
+                                         buf);
+        if (ret)
+                goto out;
+
 out:
         gf_log ("", GF_LOG_DEBUG, "Returning with %d", ret);
         return ret;
@@ -2986,6 +2998,8 @@ glusterd_store_retrieve_peers (xlator_t *this)
         uuid_t                  uuid = {0,};
         char                    *hostname = NULL;
         int32_t                 state = 0;
+        int                     max_op_version = 0;
+        int                     min_op_version = 0;
         glusterd_store_handle_t *shandle = NULL;
         char                    filepath[PATH_MAX] = {0,};
         glusterd_store_iter_t   *iter = NULL;
@@ -3041,6 +3055,14 @@ glusterd_store_retrieve_peers (xlator_t *this)
                                    key,
                                    strlen (GLUSTERD_STORE_KEY_PEER_HOSTNAME))) {
                                 hostname = gf_strdup (value);
+                        } else if (!strncmp (GLUSTERD_STORE_KEY_PEER_MAX_OPV,
+                                   key,
+                                   strlen (GLUSTERD_STORE_KEY_PEER_MAX_OPV))) {
+                                max_op_version = atoi (value);
+                        } else if (!strncmp (GLUSTERD_STORE_KEY_PEER_MIN_OPV,
+                                   key,
+                                   strlen (GLUSTERD_STORE_KEY_PEER_MIN_OPV))) {
+                                min_op_version = atoi (value);
                         } else {
                                 gf_log ("", GF_LOG_ERROR, "Unknown key: %s",
                                         key);
@@ -3060,6 +3082,7 @@ glusterd_store_retrieve_peers (xlator_t *this)
                 (void) glusterd_store_iter_destroy (iter);
 
                 ret = glusterd_friend_add (hostname, 0, state, &uuid,
+                                           max_op_version, min_op_version,
                                            &peerinfo, 1, NULL);
 
                 GF_FREE (hostname);

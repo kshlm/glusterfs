@@ -1959,7 +1959,7 @@ glusterd_handle_friend_update (rpcsvc_request_t *req)
 
                 ret = glusterd_friend_add (hostname, friend_req.port,
                                            GD_FRIEND_STATE_BEFRIENDED,
-                                           &uuid, &peerinfo, 0, &args);
+                                           &uuid, 0, 0, &peerinfo, 0, &args);
 
                 i++;
         }
@@ -2046,7 +2046,7 @@ glusterd_handle_probe_query (rpcsvc_request_t *req)
                 args.mode = GD_MODE_ON;
                 ret = glusterd_friend_add (remote_hostname, port,
                                            GD_FRIEND_STATE_PROBE_RCVD,
-                                           NULL, &peerinfo, 0, &args);
+                                           NULL, 0, 0, &peerinfo, 0, &args);
                 if (ret) {
                         gf_log ("", GF_LOG_ERROR, "Failed to add peer %s",
                                 remote_hostname);
@@ -2492,7 +2492,7 @@ out:
 int
 glusterd_friend_add (const char *hoststr, int port,
                      glusterd_friend_sm_state_t state,
-                     uuid_t *uuid,
+                     uuid_t *uuid, int max_op_version, int min_op_version,
                      glusterd_peerinfo_t **friend,
                      gf_boolean_t restore,
                      glusterd_peerctx_args_t *args)
@@ -2506,7 +2506,8 @@ glusterd_friend_add (const char *hoststr, int port,
         GF_ASSERT (conf);
         GF_ASSERT (hoststr);
 
-        ret = glusterd_peerinfo_new (friend, state, uuid, hoststr, port);
+        ret = glusterd_peerinfo_new (friend, state, uuid, hoststr, port,
+                                     max_op_version, min_op_version);
         if (ret) {
                 goto out;
         }
@@ -2564,7 +2565,7 @@ glusterd_probe_begin (rpcsvc_request_t *req, const char *hoststr, int port)
                 args.req  = req;
                 ret = glusterd_friend_add ((char *)hoststr, port,
                                            GD_FRIEND_STATE_DEFAULT,
-                                           NULL, &peerinfo, 0, &args);
+                                           NULL, 0, 0, &peerinfo, 0, &args);
                 if ((!ret) && (!peerinfo->connected)) {
                         ret = GLUSTERD_CONNECTION_AWAITED;
                 }

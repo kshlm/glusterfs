@@ -446,8 +446,9 @@ glusterd_friend_find (uuid_t uuid, char *hostname,
 int
 glusterd_friend_add (const char *hoststr, int port,
                      glusterd_friend_sm_state_t state,
-                     uuid_t *uuid, glusterd_peerinfo_t **friend,
-                     gf_boolean_t restore, glusterd_peerctx_args_t *args);
+                     uuid_t *uuid, int max_op_version, int min_op_version,
+                     glusterd_peerinfo_t **friend, gf_boolean_t restore,
+                     glusterd_peerctx_args_t *args);
 
 int
 glusterd_friend_rpc_create (xlator_t *this, glusterd_peerinfo_t *peerinfo,
