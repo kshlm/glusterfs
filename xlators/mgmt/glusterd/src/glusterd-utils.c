@@ -4213,22 +4213,23 @@ static int
 glusterd_get_brick_root (char *path, char **mount_point)
 {
         char           *ptr            = NULL;
+        char           *mnt_pt         = NULL;
         struct stat     brickstat      = {0};
         struct stat     buf            = {0};
 
         if (!path)
                 goto err;
-        *mount_point = gf_strdup (path);
-        if (!*mount_point)
+        mnt_pt = gf_strdup (path);
+        if (!mnt_pt)
                 goto err;
-        if (stat (*mount_point, &brickstat))
+        if (stat (mnt_pt, &brickstat))
                 goto err;
 
-        while ((ptr = strrchr (*mount_point, '/')) &&
-               ptr != *mount_point) {
+        while ((ptr = strrchr (mnt_pt, '/')) &&
+               ptr != mnt_pt) {
 
                 *ptr = '\0';
-                if (stat (*mount_point, &buf)) {
+                if (stat (mnt_pt, &buf)) {
                         gf_log (THIS->name, GF_LOG_ERROR, "error in "
                                 "stat: %s", strerror (errno));
                         goto err;
@@ -4240,20 +4241,21 @@ glusterd_get_brick_root (char *path, char **mount_point)
                 }
         }
 
-        if (ptr == *mount_point) {
+        if (ptr == mnt_pt) {
                 if (stat ("/", &buf)) {
                         gf_log (THIS->name, GF_LOG_ERROR, "error in "
                                 "stat: %s", strerror (errno));
                         goto err;
                 }
                 if (brickstat.st_dev == buf.st_dev)
-                        strcpy (*mount_point, "/");
+                        strcpy (mnt_pt, "/");
         }
 
+        *mount_point = mnt_pt;
         return 0;
 
  err:
-        GF_FREE (*mount_point);
+        GF_FREE (mnt_pt);
         return -1;
 }
 
@@ -5503,11 +5505,15 @@ glusterd_delete_brick (glusterd_volinfo_t* volinfo,
                        glusterd_brickinfo_t *brickinfo)
 {
         int             ret = 0;
+        char      voldir[PATH_MAX] = {0,};
+        glusterd_conf_t *priv = THIS->private;
         GF_ASSERT (volinfo);
         GF_ASSERT (brickinfo);
 
+        GLUSTERD_GET_VOLUME_DIR(voldir, volinfo, priv);
+
         glusterd_delete_volfile (volinfo, brickinfo);
-        glusterd_store_delete_brick (volinfo, brickinfo);
+        glusterd_store_delete_brick (brickinfo, voldir);
         glusterd_brickinfo_delete (brickinfo);
         volinfo->brick_count--;
         return ret;
