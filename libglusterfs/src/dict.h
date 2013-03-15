@@ -234,7 +234,4 @@ GF_MUST_CHECK int dict_serialize_value_with_delim (dict_t *this, char *buf, int3
                                                     char delimiter);
 
 void dict_dump (dict_t *dict);
-
-#define dict_for_each_pair(dict, pair) \
-        for (pair = (dict)->members_list; pair != NULL; pair = pair->next)
 #endif
