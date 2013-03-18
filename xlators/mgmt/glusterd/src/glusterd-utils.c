@@ -7499,6 +7499,10 @@ gd_update_volume_op_versions (glusterd_volinfo_t *volinfo)
         conf = THIS->private;
         GF_ASSERT (conf);
 
+        /* op-versions start at 1 */
+        ctx.op_version = 1;
+        ctx.client_op_version = 1;
+
         dict_foreach (volinfo->dict, _update_volume_op_versions, &ctx);
 
         volinfo->op_version = ctx.op_version;
