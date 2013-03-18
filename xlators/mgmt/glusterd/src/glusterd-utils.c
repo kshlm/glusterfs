@@ -7475,37 +7475,42 @@ out:
 
 }
 
+int
+_update_volume_op_versions (dict_t *this, char *key, data_t *value, void *data)
+{
+        int                op_version = 0;
+        glusterd_volinfo_t *ctx       = NULL;
+
+        GF_ASSERT (data);
+        ctx = data;
+
+        op_version = glusterd_get_op_version_for_key (key);
+
+        if (op_version > ctx->op_version)
+                ctx->op_version = op_version;
+
+        if (gd_is_client_option (key) &&
+            (op_version > ctx->client_op_version))
+                ctx->client_op_version = op_version;
+
+        return 0;
+}
+
 void
 gd_update_volume_op_versions (glusterd_volinfo_t *volinfo)
 {
-        int             op_version = 0;
-        int             local_op_version = 0;
-        int             local_client_op_version = 0;
-        glusterd_conf_t *conf = NULL;
-        data_pair_t     *pair = NULL;
+        glusterd_conf_t    *conf = NULL;
+        glusterd_volinfo_t ctx   = {{0},};
 
         GF_ASSERT (volinfo);
 
         conf = THIS->private;
         GF_ASSERT (conf);
 
-        /* Default volume op_versions to cluster_op_version */
-        local_op_version = conf->op_version;
-        local_client_op_version = conf->op_version;
+        dict_foreach (volinfo->dict, _update_volume_op_versions, &ctx);
 
-        dict_for_each_pair (volinfo->dict, pair) {
-                op_version = glusterd_get_op_version_for_key (pair->key);
-
-                if (op_version > local_op_version)
-                        local_op_version = op_version;
-
-                if (gd_is_client_option (pair->key) &&
-                    (op_version > local_client_op_version))
-                        local_client_op_version = op_version;
-        }
-
-        volinfo->op_version = local_op_version;
-        volinfo->client_op_version = local_client_op_version;
+        volinfo->op_version = ctx.op_version;
+        volinfo->client_op_version = ctx.client_op_version;
 
         return;
 }
