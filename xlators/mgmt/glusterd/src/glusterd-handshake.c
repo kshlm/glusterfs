@@ -1062,11 +1062,11 @@ glusterd_peer_dump_version_cbk (struct rpc_req *req, struct iovec *iov,
                         peerinfo->hostname);
                 ret = glusterd_mgmt_handshake (this, peerctx);
                 goto out;
-        } else if (conf->op_version > 1) {
+        } else if (gd_get_max_vol_op_version() > 1) {
                 ret = -1;
                 snprintf (msg, sizeof (msg),
-                          "Peer %s does not support required op-version",
-                          peerinfo->hostname);
+                          "Peer %s cannot support required op-version existing "
+                          "volumes", peerinfo->hostname);
                 peerctx->errstr = gf_strdup (msg);
                 gf_log (this->name, GF_LOG_ERROR, "%s", msg);
                 goto out;
