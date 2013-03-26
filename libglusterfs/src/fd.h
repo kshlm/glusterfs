@@ -24,6 +24,8 @@
 #include "fd-lk.h"
 #include "common-utils.h"
 
+#define GF_ANON_FD_NO -2
+
 struct _inode;
 struct _dict;
 struct fd_lk_ctx;
@@ -84,7 +86,7 @@ typedef struct _fdtable fdtable_t;
 #include "xlator.h"
 
 
-inline void
+void
 gf_fd_put (fdtable_t *fdtable, int32_t fd);
 
 
@@ -158,6 +160,10 @@ fd_ctx_get (fd_t *fd, xlator_t *xlator, uint64_t *value);
 
 int
 fd_ctx_del (fd_t *fd, xlator_t *xlator, uint64_t *value);
+
+int
+__fd_ctx_del (fd_t *fd, xlator_t *xlator, uint64_t *value);
+
 
 int
 __fd_ctx_set (fd_t *fd, xlator_t *xlator, uint64_t value);

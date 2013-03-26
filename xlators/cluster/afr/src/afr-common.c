@@ -838,10 +838,9 @@ afr_local_transaction_cleanup (afr_local_t *local, xlator_t *this)
 
         GF_FREE (local->internal_lock.inode_locked_nodes);
 
-        GF_FREE (local->internal_lock.entry_locked_nodes);
-
         GF_FREE (local->internal_lock.lower_locked_nodes);
 
+        afr_entry_lockee_cleanup (&local->internal_lock);
 
         GF_FREE (local->transaction.pre_op);
         GF_FREE (local->transaction.eager_lock);
@@ -887,8 +886,6 @@ afr_local_cleanup (afr_local_t *local, xlator_t *this)
         GF_FREE (local->child_errno);
 
         GF_FREE (local->fresh_children);
-
-        GF_FREE (local->fd_open_on);
 
         { /* lookup */
                 if (local->cont.lookup.xattrs) {
@@ -1633,13 +1630,14 @@ afr_self_heal_lookup_unwind (call_frame_t *frame, xlator_t *this,
         afr_local_t *local = NULL;
         int         ret    = -1;
         dict_t      *xattr = NULL;
+        int32_t     spb    = 0;
 
         local = frame->local;
 
         if (op_ret == -1) {
                 local->op_ret = -1;
-                if (afr_error_more_important (local->op_errno, op_errno))
-                        local->op_errno = op_errno;
+		local->op_errno = afr_most_important_error(local->op_errno,
+							   op_errno, _gf_true);
 
                 goto out;
         } else {
@@ -1664,6 +1662,9 @@ afr_self_heal_lookup_unwind (call_frame_t *frame, xlator_t *this,
                                        local->self_heal.actual_sh_started);
                 }
 
+                if (local->loc.inode)
+                        spb = afr_is_split_brain (this, local->loc.inode);
+                ret = dict_set_int32 (xattr, "split-brain", spb);
         }
 out:
         AFR_STACK_UNWIND (lookup, frame, local->op_ret, local->op_errno,
@@ -1990,25 +1991,20 @@ afr_lookup_done (call_frame_t *frame, xlator_t *this)
  * others in that they must be given higher priority while
  * returning to the user.
  *
- * The hierarchy is ESTALE > ENOENT > others
- *
+ * The hierarchy is ESTALE > EIO > ENOENT > others
  */
-
-gf_boolean_t
-afr_error_more_important (int32_t old_errno, int32_t new_errno)
+int32_t
+afr_most_important_error(int32_t old_errno, int32_t new_errno,
+			 gf_boolean_t eio)
 {
-        gf_boolean_t ret = _gf_true;
+	if (old_errno == ESTALE || new_errno == ESTALE)
+		return ESTALE;
+	if (eio && (old_errno == EIO || new_errno == EIO))
+		return EIO;
+	if (old_errno == ENOENT || new_errno == ENOENT)
+		return ENOENT;
 
-        /* Nothing should ever overwrite ESTALE */
-        if (old_errno == ESTALE)
-                ret = _gf_false;
-
-        /* Nothing should overwrite ENOENT, except ESTALE/EIO*/
-        else if ((old_errno == ENOENT) && (new_errno != ESTALE)
-                 && (new_errno != EIO))
-                ret = _gf_false;
-
-        return ret;
+	return new_errno;
 }
 
 int32_t
@@ -2027,8 +2023,9 @@ afr_resultant_errno_get (int32_t *children,
                 } else {
                         child = i;
                 }
-                if (afr_error_more_important (op_errno, child_errno[child]))
-                                op_errno = child_errno[child];
+		op_errno = afr_most_important_error(op_errno,
+						    child_errno[child],
+						    _gf_false);
         }
         return op_errno;
 }
@@ -2040,8 +2037,8 @@ afr_lookup_handle_error (afr_local_t *local, int32_t op_ret,  int32_t op_errno)
         if (op_errno == ENOENT)
                 local->enoent_count++;
 
-        if (afr_error_more_important (local->op_errno, op_errno))
-                local->op_errno = op_errno;
+	local->op_errno = afr_most_important_error(local->op_errno, op_errno,
+						   _gf_false);
 
         if (local->op_errno == ESTALE) {
                 local->op_ret = -1;
@@ -2461,7 +2458,6 @@ __afr_fd_ctx_set (xlator_t *this, fd_t *fd)
         }
 
 	pthread_mutex_init (&fd_ctx->delay_lock, NULL);
-        INIT_LIST_HEAD (&fd_ctx->paused_calls);
         INIT_LIST_HEAD (&fd_ctx->entries);
         fd_ctx->call_child = -1;
 
@@ -2547,11 +2543,7 @@ afr_flush (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
 	local->fd = fd_ref(fd);
         call_count = local->call_count;
 
-	/*
-	 * Ideally we should synchronize flush against completion of writing
-	 * the delayed changelog, but for now we just push it out first...
-	 */
-	afr_delayed_changelog_wake_up(this, fd);
+	afr_delayed_changelog_wake_up (this, fd);
 
         for (i = 0; i < priv->child_count; i++) {
                 if (local->child_up[i]) {
@@ -2584,8 +2576,6 @@ afr_cleanup_fd_ctx (xlator_t *this, fd_t *fd)
         uint64_t        ctx = 0;
         afr_fd_ctx_t    *fd_ctx = NULL;
         int             ret = 0;
-        afr_fd_paused_call_t *paused_call = NULL;
-        afr_fd_paused_call_t *tmp = NULL;
 
         ret = fd_ctx_get (fd, this, &ctx);
         if (ret < 0)
@@ -2601,12 +2591,6 @@ afr_cleanup_fd_ctx (xlator_t *this, fd_t *fd)
                 GF_FREE (fd_ctx->locked_on);
 
                 GF_FREE (fd_ctx->pre_op_piggyback);
-                list_for_each_entry_safe (paused_call, tmp, &fd_ctx->paused_calls,
-                                          call_list) {
-                        list_del_init (&paused_call->call_list);
-                        GF_FREE (paused_call);
-                }
-
                 GF_FREE (fd_ctx->lock_piggyback);
 
                 GF_FREE (fd_ctx->lock_acquired);
@@ -2728,6 +2712,8 @@ afr_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd,
         call_count = local->call_count;
 
         local->fd             = fd_ref (fd);
+
+        afr_delayed_changelog_wake_up (this, fd);
 
         for (i = 0; i < priv->child_count; i++) {
                 if (local->child_up[i]) {
@@ -3902,11 +3888,6 @@ afr_internal_lock_init (afr_internal_lock_t *lk, size_t child_count,
         if (NULL == lk->inode_locked_nodes)
                 goto out;
 
-        lk->entry_locked_nodes = GF_CALLOC (sizeof (*lk->entry_locked_nodes),
-                                            child_count, gf_afr_mt_char);
-        if (NULL == lk->entry_locked_nodes)
-                goto out;
-
         lk->locked_nodes = GF_CALLOC (sizeof (*lk->locked_nodes),
                                       child_count, gf_afr_mt_char);
         if (NULL == lk->locked_nodes)
@@ -3998,14 +3979,6 @@ afr_transaction_local_init (afr_local_t *local, xlator_t *this)
         if (!local->fresh_children)
                 goto out;
 
-        if (local->fd) {
-                local->fd_open_on = GF_CALLOC (sizeof (*local->fd_open_on),
-                                               priv->child_count,
-                                               gf_afr_mt_char);
-                if (!local->fd_open_on)
-                        goto out;
-        }
-
         local->transaction.pre_op = GF_CALLOC (sizeof (*local->transaction.pre_op),
                                                priv->child_count,
                                                gf_afr_mt_char);
@@ -4021,6 +3994,8 @@ afr_transaction_local_init (afr_local_t *local, xlator_t *this)
                                                            AFR_NUM_CHANGE_LOGS);
         if (!local->transaction.txn_changelog)
                 goto out;
+        if (local->fd && (local->transaction.type == AFR_DATA_TRANSACTION))
+                local->transaction.eager_lock_on = priv->eager_lock;
         ret = 0;
 out:
         return ret;
@@ -4272,4 +4247,17 @@ afr_prepare_new_entry_pending_matrix (int32_t **pending,
                         pending[i][idx] = hton32 (1);
                 }
         }
+}
+
+gf_boolean_t
+afr_is_fd_fixable (fd_t *fd)
+{
+        if (!fd || !fd->inode)
+                return _gf_false;
+        else if (fd_is_anonymous (fd))
+                return _gf_false;
+        else if (uuid_is_null (fd->inode->gfid))
+                return _gf_false;
+
+        return _gf_true;
 }

@@ -368,7 +368,9 @@ glfs_new (const char *volname)
 		return NULL;
 	}
 
+#ifdef DEBUG
         gf_mem_acct_enable_set (ctx);
+#endif
 
 	/* first globals init, for gf_mem_acct_enable_set () */
 	ret = glusterfs_globals_init (ctx);
@@ -473,10 +475,15 @@ glfs_init_wait (struct glfs *fs)
 void
 glfs_init_done (struct glfs *fs, int ret)
 {
-	if (fs->init_cbk) {
-		fs->init_cbk (fs, ret);
-		return;
+	glfs_init_cbk init_cbk;
+
+	if (!fs) {
+		gf_log ("glfs", GF_LOG_ERROR,
+			"fs is NULL");
+		goto out;
 	}
+
+	init_cbk = fs->init_cbk;
 
 	pthread_mutex_lock (&fs->mutex);
 	{
@@ -484,9 +491,15 @@ glfs_init_done (struct glfs *fs, int ret)
 		fs->ret = ret;
 		fs->err = errno;
 
-		pthread_cond_broadcast (&fs->cond);
+		if (!init_cbk)
+			pthread_cond_broadcast (&fs->cond);
 	}
 	pthread_mutex_unlock (&fs->mutex);
+
+	if (init_cbk)
+		init_cbk (fs, ret);
+out:
+	return;
 }
 
 

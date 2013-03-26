@@ -223,7 +223,7 @@ err:
 /* this procedure can only pass 4 arguments to registered notifyfn. To send more
  * arguments call wrapper->notify directly.
  */
-inline void
+static inline void
 rpcsvc_program_notify (rpcsvc_listener_t *listener, rpcsvc_event_t event,
                        void *data)
 {
@@ -246,7 +246,7 @@ out:
 }
 
 
-inline int
+static inline int
 rpcsvc_accept (rpcsvc_t *svc, rpc_transport_t *listen_trans,
                rpc_transport_t *new_trans)
 {
@@ -719,7 +719,7 @@ err:
         return txrecord;
 }
 
-inline int
+static inline int
 rpcsvc_get_callid (rpcsvc_t *rpc)
 {
         return GF_UNIVERSAL_ANSWER;
@@ -905,7 +905,7 @@ out:
         return ret;
 }
 
-inline int
+static inline int
 rpcsvc_transport_submit (rpc_transport_t *trans, struct iovec *hdrvec,
                          int hdrcount, struct iovec *proghdr, int proghdrcount,
                          struct iovec *progpayload, int progpayloadcount,
@@ -1174,7 +1174,7 @@ out:
 }
 
 
-inline int
+static inline int
 rpcsvc_program_unregister_portmap (rpcsvc_program_t *prog)
 {
         int ret = 0;
@@ -1729,15 +1729,17 @@ rpcsvc_dump (rpcsvc_request_t *req)
         uint32_t     dump_rsp_len      = 0;
 
         if (!req)
-                goto fail;
+                goto sendrsp;
 
         ret = build_prog_details (req, &rsp);
         if (ret < 0) {
                 op_errno = -ret;
-                goto fail;
+                goto sendrsp;
         }
 
-fail:
+        op_errno = 0;
+
+sendrsp:
         rsp.op_errno = gf_errno_to_error (op_errno);
         rsp.op_ret   = ret;
 
@@ -1749,14 +1751,11 @@ fail:
 
         ret = xdr_serialize_generic (iov, &rsp, (xdrproc_t)xdr_gf_dump_rsp);
         if (ret < 0) {
-                if (req)
-                        req->rpc_err = GARBAGE_ARGS;
-                op_errno = EINVAL;
-                goto fail;
+                ret = RPCSVC_ACTOR_ERROR;
+        } else {
+                rpcsvc_submit_generic (req, &iov, 1, NULL, 0, NULL);
+                ret = 0;
         }
-
-        ret = rpcsvc_submit_generic (req, &iov, 1, NULL, 0,
-                                     NULL);
 
         free_prog_details (&rsp);
 
@@ -1926,9 +1925,12 @@ rpcsvc_transport_peer_check_search (dict_t *options, char *pattern, char *clstr)
         char                    *addrstr = NULL;
         char                    *dup_addrstr = NULL;
         char                    *svptr = NULL;
+        char                    *fqdn        = NULL;
 
         if ((!options) || (!clstr))
                 return -1;
+
+        ret = dict_get_str (options, "fqdn", &fqdn);
 
         if (!dict_get (options, pattern))
                 return -1;
@@ -1956,6 +1958,17 @@ rpcsvc_transport_peer_check_search (dict_t *options, char *pattern, char *clstr)
 #endif
                 if (ret == 0)
                         goto err;
+
+                /* compare hostnames if applicable */
+                if (fqdn) {
+#ifdef FNM_CASEFOLD
+                        ret = fnmatch (addrtok, fqdn, FNM_CASEFOLD);
+#else
+                        ret = fnmatch (addrtok, fqdn, 0);
+#endif
+                        if (ret == 0)
+                                goto err;
+                }
 
                 addrtok = strtok_r (NULL, ",", &svptr);
         }
@@ -2175,6 +2188,7 @@ rpcsvc_transport_peer_check_name (dict_t *options, char *volname,
         int     aret = RPCSVC_AUTH_REJECT;
         int     rjret = RPCSVC_AUTH_REJECT;
         char    clstr[RPCSVC_PEER_STRLEN];
+        char   *hostname    = NULL;
 
         if (!trans)
                 return ret;
@@ -2186,6 +2200,11 @@ rpcsvc_transport_peer_check_name (dict_t *options, char *volname,
                 ret = RPCSVC_AUTH_REJECT;
                 goto err;
         }
+
+        ret = gf_get_hostname_from_ip (clstr, &hostname);
+        if (!ret)
+                ret = dict_set_dynstr (options, "fqdn",
+                                       hostname);
 
         aret = rpcsvc_transport_peer_check_allow (options, volname, clstr);
         rjret = rpcsvc_transport_peer_check_reject (options, volname, clstr);

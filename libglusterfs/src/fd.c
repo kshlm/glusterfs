@@ -513,6 +513,11 @@ fd_destroy (fd_t *fd)
         LOCK_DESTROY (&fd->lock);
 
         GF_FREE (fd->_ctx);
+        LOCK (&fd->inode->lock);
+        {
+                fd->inode->fd_count--;
+        }
+        UNLOCK (&fd->inode->lock);
         inode_unref (fd->inode);
         fd->inode = (inode_t *)0xaaaaaaaa;
         fd_lk_ctx_unref (fd->lk_ctx);
@@ -552,6 +557,7 @@ __fd_bind (fd_t *fd)
 {
         list_del_init (&fd->inode_list);
         list_add (&fd->inode_list, &fd->inode->fd_list);
+        fd->inode->fd_count++;
 
         return fd;
 }
@@ -659,6 +665,12 @@ __fd_lookup (inode_t *inode, uint64_t pid)
 
 
         list_for_each_entry (iter_fd, &inode->fd_list, inode_list) {
+                if (iter_fd->anonymous)
+                        /* If someone was interested in getting an
+                           anonymous fd (or was OK getting an anonymous fd),
+                           they can as well call fd_anonymous() directly */
+                        continue;
+
                 if (!pid || iter_fd->pid == pid) {
                         fd = __fd_ref (iter_fd);
                         break;
@@ -920,7 +932,7 @@ fd_ctx_get (fd_t *fd, xlator_t *xlator, uint64_t *value)
 }
 
 
-static int
+int
 __fd_ctx_del (fd_t *fd, xlator_t *xlator, uint64_t *value)
 {
         int index = 0;

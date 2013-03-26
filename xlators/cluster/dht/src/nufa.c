@@ -52,7 +52,8 @@ nufa_local_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (op_ret == -1)
                 goto out;
 
-        is_linkfile = check_is_linkfile (inode, stbuf, xattr);
+        is_linkfile = check_is_linkfile (inode, stbuf, xattr,
+                                         conf->link_xattr_name);
         is_dir      = check_is_dir (inode, stbuf, xattr);
 
         if (!is_dir && !is_linkfile) {
@@ -201,7 +202,7 @@ nufa_lookup (call_frame_t *frame, xlator_t *this,
                  *       revalidates directly go to the cached-subvolume.
                  */
                 ret = dict_set_uint32 (local->xattr_req,
-                                       "trusted.glusterfs.dht", 4 * 4);
+                                       conf->xattr_name, 4 * 4);
                 if (ret < 0) {
                         gf_log (this->name, GF_LOG_ERROR,
                                 "Failed to set dict value.");
@@ -222,7 +223,7 @@ nufa_lookup (call_frame_t *frame, xlator_t *this,
         } else {
         do_fresh_lookup:
                 ret = dict_set_uint32 (local->xattr_req,
-                                       "trusted.glusterfs.dht", 4 * 4);
+                                       conf->xattr_name, 4 * 4);
                 if (ret < 0) {
                         gf_log (this->name, GF_LOG_ERROR,
                                 "Failed to set dict value.");
@@ -231,7 +232,7 @@ nufa_lookup (call_frame_t *frame, xlator_t *this,
                 }
 
                 ret = dict_set_uint32 (local->xattr_req,
-                                       "trusted.glusterfs.dht.linkto", 256);
+                                       conf->link_xattr_name, 256);
                 if (ret < 0) {
                         gf_log (this->name, GF_LOG_ERROR,
                                 "Failed to set dict value.");
@@ -330,9 +331,8 @@ nufa_create (call_frame_t *frame, xlator_t *this,
                 local->flags = flags;
                 local->umask = umask;
                 local->cached_subvol = avail_subvol;
-                dht_linkfile_create (frame,
-                                     nufa_create_linkfile_create_cbk,
-                                     avail_subvol, subvol, loc);
+                dht_linkfile_create (frame, nufa_create_linkfile_create_cbk,
+                                     this, avail_subvol, subvol, loc);
                 return 0;
         }
 
@@ -362,17 +362,22 @@ nufa_mknod_linkfile_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         dht_local_t  *local = NULL;
 
         local = frame->local;
+        if (!local || !local->cached_subvol) {
+                op_errno = EINVAL;
+                op_ret = -1;
+                goto err;
+        }
 
         if (op_ret >= 0) {
-                STACK_WIND (frame, dht_newfile_cbk,
-                            local->cached_subvol,
+                STACK_WIND_COOKIE (frame, dht_newfile_cbk,
+                            (void *)local->cached_subvol, local->cached_subvol,
                             local->cached_subvol->fops->mknod,
                             &local->loc, local->mode, local->rdev,
                             local->umask, local->params);
 
                 return 0;
         }
-
+err:
         WIPE (postparent);
         WIPE (preparent);
 
@@ -432,7 +437,7 @@ nufa_mknod (call_frame_t *frame, xlator_t *this,
                 local->rdev = rdev;
                 local->cached_subvol = avail_subvol;
 
-                dht_linkfile_create (frame, nufa_mknod_linkfile_cbk,
+                dht_linkfile_create (frame, nufa_mknod_linkfile_cbk, this,
                                      avail_subvol, subvol, loc);
                 return 0;
         }
@@ -440,9 +445,9 @@ nufa_mknod (call_frame_t *frame, xlator_t *this,
         gf_log (this->name, GF_LOG_TRACE,
                 "creating %s on %s", loc->path, subvol->name);
 
-        STACK_WIND (frame, dht_newfile_cbk,
-                    subvol, subvol->fops->mknod,
-                    loc, mode, rdev, umask, params);
+        STACK_WIND_COOKIE (frame, dht_newfile_cbk, (void *)subvol, subvol,
+                           subvol->fops->mknod, loc, mode, rdev, umask,
+                           params);
 
         return 0;
 
@@ -509,6 +514,15 @@ same_first_part (char *str1, char term1, char *str2, char term2)
                 ++str1;
                 ++str2;
         }
+}
+
+int32_t
+mem_acct_init (xlator_t *this)
+{
+        int     ret = -1;
+
+        ret = xlator_mem_acct_init (this, gf_dht_mt_end + 1);
+        return ret;
 }
 
 int
@@ -633,7 +647,7 @@ init (xlator_t *this)
                 gf_log (this->name, GF_LOG_ERROR,
                         "Could not find specified or local subvol");
                 goto err;
-                
+
         }
 
         /* The volume specified exists */

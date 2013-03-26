@@ -88,10 +88,8 @@ start_glusterfs ()
 		;;
 	esac
     fi
-    if [ -n "$log_level" ]; then
-        cmd_line=$(echo "$cmd_line --log-level=$log_level");
-    fi
 
+#options without values start here
     if [ -n "$read_only" ]; then
 	cmd_line=$(echo "$cmd_line --read-only");
     fi
@@ -112,12 +110,25 @@ start_glusterfs ()
         cmd_line=$(echo "$cmd_line --worm");
     fi
 
-    if [ -n "$log_file" ]; then
-	cmd_line=$(echo "$cmd_line --log-file=$log_file");
+    if [ -n "$fopen_keep_cache" ]; then
+	cmd_line=$(echo "$cmd_line --fopen-keep-cache");
     fi
 
     if [ -n "$volfile_check" ]; then
 	cmd_line=$(echo "$cmd_line --volfile-check");
+    fi
+
+    if [ -n "$mem_accounting" ]; then
+        cmd_line=$(echo "$cmd_line --mem-accounting");
+    fi
+
+#options with values start here
+    if [ -n "$log_level" ]; then
+        cmd_line=$(echo "$cmd_line --log-level=$log_level");
+    fi
+
+    if [ -n "$log_file" ]; then
+	cmd_line=$(echo "$cmd_line --log-file=$log_file");
     fi
 
     if [ -n "$direct_io_mode" ]; then
@@ -144,10 +155,6 @@ start_glusterfs ()
 	cmd_line=$(echo "$cmd_line --gid-timeout=$gid_timeout");
     fi
 
-    if [ -n "$fopen_keep_cache" ]; then
-	cmd_line=$(echo "$cmd_line --fopen-keep-cache");
-    fi
-
     if [ -n "$bg_qlen" ]; then
 	cmd_line=$(echo "$cmd_line --background-qlen=$bg_qlen");
     fi
@@ -158,6 +165,11 @@ start_glusterfs ()
 
     if [ -n "$fuse_mountopts" ]; then
 	cmd_line=$(echo "$cmd_line --fuse-mountopts=$fuse_mountopts");
+    fi
+
+    if [ -n "$xlator_option" ]; then
+        xlator_option=$(echo $xlator_option | sed s/"xlator-option="/"--xlator-option "/g)
+        cmd_line=$(echo "$cmd_line $xlator_option");
     fi
 
     # for rdma volume, we have to fetch volfile with '.rdma' added
@@ -331,6 +343,7 @@ main ()
                     "worm")             worm=1 ;;
 		    "fopen-keep-cache")	fopen_keep_cache=1 ;;
                     "enable-ino32")     enable_ino32=1 ;;
+                    "mem-accounting")   mem_accounting=1;;
                     # "mount -t glusterfs" sends this, but it's useless.
                     "rw")       ;;
                     # these ones are interpreted during system initialization
@@ -361,6 +374,7 @@ main ()
 			    "gid-timeout")	gid_timeout=$value ;;
 			    "background-qlen")	bg_qlen=$value ;;
 			    "congestion-threshold")	cong_threshold=$value ;;
+			    "xlator-option")	xlator_option=$xlator_option" "$pair ;;
 			    "fuse-mountopts")	fuse_mountopts=$value ;;
                             *)
                                 # Passthru
@@ -412,7 +426,7 @@ main ()
     }
 
     # Simple check to avoid multiple identical mounts
-    if grep -q " ${mount_point}.*fuse" $mounttab; then
+    if grep -q "[[:space:]+]${mount_point}[[:space:]+]fuse" $mounttab; then
         echo -n "$0: according to mtab, GlusterFS is already mounted on "
         echo "$mount_point"
         exit 0;

@@ -35,233 +35,7 @@
 #include "glusterd-utils.h"
 #include "run.h"
 
-#define AUTH_ALLOW_MAP_KEY "auth.allow"
-#define AUTH_REJECT_MAP_KEY "auth.reject"
-#define NFS_DISABLE_MAP_KEY "nfs.disable"
-#define AUTH_ALLOW_OPT_KEY "auth.addr.*.allow"
-#define AUTH_REJECT_OPT_KEY "auth.addr.*.reject"
-#define NFS_DISABLE_OPT_KEY "nfs.*.disable"
-
-
-/* dispatch table for VOLUME SET
- * -----------------------------
- *
- * Format of entries:
- *
- * First field is the <key>, for the purpose of looking it up
- * in volume dictionary. Each <key> is of the format "<domain>.<specifier>".
- *
- * Second field is <voltype>.
- *
- * Third field is <option>, if its unset, it's assumed to be
- * the same as <specifier>.
- *
- * Fourth field is <value>. In this context they are used to specify
- * a default. That is, even the volume dict doesn't have a value,
- * we procced as if the default value were set for it.
- *
- * Fifth field is <doctype>, which decides if the option is public and available
- * in "set help" or not. "NODOC" entries are not part of the public interface
- * and are subject to change at any time. This also decides if an option is
- * global (apllies to all volumes) or normal (applies to only specified volume).
- *
- * Sixth field is <flags>.
- *
- * Seventh field is <op-version>.
- *
- * There are two type of entries: basic and special.
- *
- * - Basic entries are the ones where the <option> does _not_ start with
- *   the bang! character ('!').
- *
- *   In their case, <option> is understood as an option for an xlator of
- *   type <voltype>. Their effect is to copy over the volinfo->dict[<key>]
- *   value to all graph nodes of type <voltype> (if such a value is set).
- *
- *   You are free to add entries of this type, they will become functional
- *   just by being present in the table.
- *
- * - Special entries where the <option> starts with the bang!.
- *
- *   They are not applied to all graphs during generation, and you cannot
- *   extend them in a trivial way which could be just picked up. Better
- *   not touch them unless you know what you do.
- *
- *
- * Another kind of grouping for options, according to visibility:
- *
- * - Exported: one which is used in the code. These are characterized by
- *   being used a macro as <key> (of the format VKEY_..., defined in
- *   glusterd-volgen.h
- *
- * - Non-exported: the rest; these have string literal <keys>.
- *
- * Adhering to this policy, option name changes shall be one-liners.
- *
- */
-
-static struct volopt_map_entry glusterd_volopt_map[] = {
-        /* DHT xlator options */
-        {"cluster.lookup-unhashed",              "cluster/distribute", NULL, NULL, NO_DOC, 0, 1},
-        {"cluster.min-free-disk",                "cluster/distribute", NULL, NULL, NO_DOC, 0, 1},
-        {"cluster.min-free-inodes",              "cluster/distribute", NULL, NULL, NO_DOC, 0, 1},
-        {"cluster.rebalance-stats",              "cluster/distribute", NULL, NULL, NO_DOC, 0, 2},
-        {"cluster.subvols-per-directory",        "cluster/distribute", "directory-layout-spread", NULL, NO_DOC, 0, 2},
-        {"cluster.readdir-optimize",             "cluster/distribute", NULL, NULL, NO_DOC, 0, 2},
-        {"cluster.nufa",                         "cluster/distribute", "!nufa", NULL, NO_DOC, 0, 2},
-
-        /* AFR xlator options */
-        {"cluster.entry-change-log",             "cluster/replicate",  NULL, NULL, NO_DOC, 0, 1},
-        {"cluster.read-subvolume",               "cluster/replicate",  NULL, NULL, NO_DOC, 0, 1},
-        {"cluster.read-subvolume-index",         "cluster/replicate",  NULL, NULL, NO_DOC, 0, 2},
-        {"cluster.read-hash-mode",               "cluster/replicate",  NULL, NULL, NO_DOC, 0, 2},
-        {"cluster.background-self-heal-count",   "cluster/replicate",  NULL, NULL, NO_DOC, 0, 1},
-        {"cluster.metadata-self-heal",           "cluster/replicate",  NULL, NULL, NO_DOC, 0, 1},
-        {"cluster.data-self-heal",               "cluster/replicate",  NULL, NULL, NO_DOC, 0, 1},
-        {"cluster.entry-self-heal",              "cluster/replicate",  NULL, NULL, NO_DOC, 0, 1},
-        {"cluster.self-heal-daemon",             "cluster/replicate",  "!self-heal-daemon" , NULL, NO_DOC, 0, 1},
-        {"cluster.heal-timeout",                 "cluster/replicate",  "!heal-timeout" , NULL, NO_DOC, 0, 2},
-        {"cluster.strict-readdir",               "cluster/replicate",  NULL, NULL, NO_DOC, 0, 1},
-        {"cluster.self-heal-window-size",        "cluster/replicate",  "data-self-heal-window-size", NULL, DOC, 0, 1},
-        {"cluster.data-change-log",              "cluster/replicate",  NULL, NULL, NO_DOC, 0, 1},
-        {"cluster.metadata-change-log",          "cluster/replicate",  NULL, NULL, NO_DOC, 0, 1},
-        {"cluster.data-self-heal-algorithm",     "cluster/replicate",  "data-self-heal-algorithm", NULL, DOC, 0, 1},
-        {"cluster.eager-lock",                   "cluster/replicate",  NULL, NULL, NO_DOC, 0, 1},
-        {"cluster.quorum-type",                  "cluster/replicate",  "quorum-type", NULL, DOC, 0, 1},
-        {"cluster.quorum-count",                 "cluster/replicate",  "quorum-count", NULL, DOC, 0, 1},
-        {"cluster.choose-local",                 "cluster/replicate",  NULL, NULL, DOC, 0, 2},
-        {"cluster.self-heal-readdir-size",       "cluster/replicate",  NULL, NULL, DOC, 0, 2},
-        {"cluster.readdir-failover",             "cluster/replicate",  NULL, NULL, DOC, 0, 2},
-
-        /* Stripe xlator options */
-        {"cluster.stripe-block-size",            "cluster/stripe",     "block-size", NULL, DOC, 0, 1},
-	{"cluster.stripe-coalesce",		 "cluster/stripe",     "coalesce", NULL, DOC, 0, 2},
-
-        /* IO-stats xlator options */
-        {VKEY_DIAG_LAT_MEASUREMENT,              "debug/io-stats",     "latency-measurement", "off", NO_DOC, 0, 1},
-        {"diagnostics.dump-fd-stats",            "debug/io-stats",     NULL, NULL, NO_DOC, 0, 1},
-        {VKEY_DIAG_CNT_FOP_HITS,                 "debug/io-stats",     "count-fop-hits", "off", NO_DOC, 0, 1},
-        {"diagnostics.brick-log-level",          "debug/io-stats",     "!brick-log-level", NULL, DOC, 0, 1},
-        {"diagnostics.client-log-level",         "debug/io-stats",     "!client-log-level", NULL, DOC, 0, 1},
-        {"diagnostics.brick-sys-log-level",      "debug/io-stats",     "!sys-log-level", NULL, DOC, 0, 1},
-        {"diagnostics.client-sys-log-level",     "debug/io-stats",     "!sys-log-level", NULL, DOC, 0, 1},
-
-        /* IO-cache xlator options */
-        {"performance.cache-max-file-size",      "performance/io-cache",      "max-file-size", NULL, DOC, 0, 1},
-        {"performance.cache-min-file-size",      "performance/io-cache",      "min-file-size", NULL, DOC, 0, 1},
-        {"performance.cache-refresh-timeout",    "performance/io-cache",      "cache-timeout", NULL, DOC, 0, 1},
-        {"performance.cache-priority",           "performance/io-cache",      "priority", NULL, DOC, 0, 1},
-        {"performance.cache-size",               "performance/io-cache",      NULL, NULL, NO_DOC, 0, 1},
-
-        /* IO-threads xlator options */
-        {"performance.io-thread-count",          "performance/io-threads",    "thread-count", NULL, DOC, 0, 1},
-        {"performance.high-prio-threads",        "performance/io-threads",    NULL, NULL, DOC, 0, 1},
-        {"performance.normal-prio-threads",      "performance/io-threads",    NULL, NULL, DOC, 0, 1},
-        {"performance.low-prio-threads",         "performance/io-threads",    NULL, NULL, DOC, 0, 1},
-        {"performance.least-prio-threads",       "performance/io-threads",    NULL, NULL, DOC, 0, 1},
-        {"performance.enable-least-priority",    "performance/io-threads",    NULL, NULL, DOC, 0, 2},
-	{"performance.least-rate-limit",	 "performance/io-threads",    NULL, NULL, DOC, 0, 1},
-
-        /* Other perf xlators' options */
-        {"performance.cache-size",               "performance/quick-read",    NULL, NULL, NO_DOC, 0, 1},
-
-        {"performance.flush-behind",             "performance/write-behind",  "flush-behind", NULL, DOC, 0, 1},
-        {"performance.write-behind-window-size", "performance/write-behind",  "cache-size", NULL, DOC, 1},
-        {"performance.strict-o-direct",          "performance/write-behind",  "strict-O_DIRECT", NULL, DOC, 2},
-        {"performance.strict-write-ordering",    "performance/write-behind",  "strict-write-ordering", NULL, DOC, 2},
-
-        {"performance.read-ahead-page-count",    "performance/read-ahead",    "page-count", NULL, DOC, 1},
-        {"performance.md-cache-timeout",         "performance/md-cache",      "md-cache-timeout", NULL, DOC, 0, 2},
-
-        /* Client xlator options */
-        {"network.frame-timeout",                "protocol/client",           NULL, NULL, NO_DOC, 0, 1},
-        {"network.ping-timeout",                 "protocol/client",           NULL, NULL, NO_DOC, 0, 1},
-        {"network.tcp-window-size",              "protocol/client",           NULL, NULL, NO_DOC, 0, 1},
-        {"features.lock-heal",                   "protocol/client",           "lk-heal", NULL, DOC, 0, 1},
-        {"features.grace-timeout",               "protocol/client",           "grace-timeout", NULL, DOC, 0, 1},
-        {"client.ssl",                           "protocol/client",           "transport.socket.ssl-enabled", NULL, NO_DOC, 0, 2},
-        {"network.remote-dio",                   "protocol/client",           "filter-O_DIRECT", NULL, DOC, 0, 1},
-
-        /* Server xlator options */
-        {"network.tcp-window-size",              "protocol/server",           NULL, NULL, NO_DOC, 0, 1},
-        {"network.inode-lru-limit",              "protocol/server",           NULL, NULL, NO_DOC, 0, 1},
-        {AUTH_ALLOW_MAP_KEY,                     "protocol/server",           "!server-auth", "*", DOC, 0, 1},
-        {AUTH_REJECT_MAP_KEY,                    "protocol/server",           "!server-auth", NULL, DOC, 0},
-
-        {"transport.keepalive",                  "protocol/server",           "transport.socket.keepalive", NULL, NO_DOC, 0, 1},
-        {"server.allow-insecure",                "protocol/server",           "rpc-auth-allow-insecure", NULL, NO_DOC, 0, 1},
-        {"server.statedump-path",                "protocol/server",           "statedump-path", NULL, DOC, 0, 1},
-        {"features.lock-heal",                   "protocol/server",           "lk-heal", NULL, NO_DOC, 0, 1},
-        {"features.grace-timeout",               "protocol/server",           "grace-timeout", NULL, NO_DOC, 0, 1},
-        {"server.ssl",                           "protocol/server",           "transport.socket.ssl-enabled", NULL, NO_DOC, 0, 2},
-
-        /* Performance xlators enable/disbable options */
-        {"performance.write-behind",             "performance/write-behind",  "!perf", "on", NO_DOC, 0, 1},
-        {"performance.read-ahead",               "performance/read-ahead",    "!perf", "on", NO_DOC, 0, 1},
-        {"performance.io-cache",                 "performance/io-cache",      "!perf", "on", NO_DOC, 0, 1},
-        {"performance.quick-read",               "performance/quick-read",    "!perf", "on", NO_DOC, 0, 1},
-        {"performance.stat-prefetch",            "performance/md-cache",      "!perf", "on", NO_DOC, 0, 1},
-        {"performance.client-io-threads",        "performance/io-threads",    "!perf", "off", NO_DOC, 0, 1},
-
-        {"performance.nfs.write-behind",         "performance/write-behind",  "!nfsperf", "off", NO_DOC, 0, 1},
-        {"performance.nfs.read-ahead",           "performance/read-ahead",    "!nfsperf", "off", NO_DOC, 0, 1},
-        {"performance.nfs.io-cache",             "performance/io-cache",      "!nfsperf", "off", NO_DOC, 0, 1},
-        {"performance.nfs.quick-read",           "performance/quick-read",    "!nfsperf", "off", NO_DOC, 0, 1},
-        {"performance.nfs.stat-prefetch",        "performance/md-cache",      "!nfsperf", "off", NO_DOC, 0, 1},
-        {"performance.nfs.io-threads",           "performance/io-threads",    "!nfsperf", "off", NO_DOC, 0, 1},
-
-        /* Quota xlator options */
-        {VKEY_FEATURES_LIMIT_USAGE,              "features/quota",            "limit-set", NULL, NO_DOC, 0, 1},
-        {"features.quota-timeout",               "features/quota",            "timeout", "0", DOC, 0, 1},
-
-        /* Marker xlator options */
-        {VKEY_MARKER_XTIME,                      "features/marker",           "xtime", "off", NO_DOC, OPT_FLAG_FORCE, 1},
-        {VKEY_MARKER_XTIME,                      "features/marker",           "!xtime", "off", NO_DOC, OPT_FLAG_FORCE, 1},
-        {VKEY_FEATURES_QUOTA,                    "features/marker",           "quota", "off", NO_DOC, OPT_FLAG_FORCE, 1},
-
-        /* Debug xlators options */
-        {"debug.trace",                          "debug/trace",               "!debug","off", NO_DOC, 0, 1},
-        {"debug.error-gen",                      "debug/error-gen",           "!debug","off", NO_DOC, 0, 1},
-
-        /* NFS xlator options */
-        {"nfs.enable-ino32",                     "nfs/server",                "nfs.enable-ino32", NULL, GLOBAL_DOC, 0, 1},
-        {"nfs.mem-factor",                       "nfs/server",                "nfs.mem-factor", NULL, GLOBAL_DOC, 0, 1},
-        {"nfs.export-dirs",                      "nfs/server",                "nfs3.export-dirs", NULL, GLOBAL_DOC, 0, 1},
-        {"nfs.export-volumes",                   "nfs/server",                "nfs3.export-volumes", NULL, GLOBAL_DOC, 0, 1},
-        {"nfs.addr-namelookup",                  "nfs/server",                "rpc-auth.addr.namelookup", NULL, GLOBAL_DOC, 0, 1},
-        {"nfs.dynamic-volumes",                  "nfs/server",                "nfs.dynamic-volumes", NULL, GLOBAL_NO_DOC, 0, 1},
-        {"nfs.register-with-portmap",            "nfs/server",                "rpc.register-with-portmap", NULL, GLOBAL_DOC, 0, 1},
-        {"nfs.port",                             "nfs/server",                "nfs.port", NULL, GLOBAL_DOC, 0, 1},
-        {"nfs.rpc-auth-unix",                    "nfs/server",                "!rpc-auth.auth-unix.*", NULL, DOC, 0, 1},
-        {"nfs.rpc-auth-null",                    "nfs/server",                "!rpc-auth.auth-null.*", NULL, DOC, 0, 1},
-        {"nfs.rpc-auth-allow",                   "nfs/server",                "!rpc-auth.addr.*.allow", NULL, DOC, 0, 1},
-        {"nfs.rpc-auth-reject",                  "nfs/server",                "!rpc-auth.addr.*.reject", NULL, DOC, 0, 1},
-        {"nfs.ports-insecure",                   "nfs/server",                "!rpc-auth.ports.*.insecure", NULL, DOC, 0, 1},
-        {"nfs.transport-type",                   "nfs/server",                "!nfs.transport-type", NULL, DOC, 0, 1},
-        {"nfs.trusted-sync",                     "nfs/server",                "!nfs3.*.trusted-sync", NULL, DOC, 0, 1},
-        {"nfs.trusted-write",                    "nfs/server",                "!nfs3.*.trusted-write", NULL, DOC, 0, 1},
-        {"nfs.volume-access",                    "nfs/server",                "!nfs3.*.volume-access", NULL, DOC, 0, 1},
-        {"nfs.export-dir",                       "nfs/server",                "!nfs3.*.export-dir", NULL, DOC, 0, 1},
-        {NFS_DISABLE_MAP_KEY,                    "nfs/server",                "!nfs-disable", NULL, DOC, 0, 1},
-        {"nfs.nlm",                              "nfs/server",                "nfs.nlm", NULL, GLOBAL_DOC, 0, 1},
-        {"nfs.mount-udp",                        "nfs/server",                "nfs.mount-udp", NULL, GLOBAL_DOC, 0, 1},
-        {"nfs.server-aux-gids",                  "nfs/server",                "nfs.server-aux-gids", NULL, NO_DOC, 0, 2},
-
-        /* Other options which don't fit any place above */
-        {"features.read-only",                   "features/read-only",        "!read-only", "off", DOC, 0, 2},
-        {"features.worm",                        "features/worm",             "!worm", "off", DOC, 0, 2},
-
-        {"storage.linux-aio",                    "storage/posix",             NULL, NULL, DOC, 0, 2},
-        {"storage.owner-uid",                    "storage/posix",             "brick-uid", NULL, DOC, 0, 2},
-        {"storage.owner-gid",                    "storage/posix",             "brick-gid", NULL, DOC, 0, 2},
-        {"config.memory-accounting",             "configuration",             "!config", NULL, DOC, 0, 2},
-        {"config.transport",                     "configuration",             "!config", NULL, DOC, 0, 2},
-        {GLUSTERD_QUORUM_TYPE_KEY,               "mgmt/glusterd",             NULL, "off", DOC, 0, 2},
-        {GLUSTERD_QUORUM_RATIO_KEY,              "mgmt/glusterd",             NULL, "0", DOC, 0, 2},
-        {NULL,                                                                }
-};
-
-
+extern struct volopt_map_entry glusterd_volopt_map[];
 
 /*********************************************
  *
@@ -674,7 +448,7 @@ struct opthandler_data {
 };
 
 static int
-process_option (dict_t *dict, char *key, data_t *value, void *param)
+process_option (char *key, data_t *value, void *param)
 {
         struct opthandler_data *odt = param;
         struct volopt_map_entry vme = {0,};
@@ -723,7 +497,7 @@ volgen_graph_set_options_generic (volgen_graph_t *graph, dict_t *dict,
                 data = dict_get (dict, vme->key);
 
                 if (data)
-                        process_option (dict, vme->key, data, &odt);
+                        process_option (vme->key, data, &odt);
                 if (odt.rv)
                         return odt.rv;
 
@@ -737,8 +511,7 @@ volgen_graph_set_options_generic (volgen_graph_t *graph, dict_t *dict,
                          * in this context
                          */
                         odt.data_t_fake = _gf_true;
-                        process_option (NULL, vme->key, (data_t *)vme->value,
-                                        &odt);
+                        process_option (vme->key, (data_t *)vme->value, &odt);
                         if (odt.rv)
                                 return odt.rv;
                 }
@@ -798,33 +571,97 @@ optget_option_handler (volgen_graph_t *graph, struct volopt_map_entry *vme,
         return 0;
 }
 
+static glusterd_server_xlator_t
+get_server_xlator (char *xlator)
+{
+        glusterd_server_xlator_t subvol = GF_XLATOR_NONE;
+
+        if (strcmp (xlator, "posix") == 0)
+                subvol = GF_XLATOR_POSIX;
+        if (strcmp (xlator, "acl") == 0)
+                subvol = GF_XLATOR_ACL;
+        if (strcmp (xlator, "locks") == 0)
+                subvol = GF_XLATOR_LOCKS;
+        if (strcmp (xlator, "io-threads") == 0)
+                subvol = GF_XLATOR_IOT;
+        if (strcmp (xlator, "index") == 0)
+                subvol = GF_XLATOR_INDEX;
+        if (strcmp (xlator, "marker") == 0)
+                subvol = GF_XLATOR_MARKER;
+        if (strcmp (xlator, "io-stats") == 0)
+                subvol = GF_XLATOR_IO_STATS;
+
+        return subvol;
+}
+
+static glusterd_client_xlator_t
+get_client_xlator (char *xlator)
+{
+        glusterd_client_xlator_t subvol = GF_CLNT_XLATOR_NONE;
+
+        if (strcmp (xlator, "client") == 0)
+                subvol = GF_CLNT_XLATOR_FUSE;
+
+        return subvol;
+}
+
+static int
+debugxl_option_handler (volgen_graph_t *graph, struct volopt_map_entry *vme,
+                       void *param)
+{
+        char *volname = NULL;
+        gf_boolean_t enabled = _gf_false;
+
+        volname = param;
+
+        if (strcmp (vme->option, "!debug") != 0)
+                return 0;
+
+        if (!strcmp (vme->key , "debug.trace") ||
+            !strcmp (vme->key, "debug.error-gen")) {
+                if (get_server_xlator (vme->value) == GF_XLATOR_NONE &&
+                    get_client_xlator (vme->value) == GF_CLNT_XLATOR_NONE)
+                        return 0;
+                else
+                        goto add_graph;
+        }
+
+        if (gf_string2boolean (vme->value, &enabled) == -1)
+                return -1;
+        if (!enabled)
+                return 0;
+
+add_graph:
+        if (volgen_graph_add (graph, vme->voltype, volname))
+                return 0;
+        else
+                return -1;
+}
+
 int
 check_and_add_debug_xl (volgen_graph_t *graph, dict_t *set_dict, char *volname,
                         char *xlname)
 {
         int       ret       = 0;
-        xlator_t *xl        = NULL;
         char     *value_str = NULL;
 
         ret = dict_get_str (set_dict, "debug.trace", &value_str);
         if (!ret) {
                 if (strcmp (xlname, value_str) == 0) {
-                        xl = volgen_graph_add (graph, "debug/trace", volname);
-                        if (!xl) {
-                                ret = -1;
+                        ret = volgen_graph_set_options_generic (graph, set_dict, volname,
+                                                                &debugxl_option_handler);
+                        if (ret)
                                 goto out;
-                        }
                 }
         }
 
         ret = dict_get_str (set_dict, "debug.error-gen", &value_str);
         if (!ret) {
                 if (strcmp (xlname, value_str) == 0) {
-                        xl = volgen_graph_add (graph, "debug/error-gen", volname);
-                        if (!xl) {
-                                ret = -1;
+                        ret = volgen_graph_set_options_generic (graph, set_dict, volname,
+                                                                &debugxl_option_handler);
+                        if (ret)
                                 goto out;
-                        }
                 }
         }
 
@@ -1005,6 +842,7 @@ glusterd_check_option_exists (char *key, char **completion)
         struct volopt_map_entry vme = {0,};
         struct volopt_map_entry *vmep = NULL;
         int ret = 0;
+        xlator_t *this = THIS;
 
         (void)vme;
         (void)vmep;
@@ -1013,7 +851,8 @@ glusterd_check_option_exists (char *key, char **completion)
                 if (completion) {
                         ret = option_complete (key, completion);
                         if (ret) {
-                                gf_log ("", GF_LOG_ERROR, "Out of memory");
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "Out of memory");
                                 return -1;
                         }
 
@@ -1039,7 +878,7 @@ glusterd_check_option_exists (char *key, char **completion)
  trie:
         ret = volopt_trie (key, completion);
         if (ret) {
-                gf_log ("", GF_LOG_ERROR,
+                gf_log (this->name, GF_LOG_ERROR,
                         "Some error occurred during keyword hinting");
         }
 
@@ -1578,8 +1417,10 @@ server_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
         char     key[1024]                = {0};
         char     *vgname                  = NULL;
         char     *vg                      = NULL;
+        glusterd_brickinfo_t *brickinfo   = NULL;
 
-        path = param;
+        brickinfo = param;
+        path      = brickinfo->path;
         volname = volinfo->volname;
         get_vol_transport_type (volinfo, transt);
 
@@ -1779,6 +1620,16 @@ server_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
         if (ret)
                 return -1;
 
+        /*In the case of running multiple glusterds on a single machine,
+         * we should ensure that bricks don't listen on all IPs on that
+         * machine and break the IP based separation being brought about.*/
+        if (dict_get (THIS->options, "transport.socket.bind-address")) {
+                ret = xlator_set_option (xl, "transport.socket.bind-address",
+                                         brickinfo->hostname);
+                if (ret)
+                        return -1;
+        }
+
         if (username) {
                 memset (key, 0, sizeof (key));
                 snprintf (key, sizeof (key), "auth.login.%s.allow", path);
@@ -1811,9 +1662,9 @@ server_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
 /* builds a graph for server role , with option overrides in mod_dict */
 static int
 build_server_graph (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
-                    dict_t *mod_dict, char *path)
+                    dict_t *mod_dict, glusterd_brickinfo_t *brickinfo)
 {
-        return build_graph_generic (graph, volinfo, mod_dict, path,
+        return build_graph_generic (graph, volinfo, mod_dict, brickinfo,
                                     &server_graph_builder);
 }
 
@@ -2054,9 +1905,9 @@ glusterd_get_volopt_content (dict_t * ctx, gf_boolean_t xml_out)
         int                      ret = -1;
         char                    *def_val = NULL;
         char                    *descr = NULL;
-        char                     output_string[16384] = {0, };
+        char                     output_string[25600] = {0, };
         char                    *output = NULL;
-        char                     tmp_str[1024] = {0, };
+        char                     tmp_str[2048] = {0, };
 #if (HAVE_LIB_XML)
         xmlTextWriterPtr         writer = NULL;
         xmlBufferPtr             buf = NULL;
@@ -2078,31 +1929,35 @@ glusterd_get_volopt_content (dict_t * ctx, gf_boolean_t xml_out)
                 if (get_key_from_volopt (vme, &key))
                                 goto out; /*Some error while getin key*/
 
-                if (!xlator_type || strcmp (vme->voltype, xlator_type)){
-                        ret = xlator_volopt_dynload (vme->voltype,
-                                                     &dl_handle,
-                                                     &vol_opt_handle);
-                        if (ret) {
-                                dl_handle = NULL;
-                                continue;
+                if (vme->description) {
+                        descr = vme->description;
+                        def_val = vme->value;
+                } else {
+                        if (!xlator_type || strcmp (vme->voltype, xlator_type)){
+                               ret = xlator_volopt_dynload (vme->voltype,
+                                                            &dl_handle,
+                                                            &vol_opt_handle);
+                                if (ret) {
+                                        dl_handle = NULL;
+                                        continue;
+                                }
                         }
+                        ret = xlator_option_info_list (&vol_opt_handle, key,
+                                                       &def_val, &descr);
+                        if (ret) /*Swallow Error i.e if option not found*/
+                                continue;
                 }
-
-                ret = xlator_option_info_list (&vol_opt_handle, key,
-                                               &def_val, &descr);
-                if (ret) /*Swallow Error i.e if option not found*/
-                        continue;
 
                 if (xml_out) {
 #if (HAVE_LIB_XML)
                         if (xml_add_volset_element (writer,vme->key,
-                                                        def_val, descr))
+                                                    def_val, descr))
                                 goto out;
 #else
                         gf_log ("glusterd", GF_LOG_ERROR, "Libxml not present");
 #endif
                 } else {
-                        snprintf (tmp_str, 1024, "Option: %s\nDefault "
+                        snprintf (tmp_str, sizeof (tmp_str), "Option: %s\nDefault "
                                         "Value: %s\nDescription: %s\n\n",
                                         vme->key, def_val, descr);
                         strcat (output_string, tmp_str);
@@ -2407,7 +2262,7 @@ volgen_graph_build_dht_cluster (volgen_graph_t *graph,
                 /* Keep static analyzers quiet by "using" the value. */
                 ret = gf_string2boolean(optstr,&use_nufa);
         }
-                        
+
         clusters = volgen_graph_build_clusters (graph,  volinfo,
                                                 use_nufa
                                                         ? "cluster/nufa"
@@ -3121,16 +2976,21 @@ glusterd_is_valid_volfpath (char *volname, char *brick)
         glusterd_brickinfo_t    *brickinfo = NULL;
         glusterd_volinfo_t      *volinfo = NULL;
         int32_t                 ret = 0;
+        xlator_t                *this = NULL;
+
+        this = THIS;
+        GF_ASSERT (this);
 
         ret = glusterd_brickinfo_new_from_brick (brick, &brickinfo);
         if (ret) {
-                gf_log ("", GF_LOG_WARNING, "brick path validation failed");
+                gf_log (this->name, GF_LOG_WARNING, "Failed to create brickinfo"
+                        " for brick %s", brick );
                 ret = 0;
                 goto out;
         }
         ret = glusterd_volinfo_new (&volinfo);
         if (ret) {
-                gf_log ("", GF_LOG_WARNING, "brick path validation failed");
+                gf_log (this->name, GF_LOG_WARNING, "Failed to create volinfo");
                 ret = 0;
                 goto out;
         }
@@ -3160,7 +3020,7 @@ glusterd_generate_brick_volfile (glusterd_volinfo_t *volinfo,
 
         get_brick_filepath (filename, volinfo, brickinfo);
 
-        ret = build_server_graph (&graph, volinfo, NULL, brickinfo->path);
+        ret = build_server_graph (&graph, volinfo, NULL, brickinfo);
         if (!ret)
                 ret = volgen_write_volfile (&graph, filename);
 
@@ -3655,7 +3515,7 @@ validate_clientopts (glusterd_volinfo_t *volinfo,
 
 int
 validate_brickopts (glusterd_volinfo_t *volinfo,
-                    char *brickinfo_path,
+                    glusterd_brickinfo_t *brickinfo,
                     dict_t *val_dict,
                     char **op_errstr)
 {
@@ -3666,7 +3526,7 @@ validate_brickopts (glusterd_volinfo_t *volinfo,
 
         graph.errstr = op_errstr;
 
-        ret = build_server_graph (&graph, volinfo, val_dict, brickinfo_path);
+        ret = build_server_graph (&graph, volinfo, val_dict, brickinfo);
         if (!ret)
                 ret = graph_reconf_validateopt (&graph.graph, op_errstr);
 
@@ -3688,7 +3548,7 @@ glusterd_validate_brickreconf (glusterd_volinfo_t *volinfo,
                 gf_log ("", GF_LOG_DEBUG,
                         "Validating %s", brickinfo->hostname);
 
-                ret = validate_brickopts (volinfo, brickinfo->path, val_dict,
+                ret = validate_brickopts (volinfo, brickinfo, val_dict,
                                           op_errstr);
                 if (ret)
                         goto out;

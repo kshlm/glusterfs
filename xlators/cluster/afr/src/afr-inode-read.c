@@ -348,6 +348,11 @@ afr_fstat (call_frame_t *frame, xlator_t *this,
 
         VALIDATE_OR_GOTO (fd->inode, out);
 
+        if (afr_is_split_brain (this, fd->inode)) {
+                op_errno = EIO;
+                goto out;
+        }
+
         AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
         local = frame->local;
 
@@ -377,11 +382,8 @@ afr_fstat (call_frame_t *frame, xlator_t *this,
 
         local->fd = fd_ref (fd);
 
-        ret = afr_open_fd_fix (frame, this, _gf_false);
-        if (ret) {
-                op_errno = -ret;
-                goto out;
-        }
+        afr_open_fd_fix (fd, this);
+
         STACK_WIND_COOKIE (frame, afr_fstat_cbk, (void *) (long) call_child,
                            children[call_child],
                            children[call_child]->fops->fstat,
@@ -1434,7 +1436,7 @@ afr_getxattr (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
         if ((strcmp (GF_XATTR_MARKER_KEY, name) == 0)
-            && (-1 == frame->root->pid)) {
+            && (GF_CLIENT_PID_GSYNCD == frame->root->pid)) {
 
                 local->marker.call_count = priv->child_count;
 
@@ -1484,7 +1486,7 @@ afr_getxattr (call_frame_t *frame, xlator_t *this,
 
         if (*priv->vol_uuid) {
                 if ((match_uuid_local (name, priv->vol_uuid) == 0)
-                    && (-1 == frame->root->pid)) {
+                    && (GF_CLIENT_PID_GSYNCD == frame->root->pid)) {
                         local->marker.call_count = priv->child_count;
 
                         sub_volumes = alloca ( priv->child_count
@@ -1658,6 +1660,10 @@ afr_fgetxattr (call_frame_t *frame, xlator_t *this,
 
         children = priv->children;
 
+        if (afr_is_split_brain (this, fd->inode)) {
+                op_errno = EIO;
+                goto out;
+        }
         AFR_LOCAL_ALLOC_OR_GOTO (local, out);
         frame->local = local;
 
@@ -1813,6 +1819,11 @@ afr_readv (call_frame_t *frame, xlator_t *this,
         priv     = this->private;
         children = priv->children;
 
+        if (afr_is_split_brain (this, fd->inode)) {
+                op_errno = EIO;
+                goto out;
+        }
+
         AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
         local = frame->local;
 
@@ -1842,11 +1853,8 @@ afr_readv (call_frame_t *frame, xlator_t *this,
         local->cont.readv.offset     = offset;
         local->cont.readv.flags      = flags;
 
-        ret = afr_open_fd_fix (frame, this, _gf_false);
-        if (ret) {
-                op_errno = -ret;
-                goto out;
-        }
+        afr_open_fd_fix (fd, this);
+
         STACK_WIND_COOKIE (frame, afr_readv_cbk,
                            (void *) (long) call_child,
                            children[call_child],

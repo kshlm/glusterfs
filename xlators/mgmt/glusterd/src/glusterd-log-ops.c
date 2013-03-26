@@ -36,6 +36,7 @@ glusterd_handle_log_rotate (rpcsvc_request_t *req)
 
         GF_ASSERT (req);
         this = THIS;
+        GF_ASSERT (this);
 
         ret = xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req);
         if (ret < 0) {
@@ -75,20 +76,14 @@ glusterd_handle_log_rotate (rpcsvc_request_t *req)
         if (ret)
                 goto out;
 
-        ret = glusterd_op_begin (req, GD_OP_LOG_ROTATE, dict,
-                                 msg, sizeof (msg));
+        ret = glusterd_op_begin_synctask (req, GD_OP_LOG_ROTATE, dict);
 
 out:
-        glusterd_friend_sm ();
-        glusterd_op_sm ();
-
         if (ret) {
                 if (msg[0] == '\0')
                         snprintf (msg, sizeof (msg), "Operation failed");
                 ret = glusterd_op_send_cli_response (cli_op, ret, 0, req,
                                                      dict, msg);
-                if (dict)
-                        dict_unref (dict);
         }
 
         free (cli_req.dict.dict_val);
@@ -165,7 +160,6 @@ glusterd_op_log_rotate (dict_t *dict)
         xlator_t             *this               = NULL;
         char                 *volname            = NULL;
         char                 *brick              = NULL;
-        char                  path[PATH_MAX]     = {0,};
         char                  logfile[PATH_MAX]  = {0,};
         char                  pidfile[PATH_MAX]  = {0,};
         FILE                 *file               = NULL;
@@ -221,10 +215,7 @@ cont:
 
                 valid_brick = 1;
 
-                GLUSTERD_GET_VOLUME_DIR (path, volinfo, priv);
-                GLUSTERD_GET_BRICK_PIDFILE (pidfile, path, brickinfo->hostname,
-                                            brickinfo->path);
-
+                GLUSTERD_GET_BRICK_PIDFILE (pidfile, volinfo, brickinfo, priv);
                 file = fopen (pidfile, "r+");
                 if (!file) {
                         gf_log ("", GF_LOG_ERROR, "Unable to open pidfile: %s",

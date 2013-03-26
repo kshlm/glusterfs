@@ -28,7 +28,13 @@
                         layout->list[i].xlator->name, path);            \
         } while (0)
 
-
+#define DHT_RESET_LAYOUT_RANGE(layout)    do {                          \
+                int cnt = 0;                                            \
+                for (cnt = 0; cnt < layout->cnt; cnt++ ) {              \
+                        layout->list[cnt].start = 0;                    \
+                        layout->list[cnt].stop  = 0;                    \
+                }                                                       \
+        } while (0)
 static uint32_t
 dht_overlap_calc (dht_layout_t *old, int o, dht_layout_t *new, int n)
 {
@@ -38,12 +44,20 @@ dht_overlap_calc (dht_layout_t *old, int o, dht_layout_t *new, int n)
 	if (old->list[o].err > 0 || new->list[n].err > 0)
 		return 0;
 
+        if (old->list[o].start == old->list[o].stop) {
+                return 0;
+        }
+
+        if (new->list[n].start == new->list[n].stop) {
+                return 0;
+        }
+
 	if ((old->list[o].start > new->list[n].stop) ||
 	    (old->list[o].stop < new->list[n].start))
 		return 0;
 
-	return max (old->list[o].start, new->list[n].start) -
-		min (old->list[o].stop, new->list[n].stop);
+	return min (old->list[o].stop, new->list[n].stop) -
+	        max (old->list[o].start, new->list[n].start) + 1;
 }
 
 
@@ -110,7 +124,7 @@ dht_selfheal_dir_xattr_persubvol (call_frame_t *frame, loc_t *loc,
         xlator_t          *this = NULL;
         int32_t           *disk_layout = NULL;
         dht_local_t       *local = NULL;
-
+        dht_conf_t        *conf = NULL;
 
         local = frame->local;
         if (req_subvol)
@@ -123,6 +137,9 @@ dht_selfheal_dir_xattr_persubvol (call_frame_t *frame, loc_t *loc,
         GF_VALIDATE_OR_GOTO (this->name, layout, err);
         GF_VALIDATE_OR_GOTO (this->name, local, err);
         GF_VALIDATE_OR_GOTO (this->name, subvol, err);
+        VALIDATE_OR_GOTO (this->private, err);
+
+        conf = this->private;
 
         xattr = get_new_dict ();
         if (!xattr) {
@@ -137,8 +154,7 @@ dht_selfheal_dir_xattr_persubvol (call_frame_t *frame, loc_t *loc,
                 goto err;
         }
 
-        ret = dict_set_bin (xattr, "trusted.glusterfs.dht",
-                            disk_layout, 4 * 4);
+        ret = dict_set_bin (xattr, conf->xattr_name, disk_layout, 4 * 4);
         if (ret == -1) {
                 gf_log (this->name, GF_LOG_WARNING,
                         "%s: (subvol %s) failed to set xattr dictionary",
@@ -223,52 +239,6 @@ out:
 }
 
 int
-dht_selfheal_dir_xattr (call_frame_t *frame, loc_t *loc, dht_layout_t *layout)
-{
-        dht_local_t *local = NULL;
-        int          missing_xattr = 0;
-        int          i = 0;
-        xlator_t    *this = NULL;
-
-        local = frame->local;
-        this = frame->this;
-
-        for (i = 0; i < layout->cnt; i++) {
-                if (layout->list[i].err != -1 || !layout->list[i].stop) {
-                        /* err != -1 would mean xattr present on the directory
-                         * or the directory is non existent.
-                         * !layout->list[i].stop would mean layout absent
-                         */
-
-                        continue;
-                }
-                missing_xattr++;
-        }
-
-        gf_log (this->name, GF_LOG_TRACE,
-                "%d subvolumes missing xattr for %s",
-                missing_xattr, loc->path);
-
-        if (missing_xattr == 0) {
-                dht_selfheal_dir_finish (frame, this, 0);
-                return 0;
-        }
-
-        local->call_cnt = missing_xattr;
-
-        for (i = 0; i < layout->cnt; i++) {
-                if (layout->list[i].err != -1 || !layout->list[i].stop)
-                        continue;
-
-                dht_selfheal_dir_xattr_persubvol (frame, loc, layout, i, NULL);
-
-                if (--missing_xattr == 0)
-                        break;
-        }
-        return 0;
-}
-
-int
 dht_selfheal_dir_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                               int op_ret, int op_errno, struct iatt *statpre,
                               struct iatt *statpost, dict_t *xdata)
@@ -283,7 +253,7 @@ dht_selfheal_dir_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         this_call_cnt = dht_frame_return (frame);
 
         if (is_last_call (this_call_cnt)) {
-                dht_selfheal_dir_xattr (frame, &local->loc, layout);
+                dht_fix_dir_xattr (frame, &local->loc, layout);
         }
 
         return 0;
@@ -308,7 +278,7 @@ dht_selfheal_dir_setattr (call_frame_t *frame, loc_t *loc, struct iatt *stbuf,
         }
 
         if (missing_attr == 0) {
-                dht_selfheal_dir_xattr (frame, loc, layout);
+                dht_fix_dir_xattr (frame, loc, layout);
                 return 0;
         }
 
@@ -501,7 +471,7 @@ dht_selfheal_layout_alloc_start (xlator_t *this, loc_t *loc,
         uint32_t      hashval = 0;
         int           ret = 0;
 
-        ret = dht_hash_compute (layout->type, loc->path, &hashval);
+        ret = dht_hash_compute (this, layout->type, loc->path, &hashval);
         if (ret == 0) {
                 start = (hashval % layout->cnt);
         }
@@ -550,11 +520,10 @@ dht_get_layout_count (xlator_t *this, dht_layout_t *layout, int new_layout)
         }
 
         /* if layout->spread_cnt is set, check if it is <= available
-         * subvolumes (excluding bricks that are being decommissioned). Else
-         * return count */
+         * subvolumes (down brick and decommissioned bricks are considered
+         * un-availbale). Else return count (available up bricks) */
         count = ((layout->spread_cnt &&
-                 (layout->spread_cnt <=
-                 (conf->subvolume_cnt - conf->decommission_subvols_cnt))) ?
+                 (layout->spread_cnt <= count)) ?
                  layout->spread_cnt : ((count) ? count : 1));
 
         return count;
@@ -565,18 +534,25 @@ void dht_selfheal_layout_new_directory (call_frame_t *frame, loc_t *loc,
 					dht_layout_t *new_layout);
 
 void dht_layout_entry_swap (dht_layout_t *layout, int i, int j);
+void dht_layout_range_swap (dht_layout_t *layout, int i, int j);
+
+/*
+ * It's a bit icky using local variables in a macro, but it makes the rest
+ * of the code a lot clearer.
+ */
+#define OV_ENTRY(x,y)      table[x*new->cnt+y]
 
 void
 dht_selfheal_layout_maximize_overlap (call_frame_t *frame, loc_t *loc,
 				      dht_layout_t *new, dht_layout_t *old)
 {
 	int           i            = 0;
-	int           k            = 0;
+	int           j            = 0;
 	uint32_t      curr_overlap = 0;
 	uint32_t      max_overlap  = 0;
 	int           max_overlap_idx = -1;
 	uint32_t      overlap      = 0;
-
+        uint32_t     *table = NULL;
 
 	dht_layout_sort_volname (old);
 	/* Now both old_layout->list[] and new_layout->list[]
@@ -585,31 +561,54 @@ dht_selfheal_layout_maximize_overlap (call_frame_t *frame, loc_t *loc,
 	   to the same subvolumes
 	*/
 
+        /* Build a table of overlaps between new[i] and old[j]. */
+        table = alloca(sizeof(overlap)*old->cnt*new->cnt);
+        if (!table) {
+                return;
+        }
+        memset(table,0,sizeof(overlap)*old->cnt*new->cnt);
+        for (i = 0; i < new->cnt; ++i) {
+                for (j = 0; j < old->cnt; ++j) {
+                        OV_ENTRY(i,j) = dht_overlap_calc(old,j,new,i);
+                }
+        }
+
 	for (i = 0; i < new->cnt; i++) {
-		if (new->list[i].err > 0)
+		if (new->list[i].err > 0) {
 			/* Subvol might be marked for decommission
 			   with EINVAL, or some other serious error
 			   marked with positive errno.
 			*/
 			continue;
+                }
 
-		curr_overlap = dht_overlap_calc (old, i, new, i);
-		max_overlap = curr_overlap;
-		max_overlap_idx = i;
+                max_overlap = 0;
+                max_overlap_idx = i;
+                for (j = (i + 1); j < new->cnt; ++j) {
+                        /* Calculate the overlap now. */
+                        curr_overlap = OV_ENTRY(i,i) + OV_ENTRY(j,j);
+                        /* Calculate the overlap after the proposed swap. */
+                        overlap = OV_ENTRY(i,j) + OV_ENTRY(j,i);
+                        /* Are we better than status quo? */
+                        if (overlap > curr_overlap) {
+                                overlap -= curr_overlap;
+                                /* Are we better than the previous choice? */
+                                if (overlap > max_overlap) {
+                                        max_overlap = overlap;
+                                        max_overlap_idx = j;
+                                }
+                        }
+                }
 
-		/* Subvols up to `i' have already found their best
-		   matches. Search only from the rest.
-		*/
-		for (k = (i + 1); k < new->cnt; k++) {
-			overlap = dht_overlap_calc (old, i, new, k);
-			if (overlap > max_overlap) {
-				max_overlap_idx = k;
-				max_overlap = overlap;
-			}
-		}
-
-		if (max_overlap > curr_overlap)
-			dht_layout_entry_swap (new, i, max_overlap_idx);
+		if (max_overlap_idx != i) {
+ 			dht_layout_range_swap (new, i, max_overlap_idx);
+                        /* Need to swap the table values too. */
+                        for (j = 0; j < old->cnt; ++j) {
+                                overlap = OV_ENTRY(i,j);
+                                OV_ENTRY(i,j) = OV_ENTRY(max_overlap_idx,j);
+                                OV_ENTRY(max_overlap_idx,j) = overlap;
+                        }
+                }
 	}
 }
 
@@ -704,6 +703,8 @@ dht_selfheal_layout_new_directory (call_frame_t *frame, loc_t *loc,
 
         start_subvol = dht_selfheal_layout_alloc_start (this, loc, layout);
 
+        /* clear out the range, as we are re-computing here */
+        DHT_RESET_LAYOUT_RANGE (layout);
         for (i = start_subvol; i < layout->cnt; i++) {
                 err = layout->list[i].err;
                 if (err == -1) {
@@ -781,7 +782,7 @@ dht_selfheal_new_directory (call_frame_t *frame,
 
         dht_layout_sort_volname (layout);
         dht_selfheal_layout_new_directory (frame, &local->loc, layout);
-        dht_selfheal_dir_xattr (frame, &local->loc, layout);
+        dht_fix_dir_xattr (frame, &local->loc, layout);
         return 0;
 }
 

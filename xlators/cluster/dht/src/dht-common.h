@@ -13,6 +13,8 @@
 #include "config.h"
 #endif
 
+#include <regex.h>
+
 #include "dht-mem-types.h"
 #include "libxlator.h"
 #include "syncop.h"
@@ -53,7 +55,7 @@ struct dht_layout {
                 uint32_t   start;
                 uint32_t   stop;
                 xlator_t  *xlator;
-        } list[0];
+        } list[];
 };
 typedef struct dht_layout  dht_layout_t;
 
@@ -160,6 +162,7 @@ struct dht_local {
 
         /* which xattr request? */
         char xsel[256];
+        int32_t alloc_len;
 
         char   *newpath;
 
@@ -175,6 +178,9 @@ struct dht_local {
         char need_lookup_everywhere;
 
         glusterfs_fop_t      fop;
+
+        gf_boolean_t     linked;
+        xlator_t        *link_subvol;
 
         struct dht_rebalance_ rebalance;
 
@@ -208,6 +214,13 @@ enum gf_defrag_status_t {
 };
 typedef enum gf_defrag_status_t gf_defrag_status_t;
 
+typedef struct gf_defrag_pattern_list gf_defrag_pattern_list_t;
+
+struct gf_defrag_pattern_list {
+        char                       path_pattern[256];
+        uint64_t                   size;
+        gf_defrag_pattern_list_t  *next;
+};
 
 struct gf_defrag_info_ {
         uint64_t                     total_files;
@@ -226,7 +239,7 @@ struct gf_defrag_info_ {
         uuid_t                       node_uuid;
         struct timeval               start_time;
         gf_boolean_t                 stats;
-
+        gf_defrag_pattern_list_t    *defrag_pattern;
 };
 
 typedef struct gf_defrag_info_ gf_defrag_info_t;
@@ -271,6 +284,17 @@ struct dht_conf {
         /* Request to filter directory entries in readdir request */
 
         gf_boolean_t    readdir_optimize;
+
+        /* Support regex-based name reinterpretation. */
+        regex_t         rsync_regex;
+        gf_boolean_t    rsync_regex_valid;
+        regex_t         extra_regex;
+        gf_boolean_t    extra_regex_valid;
+
+        /* Support variable xattr names. */
+        char            *xattr_name;
+        char            *link_xattr_name;
+        char            *wild_xattr_name;
 };
 typedef struct dht_conf dht_conf_t;
 
@@ -301,13 +325,12 @@ typedef enum {
 #define DHT_MIGRATION_IN_PROGRESS 1
 #define DHT_MIGRATION_COMPLETED   2
 
-#define DHT_LINKFILE_KEY         "trusted.glusterfs.dht.linkto"
 #define DHT_LINKFILE_MODE        (S_ISVTX)
 
-#define check_is_linkfile(i,s,x) (                                      \
+#define check_is_linkfile(i,s,x,n) (                                      \
                 ((st_mode_from_ia ((s)->ia_prot, (s)->ia_type) & ~S_IFMT) \
-                 == DHT_LINKFILE_MODE) &&                               \
-                dict_get (x, DHT_LINKFILE_KEY))
+                 == DHT_LINKFILE_MODE) &&                                 \
+                dict_get (x, n))
 
 #define IS_DHT_MIGRATION_PHASE2(buf)  (                                 \
                 IA_ISREG ((buf)->ia_type) &&                            \
@@ -416,10 +439,11 @@ xlator_t *dht_subvol_get_cached (xlator_t *this, inode_t *inode);
 xlator_t *dht_subvol_next (xlator_t *this, xlator_t *prev);
 int       dht_subvol_cnt (xlator_t *this, xlator_t *subvol);
 
-int dht_hash_compute (int type, const char *name, uint32_t *hash_p);
+int dht_hash_compute (xlator_t *this, int type, const char *name, uint32_t *hash_p);
 
 int dht_linkfile_create (call_frame_t    *frame, fop_mknod_cbk_t linkfile_cbk,
-                         xlator_t        *tovol, xlator_t *fromvol, loc_t *loc);
+                         xlator_t        *this, xlator_t *tovol,
+                         xlator_t        *fromvol, loc_t *loc);
 int                                       dht_lookup_directory (call_frame_t *frame, xlator_t *this, loc_t *loc);
 int                                       dht_lookup_everywhere (call_frame_t *frame, xlator_t *this, loc_t *loc);
 int
@@ -721,7 +745,13 @@ dht_dir_attr_heal (void *data);
 int
 dht_dir_attr_heal_done (int ret, call_frame_t *sync_frame, void *data);
 int
-dht_dir_has_layout (dict_t *xattr);
+dht_dir_has_layout (dict_t *xattr, char *name);
 gf_boolean_t
 dht_is_subvol_in_layout (dht_layout_t *layout, xlator_t *xlator);
+xlator_t *
+dht_subvol_with_free_space_inodes (xlator_t *this, xlator_t *subvol);
+xlator_t *
+dht_subvol_maxspace_nonzeroinode (xlator_t *this, xlator_t *subvol);
+int
+dht_linkfile_attr_heal (call_frame_t *frame, xlator_t *this);
 #endif/* _DHT_H */

@@ -27,7 +27,8 @@
 #include <signal.h>
 
 #define GLUSTERD_GET_RB_MNTPT(path, len, volinfo)                           \
-        snprintf (path, len, "/tmp/%s-"RB_CLIENT_MOUNTPOINT,      \
+        snprintf (path, len,                                                \
+                  DEFAULT_VAR_RUN_DIRECTORY"/%s-"RB_CLIENT_MOUNTPOINT,      \
                   volinfo->volname);
 
 
@@ -85,6 +86,7 @@ glusterd_handle_replace_brick (rpcsvc_request_t *req)
 
         GF_ASSERT (req);
         this = THIS;
+        GF_ASSERT (this);
 
         ret = xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req);
         if (ret < 0) {
@@ -164,8 +166,6 @@ out:
                         snprintf (msg, sizeof (msg), "Operation failed");
                 ret = glusterd_op_send_cli_response (cli_op, ret, 0, req,
                                                      dict, msg);
-                if (dict)
-                        dict_unref (dict);
         }
 
         return ret;
@@ -193,6 +193,7 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                                  dict_t *rsp_dict)
 {
         int                                      ret           = 0;
+        int32_t                                  port          = 0;
         char                                    *src_brick     = NULL;
         char                                    *dst_brick     = NULL;
         char                                    *volname       = NULL;
@@ -209,7 +210,6 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
         dict_t                                  *ctx           = NULL;
         glusterd_conf_t                         *priv          = NULL;
         char                                    *savetok       = NULL;
-        char                                     voldir[PATH_MAX] = {0};
         char                                     pidfile[PATH_MAX] = {0};
         char                                    *task_id_str = NULL;
         xlator_t                                *this = NULL;
@@ -319,7 +319,7 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                 if (glusterd_is_rb_started (volinfo)) {
                         snprintf (msg, sizeof (msg), "Replace brick is already "
                                   "started for volume");
-                        gf_log (this->name, GF_LOG_ERROR, msg);
+                        gf_log (this->name, GF_LOG_ERROR, "%s", msg);
                         *op_errstr = gf_strdup (msg);
                         ret = -1;
                         goto out;
@@ -350,6 +350,7 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                         }
                 }
                 break;
+
         case GF_REPLACE_OP_PAUSE:
                 if (glusterd_is_rb_paused (volinfo)) {
                         gf_log (this->name, GF_LOG_ERROR, "Replace brick is "
@@ -428,7 +429,7 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                 }
         }
 
-        if (!glusterd_is_local_addr (src_brickinfo->hostname)) {
+        if (glusterd_is_local_addr (src_brickinfo->hostname)) {
                 gf_log (this->name, GF_LOG_DEBUG,
                         "I AM THE SOURCE HOST");
                 if (src_brickinfo->port && rsp_dict) {
@@ -441,10 +442,8 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                         }
                 }
 
-                GLUSTERD_GET_VOLUME_DIR (voldir, volinfo, priv);
-                GLUSTERD_GET_BRICK_PIDFILE (pidfile, voldir,
-                                            src_brickinfo->hostname,
-                                            src_brickinfo->path);
+                GLUSTERD_GET_BRICK_PIDFILE (pidfile, volinfo, src_brickinfo,
+                                            priv);
                 if ((replace_op != GF_REPLACE_OP_COMMIT_FORCE) &&
                     !glusterd_is_service_running (pidfile, NULL)) {
                         snprintf(msg, sizeof(msg), "Source brick %s:%s "
@@ -484,7 +483,7 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
         if (ret) {
                 *op_errstr = gf_strdup (msg);
                 ret = -1;
-                gf_log (this->name, GF_LOG_ERROR, *op_errstr);
+                gf_log (this->name, GF_LOG_ERROR, "%s", *op_errstr);
                 goto out;
         }
 
@@ -507,7 +506,7 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
        }
 
         if (!glusterd_is_rb_ongoing (volinfo) &&
-            !glusterd_is_local_addr (host)) {
+            glusterd_is_local_addr (host)) {
                 ret = glusterd_brick_create_path (host, path,
                                                   volinfo->volume_id,
                                                   op_errstr);
@@ -515,7 +514,7 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                         goto out;
         }
 
-        if (glusterd_is_local_addr (host)) {
+        if (!glusterd_is_local_addr (host)) {
                 ret = glusterd_friend_find (NULL, host, &peerinfo);
                 if (ret) {
                         snprintf (msg, sizeof (msg), "%s, is not a friend",
@@ -540,6 +539,28 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                         goto out;
                 }
         }
+
+        if (replace_op == GF_REPLACE_OP_START &&
+            glusterd_is_local_addr (volinfo->rep_brick.dst_brick->hostname)) {
+                port = pmap_registry_alloc (THIS);
+                if (!port) {
+                        gf_log (THIS->name, GF_LOG_CRITICAL,
+                                "No free ports available");
+                        ret = -1;
+                        goto out;
+                }
+
+                ctx = glusterd_op_get_ctx();
+                ret = dict_set_int32 ((ctx)?ctx:rsp_dict, "dst-brick-port",
+                                      port);
+                if (ret) {
+                        gf_log (THIS->name, GF_LOG_ERROR, "Failed to set dst "
+                                "brick port");
+                        goto out;
+                }
+                volinfo->rep_brick.dst_brick->port = port;
+        }
+
         ret = 0;
 
 out:
@@ -608,6 +629,8 @@ rb_regenerate_volfiles (glusterd_volinfo_t *volinfo,
         }
 
         ret = glusterd_create_rb_volfiles (volinfo, brickinfo);
+
+        dict_del (dict, "enable-pump");
 
 out:
         return ret;
@@ -708,9 +731,7 @@ rb_spawn_dst_brick (glusterd_volinfo_t *volinfo,
 
         priv = THIS->private;
 
-        port = pmap_registry_alloc (THIS);
-        brickinfo->port = port;
-
+        port = brickinfo->port;
         GF_ASSERT (port);
 
         runinit (&runner);
@@ -726,6 +747,8 @@ rb_spawn_dst_brick (glusterd_volinfo_t *volinfo,
 
         ret = runner_run (&runner);
         if (ret) {
+                pmap_registry_remove (THIS, 0, brickinfo->path,
+                                      GF_PMAP_PORT_BRICKSERVER, NULL);
                 gf_log ("", GF_LOG_DEBUG,
                         "Could not start glusterfs");
                 goto out;
@@ -1002,7 +1025,7 @@ rb_mountpoint_rmdir (glusterd_volinfo_t *volinfo,
         GLUSTERD_GET_RB_MNTPT (mntpt, sizeof (mntpt), volinfo);
         ret = rmdir (mntpt);
         if (ret) {
-                gf_log ("", GF_LOG_DEBUG, "rmdir failed, due to %s",
+                gf_log ("", GF_LOG_DEBUG, "rmdir failed, reason: %s",
                         strerror (errno));
                 goto out;
         }
@@ -1049,8 +1072,8 @@ rb_destroy_maintenance_client (glusterd_volinfo_t *volinfo,
 
         ret = unlink (volfile);
         if (ret) {
-                gf_log (this->name, GF_LOG_DEBUG, "unlink of volfile %s "
-                        "failed", volfile);
+                gf_log ("", GF_LOG_DEBUG, "unlink of %s failed, reason: %s",
+                        volfile, strerror (errno));
                 goto out;
         }
 
@@ -1375,14 +1398,11 @@ rb_update_srcbrick_port (glusterd_brickinfo_t *src_brickinfo, dict_t *rsp_dict,
 
         this = THIS;
 
-        ctx = glusterd_op_get_ctx ();
-        if (ctx) {
-                dict_ret = dict_get_int32 (req_dict, "src-brick-port", &src_port);
-                if (src_port)
-                        src_brickinfo->port = src_port;
-        }
+        dict_ret = dict_get_int32 (req_dict, "src-brick-port", &src_port);
+        if (src_port)
+                src_brickinfo->port = src_port;
 
-        if (!glusterd_is_local_addr (src_brickinfo->hostname)) {
+        if (glusterd_is_local_addr (src_brickinfo->hostname)) {
                 gf_log ("", GF_LOG_INFO,
                         "adding src-brick port no");
 
@@ -1431,15 +1451,12 @@ rb_update_dstbrick_port (glusterd_brickinfo_t *dst_brickinfo, dict_t *rsp_dict,
         int     dict_ret      = 0;
         int     dst_port      = 0;
 
-        ctx = glusterd_op_get_ctx ();
-        if (ctx) {
-                dict_ret = dict_get_int32 (req_dict, "dst-brick-port", &dst_port);
-                if (dst_port)
-                        dst_brickinfo->port = dst_port;
+        dict_ret = dict_get_int32 (req_dict, "dst-brick-port", &dst_port);
+        if (!dict_ret)
+                dst_brickinfo->port = dst_port;
 
-        }
 
-        if (!glusterd_is_local_addr (dst_brickinfo->hostname)) {
+        if (glusterd_is_local_addr (dst_brickinfo->hostname)) {
                 gf_log ("", GF_LOG_INFO,
                         "adding dst-brick port no");
 
@@ -1603,33 +1620,37 @@ glusterd_op_replace_brick (dict_t *dict, dict_t *rsp_dict)
         if (ret)
                 goto out;
 
-        ctx = glusterd_op_get_ctx();
-        if (!ctx) {
-                gf_log (this->name, GF_LOG_ERROR, "Failed to get op_ctx");
-                ret = -1;
-                goto out;
-        }
 
 	if ((GF_REPLACE_OP_START != replace_op)) {
-                ret = rb_update_dstbrick_port (dst_brickinfo, rsp_dict,
-                                               dict, replace_op);
-                if (ret)
-                        goto out;
 
                 /* Set task-id, if available, in op_ctx dict for operations
                  * other than start
                  */
-                if (!uuid_is_null (volinfo->rep_brick.rb_id)) {
-                        ret = glusterd_copy_uuid_to_dict
-                                (volinfo->rep_brick.rb_id, ctx,
-                                 GF_REPLACE_BRICK_TID_KEY);
-                        if (ret) {
-                                gf_log (this->name, GF_LOG_ERROR,
-                                        "Failed to set replace-brick-id");
+                if  (is_origin_glusterd ()) {
+                        ctx = glusterd_op_get_ctx();
+                        if (!ctx) {
+                                gf_log (this->name, GF_LOG_ERROR, "Failed to "
+                                        "get op_ctx");
+                                ret = -1;
                                 goto out;
+                        }
+                        if (!uuid_is_null (volinfo->rep_brick.rb_id)) {
+                                ret = glusterd_copy_uuid_to_dict
+                                        (volinfo->rep_brick.rb_id, ctx,
+                                         GF_REPLACE_BRICK_TID_KEY);
+                                if (ret) {
+                                        gf_log (this->name, GF_LOG_ERROR,
+                                                "Failed to set "
+                                                "replace-brick-id");
+                                        goto out;
+                                }
                         }
                 }
 	}
+        ret = rb_update_dstbrick_port (dst_brickinfo, rsp_dict,
+                                       dict, replace_op);
+        if (ret)
+                goto out;
 
         switch (replace_op) {
         case GF_REPLACE_OP_START:
@@ -1643,7 +1664,7 @@ glusterd_op_replace_brick (dict_t *dict, dict_t *rsp_dict)
                         uuid_parse (task_id_str, volinfo->rep_brick.rb_id);
                 }
 
-                if (!glusterd_is_local_addr (dst_brickinfo->hostname)) {
+                if (glusterd_is_local_addr (dst_brickinfo->hostname)) {
                         gf_log (this->name, GF_LOG_INFO,
                                 "I AM THE DESTINATION HOST");
                         if (!glusterd_is_rb_paused (volinfo)) {
@@ -1663,7 +1684,7 @@ glusterd_op_replace_brick (dict_t *dict, dict_t *rsp_dict)
 		}
 
 
-		if (!glusterd_is_local_addr (src_brickinfo->hostname)) {
+		if (glusterd_is_local_addr (src_brickinfo->hostname)) {
 		        ret = rb_src_brick_restart (volinfo, src_brickinfo,
 				                    1);
 		        if (ret) {
@@ -1673,7 +1694,7 @@ glusterd_op_replace_brick (dict_t *dict, dict_t *rsp_dict)
 			}
 		}
 
-		if (!glusterd_is_local_addr (dst_brickinfo->hostname)) {
+		if (glusterd_is_local_addr (dst_brickinfo->hostname)) {
 			gf_log (this->name, GF_LOG_INFO,
 				"adding dst-brick port no");
 
@@ -1704,12 +1725,7 @@ glusterd_op_replace_brick (dict_t *dict, dict_t *rsp_dict)
                 /* fall through */
         case GF_REPLACE_OP_COMMIT_FORCE:
         {
-                ret = dict_set_int32 (volinfo->dict, "enable-pump", 0);
-                gf_log (this->name, GF_LOG_DEBUG,
-                        "Received commit - will be adding dst brick and "
-                        "removing src brick");
-
-                if (!glusterd_is_local_addr (dst_brickinfo->hostname)) {
+                if (glusterd_is_local_addr (dst_brickinfo->hostname)) {
                         gf_log (this->name, GF_LOG_DEBUG,
                                 "I AM THE DESTINATION HOST");
                         ret = rb_kill_destination_brick (volinfo,
@@ -1790,13 +1806,7 @@ glusterd_op_replace_brick (dict_t *dict, dict_t *rsp_dict)
                         }
                 }
 
-                ret = dict_set_int32 (volinfo->dict, "enable-pump", 0);
-		if (ret) {
-			gf_log (this->name, GF_LOG_CRITICAL,
-                                "Unable to disable pump");
-		}
-
-                if (!glusterd_is_local_addr (src_brickinfo->hostname)) {
+                if (glusterd_is_local_addr (src_brickinfo->hostname)) {
                         ret = rb_src_brick_restart (volinfo, src_brickinfo,
                                                     0);
                         if (ret) {
@@ -1807,7 +1817,7 @@ glusterd_op_replace_brick (dict_t *dict, dict_t *rsp_dict)
                         }
                 }
 
-                if (!glusterd_is_local_addr (dst_brickinfo->hostname)) {
+                if (glusterd_is_local_addr (dst_brickinfo->hostname)) {
                         gf_log (this->name, GF_LOG_INFO,
                                 "I AM THE DESTINATION HOST");
                         ret = rb_kill_destination_brick (volinfo, dst_brickinfo);
@@ -1996,9 +2006,6 @@ out:
                 ret = glusterd_op_sm_inject_event (GD_OP_EVENT_RCVD_RJT, NULL);
         else
                 ret = glusterd_op_sm_inject_event (GD_OP_EVENT_COMMIT_ACC, NULL);
-
-        if (dict)
-                dict_unref (dict);
 
         glusterd_op_sm ();
 }

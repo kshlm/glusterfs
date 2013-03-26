@@ -43,13 +43,6 @@ typedef struct wb_inode {
 				 used for trickling_writes
 			      */
 
-        int32_t      op_ret;   /* Last found op_ret and op_errno
-				  while completing a liability
-				  operation. Will be picked by
-				  the next arriving writev/flush/fsync
-			       */
-        int32_t      op_errno;
-
         list_head_t  all;    /* All requests, from enqueue() till destroy().
 				Used only for resetting generation
 				number when empty.
@@ -89,6 +82,12 @@ typedef struct wb_inode {
 				     write-behind from this list, and therefore
 				     get "upgraded" to the "liability" list.
 			     */
+	list_head_t  wip; /* List of write calls in progress, SYNC or non-SYNC
+			     which are currently STACK_WIND'ed towards the server.
+			     This is for guaranteeing that no two overlapping
+			     writes are in progress at the same time. Modules
+			     like eager-lock in AFR depend on this behavior.
+			  */
 	uint64_t     gen;    /* Liability generation number. Represents
 				the current 'state' of liability. Every
 				new addition to the liability list bumps
@@ -120,6 +119,7 @@ typedef struct wb_request {
 	list_head_t           lie;  /* either in @liability or @temptation */
         list_head_t           winds;
         list_head_t           unwinds;
+        list_head_t           wip;
 
         call_stub_t          *stub;
 
@@ -202,6 +202,30 @@ wb_inode_ctx_get (xlator_t *this, inode_t *inode)
         UNLOCK (&inode->lock);
 out:
         return wb_inode;
+}
+
+
+gf_boolean_t
+wb_fd_err (fd_t *fd, xlator_t *this, int32_t *op_errno)
+{
+        gf_boolean_t err   = _gf_false;
+        uint64_t     value = 0;
+        int32_t      tmp   = 0;
+
+	if (fd_ctx_get (fd, this, &value) == 0) {
+                if (value != EBADF) {
+                        fd_ctx_set (fd, this, EBADF);
+                }
+
+                if (op_errno != NULL) {
+                        tmp = value;
+                        *op_errno = tmp;
+                }
+
+                err = _gf_true;
+        }
+
+        return err;
 }
 
 
@@ -302,6 +326,30 @@ wb_liability_has_conflict (wb_inode_t *wb_inode, wb_request_t *req)
 }
 
 
+gf_boolean_t
+wb_wip_has_conflict (wb_inode_t *wb_inode, wb_request_t *req)
+{
+        wb_request_t *each     = NULL;
+
+	if (req->stub->fop != GF_FOP_WRITE)
+		/* non-writes fundamentally never conflict with WIP requests */
+		return _gf_false;
+
+        list_for_each_entry (each, &wb_inode->wip, wip) {
+		if (each == req)
+			/* request never conflicts with itself,
+			   though this condition should never occur.
+			*/
+			continue;
+
+		if (wb_requests_overlap (each, req))
+			return _gf_true;
+        }
+
+        return _gf_false;
+}
+
+
 static int
 __wb_request_unref (wb_request_t *req)
 {
@@ -320,6 +368,7 @@ __wb_request_unref (wb_request_t *req)
         if (req->refcount == 0) {
                 list_del_init (&req->todo);
                 list_del_init (&req->lie);
+		list_del_init (&req->wip);
 
 		list_del_init (&req->all);
 		if (list_empty (&wb_inode->all)) {
@@ -425,6 +474,7 @@ wb_enqueue_common (wb_inode_t *wb_inode, call_stub_t *stub, int tempted)
         INIT_LIST_HEAD (&req->lie);
         INIT_LIST_HEAD (&req->winds);
         INIT_LIST_HEAD (&req->unwinds);
+        INIT_LIST_HEAD (&req->wip);
 
         req->stub = stub;
         req->wb_inode = wb_inode;
@@ -432,8 +482,8 @@ wb_enqueue_common (wb_inode_t *wb_inode, call_stub_t *stub, int tempted)
 	req->ordering.tempted = tempted;
 
         if (stub->fop == GF_FOP_WRITE) {
-                req->write_size = iov_length (stub->args.writev.vector,
-					      stub->args.writev.count);
+                req->write_size = iov_length (stub->args.vector,
+					      stub->args.count);
 
 		/* req->write_size can change as we collapse
 		   small writes. But the window needs to grow
@@ -449,7 +499,7 @@ wb_enqueue_common (wb_inode_t *wb_inode, call_stub_t *stub, int tempted)
 		req->op_ret = req->write_size;
 		req->op_errno = 0;
 
-		if (stub->args.writev.fd->flags & O_APPEND)
+		if (stub->args.fd->flags & O_APPEND)
 			req->ordering.append = 1;
         }
 
@@ -457,28 +507,28 @@ wb_enqueue_common (wb_inode_t *wb_inode, call_stub_t *stub, int tempted)
 
 	switch (stub->fop) {
 	case GF_FOP_WRITE:
-		req->ordering.off = stub->args.writev.off;
+		req->ordering.off = stub->args.offset;
 		req->ordering.size = req->write_size;
 
-		req->fd = fd_ref (stub->args.writev.fd);
+		req->fd = fd_ref (stub->args.fd);
 
 		break;
 	case GF_FOP_READ:
-		req->ordering.off = stub->args.readv.off;
-		req->ordering.size = stub->args.readv.size;
+		req->ordering.off = stub->args.offset;
+		req->ordering.size = stub->args.size;
 
-		req->fd = fd_ref (stub->args.readv.fd);
+		req->fd = fd_ref (stub->args.fd);
 
 		break;
 	case GF_FOP_TRUNCATE:
-		req->ordering.off = stub->args.truncate.off;
+		req->ordering.off = stub->args.offset;
 		req->ordering.size = 0; /* till infinity */
 		break;
 	case GF_FOP_FTRUNCATE:
-		req->ordering.off = stub->args.ftruncate.off;
+		req->ordering.off = stub->args.offset;
 		req->ordering.size = 0; /* till infinity */
 
-		req->fd = fd_ref (stub->args.ftruncate.fd);
+		req->fd = fd_ref (stub->args.fd);
 
 		break;
 	default:
@@ -541,6 +591,7 @@ __wb_inode_create (xlator_t *this, inode_t *inode)
         INIT_LIST_HEAD (&wb_inode->todo);
         INIT_LIST_HEAD (&wb_inode->liability);
         INIT_LIST_HEAD (&wb_inode->temptation);
+        INIT_LIST_HEAD (&wb_inode->wip);
 
         wb_inode->this = this;
 
@@ -629,12 +680,25 @@ wb_head_done (wb_request_t *head)
 
 
 void
-wb_inode_err (wb_inode_t *wb_inode, int op_errno)
+wb_fulfill_err (wb_request_t *head, int op_errno)
 {
+	wb_inode_t *wb_inode;
+	wb_request_t *req;
+
+	wb_inode = head->wb_inode;
+
+	/* for all future requests yet to arrive */
+	fd_ctx_set (head->fd, THIS, op_errno);
+
 	LOCK (&wb_inode->lock);
 	{
-		wb_inode->op_ret = -1;
-		wb_inode->op_errno = op_errno;
+		/* for all requests already arrived */
+		list_for_each_entry (req, &wb_inode->all, all) {
+			if (req->fd != head->fd)
+				continue;
+			req->op_ret = -1;
+			req->op_errno = op_errno;
+		}
 	}
 	UNLOCK (&wb_inode->lock);
 }
@@ -654,7 +718,7 @@ wb_fulfill_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         wb_inode = head->wb_inode;
 
 	if (op_ret == -1) {
-		wb_inode_err (wb_inode, op_errno);
+		wb_fulfill_err (head, op_errno);
 	} else if (op_ret < head->total_size) {
 		/*
 		 * We've encountered a short write, for whatever reason.
@@ -664,7 +728,7 @@ wb_fulfill_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 		 * TODO: Retry the write so we can potentially capture
 		 * a real error condition (i.e., ENOSPC).
 		 */
-		wb_inode_err (wb_inode, EIO);
+		wb_fulfill_err (head, EIO);
 	}
 
 	wb_head_done (head);
@@ -678,9 +742,9 @@ wb_fulfill_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 
 #define WB_IOV_LOAD(vec, cnt, req, head) do {				\
-		memcpy (&vec[cnt], req->stub->args.writev.vector,	\
-			(req->stub->args.writev.count * sizeof(vec[0]))); \
-		cnt += req->stub->args.writev.count;			\
+		memcpy (&vec[cnt], req->stub->args.vector,		\
+			(req->stub->args.count * sizeof(vec[0])));	\
+		cnt += req->stub->args.count;				\
 		head->total_size += req->write_size;			\
 	} while (0)
 
@@ -688,23 +752,36 @@ wb_fulfill_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 void
 wb_fulfill_head (wb_inode_t *wb_inode, wb_request_t *head)
 {
-	struct iovec   vector[MAX_VECTOR_COUNT];
-	int            count = 0;
-	wb_request_t  *req = NULL;
-	call_frame_t  *frame = NULL;
+	struct iovec  vector[MAX_VECTOR_COUNT];
+	int           count    = 0;
+	wb_request_t *req      = NULL;
+	call_frame_t *frame    = NULL;
+        gf_boolean_t  fderr    = _gf_false;
+        xlator_t     *this     = NULL;
 
-	frame = create_frame (wb_inode->this, wb_inode->this->ctx->pool);
-	if (!frame)
-		goto enomem;
+        this = THIS;
+
+        /* make sure head->total_size is updated before we run into any
+         * errors
+         */
 
 	WB_IOV_LOAD (vector, count, head, head);
 
 	list_for_each_entry (req, &head->winds, winds) {
 		WB_IOV_LOAD (vector, count, req, head);
 
-		iobref_merge (head->stub->args.writev.iobref,
-			      req->stub->args.writev.iobref);
+		iobref_merge (head->stub->args.iobref,
+			      req->stub->args.iobref);
 	}
+
+        if (wb_fd_err (head->fd, this, NULL)) {
+                fderr = _gf_true;
+                goto err;
+        }
+
+	frame = create_frame (wb_inode->this, wb_inode->this->ctx->pool);
+	if (!frame)
+		goto err;
 
 	frame->root->lk_owner = head->lk_owner;
 	frame->local = head;
@@ -718,13 +795,16 @@ wb_fulfill_head (wb_inode_t *wb_inode, wb_request_t *head)
 	STACK_WIND (frame, wb_fulfill_cbk, FIRST_CHILD (frame->this),
 		    FIRST_CHILD (frame->this)->fops->writev,
 		    head->fd, vector, count,
-		    head->stub->args.writev.off,
-		    head->stub->args.writev.flags,
-		    head->stub->args.writev.iobref, NULL);
+		    head->stub->args.offset,
+		    head->stub->args.flags,
+		    head->stub->args.iobref, NULL);
 
 	return;
-enomem:
-	wb_inode_err (wb_inode, ENOMEM);
+err:
+        if (!fderr) {
+                /* frame creation failure */
+                wb_fulfill_err (head, ENOMEM);
+        }
 
 	wb_head_done (head);
 
@@ -736,7 +816,7 @@ enomem:
 		if (head)						\
 			wb_fulfill_head (wb_inode, head);		\
 		head = req;						\
-		expected_offset = req->stub->args.writev.off +		\
+		expected_offset = req->stub->args.offset +		\
 			req->write_size;				\
 		curr_aggregate = 0;					\
 		vector_count = 0;					\
@@ -774,7 +854,7 @@ wb_fulfill (wb_inode_t *wb_inode, list_head_t *liabilities)
 			continue;
 		}
 
-		if (expected_offset != req->stub->args.writev.off) {
+		if (expected_offset != req->stub->args.offset) {
 			NEXT_HEAD (head, req);
 			continue;
 		}
@@ -784,7 +864,7 @@ wb_fulfill (wb_inode_t *wb_inode, list_head_t *liabilities)
 			continue;
 		}
 
-		if (vector_count + req->stub->args.writev.count >
+		if (vector_count + req->stub->args.count >
 		    MAX_VECTOR_COUNT) {
 			NEXT_HEAD (head, req);
 			continue;
@@ -792,7 +872,7 @@ wb_fulfill (wb_inode_t *wb_inode, list_head_t *liabilities)
 
 		list_add_tail (&req->winds, &head->winds);
 		curr_aggregate += req->write_size;
-		vector_count += req->stub->args.writev.count;
+		vector_count += req->stub->args.count;
 	}
 
 	if (head)
@@ -866,10 +946,10 @@ __wb_collapse_small_writes (wb_request_t *holder, wb_request_t *req)
         size_t         req_len = 0;
 
         if (!holder->iobref) {
-                holder_len = iov_length (holder->stub->args.writev.vector,
-                                         holder->stub->args.writev.count);
-                req_len = iov_length (req->stub->args.writev.vector,
-                                      req->stub->args.writev.count);
+                holder_len = iov_length (holder->stub->args.vector,
+                                         holder->stub->args.count);
+                req_len = iov_length (req->stub->args.vector,
+                                      req->stub->args.count);
 
                 required_size = max ((THIS->ctx->page_size),
                                      (holder_len + req_len));
@@ -895,25 +975,25 @@ __wb_collapse_small_writes (wb_request_t *holder, wb_request_t *req)
                         goto out;
                 }
 
-                iov_unload (iobuf->ptr, holder->stub->args.writev.vector,
-                            holder->stub->args.writev.count);
-                holder->stub->args.writev.vector[0].iov_base = iobuf->ptr;
-		holder->stub->args.writev.count = 1;
+                iov_unload (iobuf->ptr, holder->stub->args.vector,
+                            holder->stub->args.count);
+                holder->stub->args.vector[0].iov_base = iobuf->ptr;
+		holder->stub->args.count = 1;
 
-                iobref_unref (holder->stub->args.writev.iobref);
-                holder->stub->args.writev.iobref = iobref;
+                iobref_unref (holder->stub->args.iobref);
+                holder->stub->args.iobref = iobref;
 
                 iobuf_unref (iobuf);
 
                 holder->iobref = iobref_ref (iobref);
         }
 
-        ptr = holder->stub->args.writev.vector[0].iov_base + holder->write_size;
+        ptr = holder->stub->args.vector[0].iov_base + holder->write_size;
 
-        iov_unload (ptr, req->stub->args.writev.vector,
-                    req->stub->args.writev.count);
+        iov_unload (ptr, req->stub->args.vector,
+                    req->stub->args.count);
 
-        holder->stub->args.writev.vector[0].iov_len += req->write_size;
+        holder->stub->args.vector[0].iov_len += req->write_size;
         holder->write_size += req->write_size;
         holder->ordering.size += req->write_size;
 
@@ -963,10 +1043,10 @@ __wb_preprocess_winds (wb_inode_t *wb_inode)
 			continue;
 		}
 
-		offset_expected = holder->stub->args.writev.off
+		offset_expected = holder->stub->args.offset
 			+ holder->write_size;
 
-		if (req->stub->args.writev.off != offset_expected) {
+		if (req->stub->args.offset != offset_expected) {
 			holder->ordering.go = 1;
 			holder = req;
 			continue;
@@ -977,6 +1057,12 @@ __wb_preprocess_winds (wb_inode_t *wb_inode)
 			holder = req;
 			continue;
 		}
+
+                if (req->fd != holder->fd) {
+                        holder->ordering.go = 1;
+                        holder = req;
+                        continue;
+                }
 
 		space_left = page_size - holder->write_size;
 
@@ -1031,6 +1117,18 @@ __wb_pick_winds (wb_inode_t *wb_inode, list_head_t *tasks,
 		if (req->ordering.tempted && !req->ordering.go)
 			/* wait some more */
 			continue;
+
+		if (req->stub->fop == GF_FOP_WRITE) {
+			if (wb_wip_has_conflict (wb_inode, req))
+				continue;
+
+			list_add_tail (&req->wip, &wb_inode->wip);
+
+			if (!req->ordering.tempted)
+				/* unrefed in wb_writev_cbk */
+				req->stub->frame->local =
+					__wb_request_ref (req);
+		}
 
 		list_del_init (&req->todo);
 
@@ -1091,11 +1189,29 @@ wb_process_queue (wb_inode_t *wb_inode)
 
 
 int
+wb_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+	       int32_t op_ret, int32_t op_errno,
+	       struct iatt *prebuf, struct iatt *postbuf, dict_t *xdata)
+{
+	wb_request_t *req = NULL;
+
+	req = frame->local;
+	frame->local = NULL;
+
+	wb_request_unref (req);
+
+	STACK_UNWIND_STRICT (writev, frame, op_ret, op_errno, prebuf, postbuf,
+			     xdata);
+	return 0;
+}
+
+
+int
 wb_writev_helper (call_frame_t *frame, xlator_t *this, fd_t *fd,
 		  struct iovec *vector, int32_t count, off_t offset,
 		  uint32_t flags, struct iobref *iobref, dict_t *xdata)
 {
-	STACK_WIND (frame, default_writev_cbk,
+	STACK_WIND (frame, wb_writev_cbk,
 		    FIRST_CHILD (this), FIRST_CHILD (this)->fops->writev,
 		    fd, vector, count, offset, flags, iobref, xdata);
 	return 0;
@@ -1112,10 +1228,15 @@ wb_writev (call_frame_t *frame, xlator_t *this, fd_t *fd, struct iovec *vector,
         gf_boolean_t  wb_disabled   = 0;
         call_stub_t  *stub          = NULL;
         int           ret           = -1;
-	int           op_errno      = EINVAL;
+        int32_t       op_errno      = EINVAL;
 	int           o_direct      = O_DIRECT;
 
 	conf = this->private;
+
+        if (wb_fd_err (fd, this, &op_errno)) {
+                goto unwind;
+        }
+
         wb_inode = wb_inode_create (this, fd->inode);
 	if (!wb_inode) {
 		op_errno = ENOMEM;
@@ -1131,20 +1252,6 @@ wb_writev (call_frame_t *frame, xlator_t *this, fd_t *fd, struct iovec *vector,
 	if (flags & (O_SYNC|O_DSYNC|O_DIRECT))
 		/* O_DIRECT flag in params of writev must _always_ be honored */
 		wb_disabled = 1;
-
-	op_errno = 0;
-	LOCK (&wb_inode->lock);
-	{
-		/* pick up a previous error in fulfillment */
-		if (wb_inode->op_ret < 0)
-			op_errno = wb_inode->op_errno;
-
-		wb_inode->op_ret = 0;
-	}
-	UNLOCK (&wb_inode->lock);
-
-        if (op_errno)
-                goto unwind;
 
 	if (wb_disabled)
 		stub = fop_writev_stub (frame, wb_writev_helper, fd, vector,
@@ -1243,7 +1350,7 @@ wb_flush_helper (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
         wb_conf_t    *conf        = NULL;
         wb_inode_t   *wb_inode    = NULL;
         call_frame_t *bg_frame    = NULL;
-	int           op_errno    = 0;
+	int32_t       op_errno    = 0;
 	int           op_ret      = 0;
 
         conf = this->private;
@@ -1255,19 +1362,10 @@ wb_flush_helper (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
 		goto unwind;
 	}
 
-        LOCK (&wb_inode->lock);
-        {
-		if (wb_inode->op_ret < 0) {
-			op_ret = -1;
-			op_errno = wb_inode->op_errno;
-		}
-
-                wb_inode->op_ret = 0;
-        }
-        UNLOCK (&wb_inode->lock);
-
-	if (op_errno)
+	if (wb_fd_err (fd, this, &op_errno)) {
+		op_ret = -1;
 		goto unwind;
+	}
 
         if (conf->flush_behind)
 		goto flushbehind;
@@ -1344,6 +1442,10 @@ wb_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t datasync,
 {
         wb_inode_t   *wb_inode     = NULL;
         call_stub_t  *stub         = NULL;
+	int32_t       op_errno     = EINVAL;
+
+	if (wb_fd_err (fd, this, &op_errno))
+		goto unwind;
 
         wb_inode = wb_inode_ctx_get (this, fd->inode);
 	if (!wb_inode)
@@ -1361,7 +1463,7 @@ wb_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t datasync,
         return 0;
 
 unwind:
-        STACK_UNWIND_STRICT (fsync, frame, -1, ENOMEM, NULL, NULL, NULL);
+        STACK_UNWIND_STRICT (fsync, frame, -1, op_errno, NULL, NULL, NULL);
 
         return 0;
 
@@ -1521,25 +1623,35 @@ wb_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
 {
         wb_inode_t   *wb_inode     = NULL;
         call_stub_t  *stub         = NULL;
+        int32_t       op_errno     = 0;
 
         wb_inode = wb_inode_create (this, fd->inode);
-	if (!wb_inode)
+	if (!wb_inode) {
+                op_errno = ENOMEM;
+		goto unwind;
+        }
+
+	if (wb_fd_err (fd, this, &op_errno))
 		goto unwind;
 
 	stub = fop_ftruncate_stub (frame, wb_ftruncate_helper, fd,
 				   offset, xdata);
-	if (!stub)
+	if (!stub) {
+                op_errno = ENOMEM;
 		goto unwind;
+        }
 
-	if (!wb_enqueue (wb_inode, stub))
+	if (!wb_enqueue (wb_inode, stub)) {
+                op_errno = ENOMEM;
 		goto unwind;
+        }
 
 	wb_process_queue (wb_inode);
 
         return 0;
 
 unwind:
-        STACK_UNWIND_STRICT (ftruncate, frame, -1, ENOMEM, NULL, NULL, NULL);
+        STACK_UNWIND_STRICT (ftruncate, frame, -1, op_errno, NULL, NULL, NULL);
 
         if (stub)
                 call_stub_destroy (stub);
@@ -1652,15 +1764,22 @@ wb_forget (xlator_t *this, inode_t *inode)
 	if (!wb_inode)
 		return 0;
 
-	LOCK (&wb_inode->lock);
-	{
-		GF_ASSERT (list_empty (&wb_inode->todo));
-		GF_ASSERT (list_empty (&wb_inode->liability));
-		GF_ASSERT (list_empty (&wb_inode->temptation));
-	}
-	UNLOCK (&wb_inode->lock);
+        GF_ASSERT (list_empty (&wb_inode->todo));
+        GF_ASSERT (list_empty (&wb_inode->liability));
+        GF_ASSERT (list_empty (&wb_inode->temptation));
 
         GF_FREE (wb_inode);
+
+        return 0;
+}
+
+
+int
+wb_release (xlator_t *this, fd_t *fd)
+{
+        uint64_t    tmp      = 0;
+
+        fd_ctx_del (fd, this, &tmp);
 
         return 0;
 }
@@ -1721,7 +1840,7 @@ __wb_dump_requests (struct list_head *head, char *prefix)
                                             req->write_size);
 
                         gf_proc_dump_write ("offset", "%"PRId64,
-                                            req->stub->args.writev.off);
+                                            req->stub->args.offset);
 
                         flag = req->ordering.lied;
                         gf_proc_dump_write ("lied", "%d", flag);
@@ -1778,9 +1897,6 @@ wb_inode_dump (xlator_t *this, inode_t *inode)
         gf_proc_dump_write ("window_current", "%"GF_PRI_SIZET,
                             wb_inode->window_current);
 
-        gf_proc_dump_write ("op_ret", "%d", wb_inode->op_ret);
-
-        gf_proc_dump_write ("op_errno", "%d", wb_inode->op_errno);
 
         ret = TRY_LOCK (&wb_inode->lock);
         if (!ret)
@@ -1953,6 +2069,7 @@ struct xlator_fops fops = {
 
 struct xlator_cbks cbks = {
         .forget   = wb_forget,
+        .release  = wb_release
 };
 
 
@@ -1987,6 +2104,8 @@ struct volume_options options[] = {
         { .key = {"strict-O_DIRECT"},
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "off",
+          .description = "This option when set to off, ignores the "
+          "O_DIRECT flag."
         },
         { .key = {"strict-write-ordering"},
           .type = GF_OPTION_TYPE_BOOL,

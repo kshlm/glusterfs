@@ -444,7 +444,7 @@ rpc_clnt_reconnect (void *trans_ptr)
 int
 rpc_clnt_fill_request_info (struct rpc_clnt *clnt, rpc_request_info_t *info)
 {
-        struct saved_frame  saved_frame = {{}, 0};
+        struct saved_frame  saved_frame;
         int                 ret         = -1;
 
         pthread_mutex_lock (&clnt->conn.lock);
@@ -944,7 +944,7 @@ rpc_clnt_connection_deinit (rpc_clnt_connection_t *conn)
 }
 
 
-inline int
+static inline int
 rpc_clnt_connection_init (struct rpc_clnt *clnt, glusterfs_ctx_t *ctx,
                           dict_t *options, char *name)
 {

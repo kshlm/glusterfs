@@ -620,20 +620,25 @@ dht_migration_complete_check_task (void *data)
         call_frame_t *frame    = NULL;
         loc_t         tmp_loc  = {0,};
         char         *path     = NULL;
+        dht_conf_t   *conf     = NULL;
 
         this  = THIS;
         frame = data;
         local = frame->local;
+        conf = this->private;
 
         src_node = local->cached_subvol;
+
+        if (!local->loc.inode && !local->fd)
+                goto out;
 
         /* getxattr on cached_subvol for 'linkto' value */
         if (!local->loc.inode)
                 ret = syncop_fgetxattr (src_node, local->fd, &dict,
-                                        DHT_LINKFILE_KEY);
+                                        conf->link_xattr_name);
         else
                 ret = syncop_getxattr (src_node, &local->loc, &dict,
-                                       DHT_LINKFILE_KEY);
+                                       conf->link_xattr_name);
 
         if (!ret)
                 dst_node = dht_linkfile_subvol (this, NULL, NULL, dict);
@@ -719,9 +724,6 @@ dht_migration_complete_check_task (void *data)
         local->cached_subvol = dst_node;
         ret = 0;
 
-        if (!local->fd)
-                goto out;
-
         /* once we detect the migration complete, the fd-ctx is no more
            required.. delete the ctx, and do one extra 'fd_unref' for open fd */
         ret = fd_ctx_del (local->fd, this, NULL);
@@ -731,6 +733,10 @@ dht_migration_complete_check_task (void *data)
                 goto out;
         }
 
+        /* perform open as root:root. There is window between linkfile
+         * creation(root:root) and setattr with the correct uid/gid
+         */
+        SYNCTASK_SETID(0, 0);
         /* if 'local->fd' (ie, fd based operation), send a 'open()' on
            destination if not already done */
         if (local->loc.inode) {
@@ -746,6 +752,7 @@ dht_migration_complete_check_task (void *data)
                 GF_FREE (path);
 
         }
+        SYNCTASK_SETID (frame->root->uid, frame->root->gid);
         if (ret == -1) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "%s: failed to send open() on target file at %s",
@@ -753,8 +760,6 @@ dht_migration_complete_check_task (void *data)
                 goto out;
         }
 
-        /* need this unref for the fd on src_node */
-        fd_unref (local->fd);
         ret = 0;
 out:
 
@@ -798,20 +803,25 @@ dht_rebalance_inprogress_task (void *data)
         char         *path     = NULL;
         struct iatt   stbuf    = {0,};
         loc_t         tmp_loc  = {0,};
+        dht_conf_t   *conf     = NULL;
 
         this  = THIS;
         frame = data;
         local = frame->local;
+        conf = this->private;
 
         src_node = local->cached_subvol;
+
+        if (!local->loc.inode && !local->fd)
+                goto out;
 
         /* getxattr on cached_subvol for 'linkto' value */
         if (local->loc.inode)
                 ret = syncop_getxattr (src_node, &local->loc, &dict,
-                                       DHT_LINKFILE_KEY);
+                                       conf->link_xattr_name);
         else
                 ret = syncop_fgetxattr (src_node, local->fd, &dict,
-                                        DHT_LINKFILE_KEY);
+                                        conf->link_xattr_name);
 
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR,
@@ -852,10 +862,10 @@ dht_rebalance_inprogress_task (void *data)
         }
 
         ret = 0;
-
-        if (!local->fd)
-                goto out;
-
+        /* perform open as root:root. There is window between linkfile
+         * creation(root:root) and setattr with the correct uid/gid
+         */
+        SYNCTASK_SETID (0, 0);
         if (local->loc.inode) {
                 ret = syncop_open (dst_node, &local->loc,
                                    local->fd->flags, local->fd);
@@ -876,6 +886,7 @@ dht_rebalance_inprogress_task (void *data)
                 goto out;
         }
 
+        SYNCTASK_SETID (frame->root->uid, frame->root->gid);
         ret = fd_ctx_set (local->fd, this, (uint64_t)(long)dst_node);
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR,
@@ -931,6 +942,9 @@ dht_inode_ctx_time_update (inode_t *inode, xlator_t *this, struct iatt *stat,
         dht_stat_time_t         *time           = 0;
         int                      ret            = -1;
 
+        GF_VALIDATE_OR_GOTO (this->name, stat, out);
+        GF_VALIDATE_OR_GOTO (this->name, inode, out);
+
         ret = dht_inode_ctx_get (inode, this, &ctx);
 
         if (ret) {
@@ -949,7 +963,7 @@ dht_inode_ctx_time_update (inode_t *inode, xlator_t *this, struct iatt *stat,
                         stat->ia_atime, stat->ia_atime_nsec, inode, post);
 
         ret = dht_inode_ctx_set (inode, this, ctx);
-
+out:
         return 0;
 }
 

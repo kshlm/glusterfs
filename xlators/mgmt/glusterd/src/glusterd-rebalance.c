@@ -389,8 +389,10 @@ glusterd_handle_defrag_volume (rpcsvc_request_t *req)
 
         GF_ASSERT (req);
         this = THIS;
+        GF_ASSERT (this);
 
         priv = this->private;
+        GF_ASSERT (priv);
 
         ret = xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req);
         if (ret < 0) {
@@ -451,8 +453,6 @@ out:
                         snprintf (msg, sizeof (msg), "Operation failed");
                 ret = glusterd_op_send_cli_response (GD_OP_REBALANCE, ret, 0,
                                                      req, dict, msg);
-                if (dict)
-                        dict_unref (dict);
 
         }
 
@@ -634,6 +634,11 @@ glusterd_op_rebalance (dict_t *dict, char **op_errstr, dict_t *rsp_dict)
                                                     cmd, NULL, GD_OP_REBALANCE);
                  break;
         case GF_DEFRAG_CMD_STOP:
+                /* Clear task-id only on explicitly stopping the
+                 * rebalance process.
+                 */
+                uuid_clear (volinfo->rebal.rebalance_id);
+
                 /* Fall back to the old volume file in case of decommission*/
                 list_for_each_entry_safe (brickinfo, tmp, &volinfo->bricks,
                                           brick_list) {

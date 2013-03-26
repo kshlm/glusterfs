@@ -107,7 +107,7 @@ void gf_global_variable_init(void);
 
 in_addr_t gf_resolve_ip (const char *hostname, void **dnscache);
 
-void gf_log_volume_file (FILE *specfp);
+void gf_log_dump_graph (FILE *specfp, glusterfs_graph_t *graph);
 void gf_print_trace (int32_t signal, glusterfs_ctx_t *ctx);
 
 #define VECTORSIZE(count) (count * (sizeof (struct iovec)))
@@ -482,6 +482,9 @@ mkdir_p (char *path, mode_t mode, gf_boolean_t allow_symlinks);
  * nr
  */
 
+int
+gf_lstat_dir (const char *path, struct stat *stbuf_in);
+
 int32_t gf_roundup_power_of_two (int32_t nr);
 
 /*
@@ -574,5 +577,6 @@ char *generate_glusterfs_ctx_id (void);
 char *gf_get_reserved_ports();
 int gf_process_reserved_ports (gf_boolean_t ports[]);
 gf_boolean_t gf_ports_reserved (char *blocked_port, gf_boolean_t *ports);
+int gf_get_hostname_from_ip (char *client_ip, char **hostname);
 
 #endif /* _COMMON_UTILS_H */

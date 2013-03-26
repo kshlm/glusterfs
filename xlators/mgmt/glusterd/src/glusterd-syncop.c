@@ -8,7 +8,6 @@
    cases as published by the Free Software Foundation.
 */
 /* rpc related syncops */
-#include "syncop.h"
 #include "rpc-clnt.h"
 #include "protocol-common.h"
 #include "xdr-generic.h"
@@ -18,6 +17,57 @@
 #include "glusterd.h"
 #include "glusterd-op-sm.h"
 #include "glusterd-utils.h"
+
+static void
+gd_collate_errors (struct syncargs *args, int op_ret, int op_errno,
+                   char *op_errstr)
+{
+        if (args->op_ret)
+                return;
+        args->op_ret = op_ret;
+        args->op_errno = op_errno;
+        if (op_ret && op_errstr && strcmp (op_errstr, ""))
+                args->errstr = gf_strdup (op_errstr);
+}
+
+static void
+gd_syncargs_init (struct syncargs *args, dict_t *op_ctx)
+{
+        args->dict = op_ctx;
+        pthread_mutex_init (&args->lock_dict, NULL);
+}
+
+static void
+gd_stage_op_req_free (gd1_mgmt_stage_op_req *req)
+{
+        if (!req)
+                return;
+
+        GF_FREE (req->buf.buf_val);
+        GF_FREE (req);
+}
+
+static void
+gd_commit_op_req_free (gd1_mgmt_commit_op_req *req)
+{
+        if (!req)
+                return;
+
+        GF_FREE (req->buf.buf_val);
+        GF_FREE (req);
+}
+
+static void
+gd_brick_op_req_free (gd1_mgmt_brick_op_req *req)
+{
+        if (!req)
+                return;
+
+        if (strcmp (req->name, "") != 0)
+                GF_FREE (req->name);
+        GF_FREE (req->input.input_val);
+        GF_FREE (req);
+}
 
 int
 gd_syncop_submit_request (struct rpc_clnt *rpc, void *req,
@@ -80,343 +130,12 @@ out:
 
 /* Defined in glusterd-rpc-ops.c */
 extern struct rpc_clnt_program gd_mgmt_prog;
-
-int32_t
-gd_syncop_mgmt_lock_cbk (struct rpc_req *req, struct iovec *iov,
-                         int count, void *myframe)
-{
-        struct syncargs           *args  = NULL;
-        gd1_mgmt_cluster_lock_rsp  rsp   = {{0},};
-        int                        ret   = -1;
-        call_frame_t              *frame = NULL;
-
-        frame = myframe;
-        args = frame->local;
-        frame->local = NULL;
-
-        /* initialize */
-        args->op_ret   = -1;
-        args->op_errno = EINVAL;
-
-        if (-1 == req->rpc_status) {
-                args->op_errno = ENOTCONN;
-                goto out;
-        }
-
-        ret = xdr_to_generic (*iov, &rsp,
-                              (xdrproc_t)xdr_gd1_mgmt_cluster_lock_rsp);
-        if (ret < 0) {
-                goto out;
-        }
-
-        args->op_ret = rsp.op_ret;
-        args->op_errno = rsp.op_errno;
-
-        uuid_copy (args->uuid, rsp.uuid);
-
-out:
-        STACK_DESTROY (frame->root);
-
-        __wake (args);
-
-        return 0;
-}
-
-
-int
-gd_syncop_mgmt_lock (struct rpc_clnt *rpc, uuid_t my_uuid, uuid_t recv_uuid)
-{
-        struct syncargs           args = {0, };
-        gd1_mgmt_cluster_lock_req req  = {{0},};
-
-        uuid_copy (req.uuid, my_uuid);
-
-        args.op_ret = -1;
-        args.op_errno = ENOTCONN;
-
-        GD_SYNCOP (rpc, (&args), gd_syncop_mgmt_lock_cbk,
-                   &req, &gd_mgmt_prog, GLUSTERD_MGMT_CLUSTER_LOCK,
-                   xdr_gd1_mgmt_cluster_lock_req);
-
-        if (!args.op_ret)
-                uuid_copy (recv_uuid, args.uuid);
-
-        errno = args.op_errno;
-        return args.op_ret;
-
-}
-
-int32_t
-gd_syncop_mgmt_unlock_cbk (struct rpc_req *req, struct iovec *iov,
-                           int count, void *myframe)
-{
-        struct syncargs             *args  = NULL;
-        gd1_mgmt_cluster_unlock_rsp  rsp   = {{0},};
-        int                          ret   = -1;
-        call_frame_t              *frame = NULL;
-
-        frame = myframe;
-        args = frame->local;
-        frame->local = NULL;
-
-        /* initialize */
-        args->op_ret   = -1;
-        args->op_errno = EINVAL;
-
-        if (-1 == req->rpc_status) {
-                args->op_errno = ENOTCONN;
-                goto out;
-        }
-
-        ret = xdr_to_generic (*iov, &rsp,
-                              (xdrproc_t)xdr_gd1_mgmt_cluster_unlock_rsp);
-        if (ret < 0) {
-                goto out;
-        }
-
-        args->op_ret = rsp.op_ret;
-        args->op_errno = rsp.op_errno;
-
-        uuid_copy (args->uuid, rsp.uuid);
-
-out:
-        STACK_DESTROY (frame->root);
-
-        __wake (args);
-
-        return 0;
-}
-
-
-int
-gd_syncop_mgmt_unlock (struct rpc_clnt *rpc, uuid_t my_uuid, uuid_t recv_uuid)
-{
-        struct syncargs             args = {0, };
-        gd1_mgmt_cluster_unlock_req req  = {{0},};
-
-        uuid_copy (req.uuid, my_uuid);
-
-        args.op_ret = -1;
-        args.op_errno = ENOTCONN;
-
-        GD_SYNCOP (rpc, (&args), gd_syncop_mgmt_unlock_cbk,
-                   &req, &gd_mgmt_prog, GLUSTERD_MGMT_CLUSTER_UNLOCK,
-                   xdr_gd1_mgmt_cluster_unlock_req);
-
-        if (!args.op_ret)
-                uuid_copy (recv_uuid, args.uuid);
-
-        errno = args.op_errno;
-        return args.op_ret;
-
-}
-
-int32_t
-gd_syncop_stage_op_cbk (struct rpc_req *req, struct iovec *iov,
-                        int count, void *myframe)
-{
-        struct syncargs       *args  = NULL;
-        gd1_mgmt_stage_op_rsp  rsp   = {{0},};
-        int                    ret   = -1;
-        call_frame_t              *frame = NULL;
-
-        frame = myframe;
-        args = frame->local;
-        frame->local = NULL;
-
-        /* initialize */
-        args->op_ret   = -1;
-        args->op_errno = EINVAL;
-
-        if (-1 == req->rpc_status) {
-                args->op_errno = ENOTCONN;
-                goto out;
-        }
-
-        ret = xdr_to_generic (*iov, &rsp,
-                              (xdrproc_t)xdr_gd1_mgmt_stage_op_rsp);
-        if (ret < 0) {
-                goto out;
-        }
-
-        if (rsp.dict.dict_len) {
-                /* Unserialize the dictionary */
-                args->dict  = dict_new ();
-
-                ret = dict_unserialize (rsp.dict.dict_val,
-                                        rsp.dict.dict_len,
-                                        &args->dict);
-                if (ret < 0) {
-                        GF_FREE (rsp.dict.dict_val);
-                        goto out;
-                } else {
-                        args->dict->extra_stdfree = rsp.dict.dict_val;
-                }
-        }
-
-        args->op_ret = rsp.op_ret;
-        args->op_errno = rsp.op_errno;
-
-        uuid_copy (args->uuid, rsp.uuid);
-
-        args->errstr = gf_strdup (rsp.op_errstr);
-
-out:
-        STACK_DESTROY (frame->root);
-
-        __wake (args);
-
-        return 0;
-}
-
-
-int
-gd_syncop_mgmt_stage_op (struct rpc_clnt *rpc, uuid_t my_uuid, uuid_t recv_uuid,
-                         int op, dict_t *dict_out, dict_t **dict_in,
-                         char **errstr)
-{
-        struct syncargs       args = {0, };
-        gd1_mgmt_stage_op_req req  = {{0},};
-        int                   ret  = 0;
-
-        uuid_copy (req.uuid, my_uuid);
-        req.op = op;
-
-        args.op_ret = -1;
-        args.op_errno = ENOTCONN;
-
-        ret = dict_allocate_and_serialize (dict_out,
-                                           &req.buf.buf_val, &req.buf.buf_len);
-        if (ret)
-                goto out;
-
-        GD_SYNCOP (rpc, (&args), gd_syncop_stage_op_cbk,
-                   &req, &gd_mgmt_prog, GLUSTERD_MGMT_STAGE_OP,
-                   xdr_gd1_mgmt_stage_op_req);
-
-        if (args.errstr && errstr)
-                *errstr = args.errstr;
-        else GF_FREE (args.errstr);
-
-        if (args.dict && dict_in)
-                *dict_in = args.dict;
-        else if (args.dict)
-                dict_unref (args.dict);
-
-        uuid_copy (recv_uuid, args.uuid);
-out:
-        errno = args.op_errno;
-        return args.op_ret;
-
-}
-
-/*TODO: Need to add syncop for brick ops*/
-int32_t
-gd_syncop_commit_op_cbk (struct rpc_req *req, struct iovec *iov,
-                         int count, void *myframe)
-{
-        struct syncargs        *args  = NULL;
-        gd1_mgmt_commit_op_rsp  rsp   = {{0},};
-        int                     ret   = -1;
-        call_frame_t           *frame = NULL;
-
-        frame = myframe;
-        args = frame->local;
-        frame->local = NULL;
-
-        /* initialize */
-        args->op_ret   = -1;
-        args->op_errno = EINVAL;
-
-        if (-1 == req->rpc_status) {
-                args->op_errno = ENOTCONN;
-                goto out;
-        }
-
-        ret = xdr_to_generic (*iov, &rsp,
-                              (xdrproc_t)xdr_gd1_mgmt_commit_op_rsp);
-        if (ret < 0) {
-                goto out;
-        }
-
-        if (rsp.dict.dict_len) {
-                /* Unserialize the dictionary */
-                args->dict  = dict_new ();
-
-                ret = dict_unserialize (rsp.dict.dict_val,
-                                        rsp.dict.dict_len,
-                                        &args->dict);
-                if (ret < 0) {
-                        GF_FREE (rsp.dict.dict_val);
-                        goto out;
-                } else {
-                        args->dict->extra_stdfree = rsp.dict.dict_val;
-                }
-        }
-
-        args->op_ret = rsp.op_ret;
-        args->op_errno = rsp.op_errno;
-
-        uuid_copy (args->uuid, rsp.uuid);
-
-        args->errstr = gf_strdup (rsp.op_errstr);
-
-out:
-        STACK_DESTROY (frame->root);
-
-        __wake (args);
-
-        return 0;
-}
-
-
-int
-gd_syncop_mgmt_commit_op (struct rpc_clnt *rpc, uuid_t my_uuid, uuid_t recv_uuid,
-                          int op, dict_t *dict_out, dict_t **dict_in,
-                          char **errstr)
-{
-        struct syncargs        args = {0, };
-        gd1_mgmt_commit_op_req req  = {{0},};
-        int                    ret  = 0;
-
-        uuid_copy (req.uuid, my_uuid);
-        req.op = op;
-
-        args.op_ret = -1;
-        args.op_errno = ENOTCONN;
-
-        ret = dict_allocate_and_serialize (dict_out,
-                                           &req.buf.buf_val, &req.buf.buf_len);
-        if (ret)
-                goto out;
-
-        GD_SYNCOP (rpc, (&args), gd_syncop_commit_op_cbk,
-                   &req, &gd_mgmt_prog, GLUSTERD_MGMT_COMMIT_OP,
-                   xdr_gd1_mgmt_commit_op_req);
-
-        if (args.errstr && errstr)
-                *errstr = args.errstr;
-        else GF_FREE (args.errstr);
-
-        if (args.dict && dict_in)
-                *dict_in = args.dict;
-        else if (args.dict)
-                dict_unref (args.dict);
-
-        uuid_copy (recv_uuid, args.uuid);
-
-out:
-        errno = args.op_errno;
-        return args.op_ret;
-
-}
-
+extern struct rpc_clnt_program gd_brick_prog;
 
 static int
-glusterd_syncop_aggr_rsp_dict (glusterd_op_t op, dict_t *aggr, dict_t *rsp,
-                               char *op_errstr)
+glusterd_syncop_aggr_rsp_dict (glusterd_op_t op, dict_t *aggr, dict_t *rsp)
 {
-        int ret = -1;
+        int ret = 0;
 
         switch (op) {
         case GD_OP_REPLACE_BRICK:
@@ -438,7 +157,7 @@ glusterd_syncop_aggr_rsp_dict (glusterd_op_t op, dict_t *aggr, dict_t *rsp,
         break;
 
         case GD_OP_GSYNC_SET:
-                ret = glusterd_gsync_use_rsp_dict (aggr, rsp, op_errstr);
+                ret = glusterd_gsync_use_rsp_dict (aggr, rsp, NULL);
                 if (ret)
                         goto out;
         break;
@@ -463,6 +182,14 @@ glusterd_syncop_aggr_rsp_dict (glusterd_op_t op, dict_t *aggr, dict_t *rsp,
 
         break;
 
+        case GD_OP_QUOTA:
+        case GD_OP_CLEARLOCKS_VOLUME:
+                ret = glusterd_use_rsp_dict (aggr, rsp);
+                if (ret)
+                        goto out;
+
+        break;
+
         default:
         break;
         }
@@ -470,123 +197,819 @@ out:
         return ret;
 }
 
-void
-gd_sync_task_begin (dict_t *op_ctx, rpcsvc_request_t * req)
+int32_t
+gd_syncop_mgmt_lock_cbk (struct rpc_req *req, struct iovec *iov,
+                         int count, void *myframe)
 {
-        int                  ret      = -1;
-        dict_t              *req_dict     = NULL;
-        dict_t              *rsp_dict = NULL;
-        glusterd_peerinfo_t *peerinfo = NULL;
-        glusterd_peerinfo_t *tmp = NULL;
-        glusterd_conf_t     *conf     = NULL;
-        uuid_t               tmp_uuid = {0,};
-        glusterd_op_t        op       = 0;
-        int32_t              tmp_op   = 0;
-        gf_boolean_t         local_locked = _gf_false;
-        char                 *op_errstr = NULL;
+        int                         ret         = -1;
+        struct syncargs             *args       = NULL;
+        gd1_mgmt_cluster_lock_rsp   rsp         = {{0},};
+        call_frame_t                *frame      = NULL;
 
-        conf = THIS->private;
+        frame  = myframe;
+        args   = frame->local;
+        frame->local = NULL;
 
-        ret = dict_get_int32 (op_ctx, GD_SYNC_OPCODE_KEY, &tmp_op);
+        if (-1 == req->rpc_status) {
+                args->op_errno = ENOTCONN;
+                goto out;
+        }
+
+        ret = xdr_to_generic (*iov, &rsp,
+                              (xdrproc_t)xdr_gd1_mgmt_cluster_lock_rsp);
+        if (ret < 0)
+                goto out;
+
+        gd_collate_errors (args, rsp.op_ret, rsp.op_errno, NULL);
+        uuid_copy (args->uuid, rsp.uuid);
+
+out:
+        STACK_DESTROY (frame->root);
+        synctask_barrier_wake(args);
+        return 0;
+}
+
+
+int
+gd_syncop_mgmt_lock (struct rpc_clnt *rpc, struct syncargs *args,
+                     uuid_t my_uuid, uuid_t recv_uuid)
+{
+        int                       ret = -1;
+        gd1_mgmt_cluster_lock_req req  = {{0},};
+
+        uuid_copy (req.uuid, my_uuid);
+        ret = gd_syncop_submit_request (rpc, &req, args, &gd_mgmt_prog,
+                                        GLUSTERD_MGMT_CLUSTER_LOCK,
+                                        gd_syncop_mgmt_lock_cbk,
+                                        (xdrproc_t) xdr_gd1_mgmt_cluster_lock_req);
+        if (ret)
+                synctask_barrier_wake(args);
+        return ret;
+}
+
+int32_t
+gd_syncop_mgmt_unlock_cbk (struct rpc_req *req, struct iovec *iov,
+                           int count, void *myframe)
+{
+        int                         ret         = -1;
+        struct syncargs             *args       = NULL;
+        gd1_mgmt_cluster_unlock_rsp rsp         = {{0},};
+        call_frame_t                *frame      = NULL;
+
+        frame = myframe;
+        args  = frame->local;
+        frame->local = NULL;
+
+        if (-1 == req->rpc_status) {
+                args->op_errno = ENOTCONN;
+                goto out;
+        }
+
+        ret = xdr_to_generic (*iov, &rsp,
+                              (xdrproc_t)xdr_gd1_mgmt_cluster_unlock_rsp);
+        if (ret < 0)
+                goto out;
+
+        gd_collate_errors (args, rsp.op_ret, rsp.op_errno, NULL);
+        uuid_copy (args->uuid, rsp.uuid);
+
+out:
+        STACK_DESTROY (frame->root);
+        synctask_barrier_wake(args);
+        return 0;
+}
+
+
+int
+gd_syncop_mgmt_unlock (struct rpc_clnt *rpc, struct syncargs *args,
+                       uuid_t my_uuid, uuid_t recv_uuid)
+{
+        int                         ret     = -1;
+        gd1_mgmt_cluster_unlock_req req     = {{0},};
+
+        uuid_copy (req.uuid, my_uuid);
+        ret = gd_syncop_submit_request (rpc, &req, args, &gd_mgmt_prog,
+                                        GLUSTERD_MGMT_CLUSTER_UNLOCK,
+                                        gd_syncop_mgmt_unlock_cbk,
+                                        (xdrproc_t) xdr_gd1_mgmt_cluster_lock_req);
+        if (ret)
+                synctask_barrier_wake(args);
+        return ret;
+}
+
+int32_t
+gd_syncop_stage_op_cbk (struct rpc_req *req, struct iovec *iov,
+                        int count, void *myframe)
+{
+        int                         ret         = -1;
+        gd1_mgmt_stage_op_rsp       rsp         = {{0},};
+        struct syncargs             *args       = NULL;
+        xlator_t                    *this       = NULL;
+        dict_t                      *rsp_dict   = NULL;
+        call_frame_t                *frame      = NULL;
+
+        this  = THIS;
+        frame = myframe;
+        args  = frame->local;
+        frame->local = NULL;
+
+        if (-1 == req->rpc_status) {
+                args->op_ret   = -1;
+                args->op_errno = ENOTCONN;
+                goto out;
+        }
+
+        ret = xdr_to_generic (*iov, &rsp,
+                              (xdrproc_t)xdr_gd1_mgmt_stage_op_rsp);
+        if (ret < 0)
+                goto out;
+
+        if (rsp.dict.dict_len) {
+                /* Unserialize the dictionary */
+                rsp_dict  = dict_new ();
+
+                ret = dict_unserialize (rsp.dict.dict_val,
+                                        rsp.dict.dict_len,
+                                        &rsp_dict);
+                if (ret < 0) {
+                        GF_FREE (rsp.dict.dict_val);
+                        goto out;
+                } else {
+                        rsp_dict->extra_stdfree = rsp.dict.dict_val;
+                }
+        }
+
+        gd_collate_errors (args, rsp.op_ret, rsp.op_errno, rsp.op_errstr);
+        uuid_copy (args->uuid, rsp.uuid);
+        if (rsp.op == GD_OP_REPLACE_BRICK) {
+                pthread_mutex_lock (&args->lock_dict);
+                {
+                        ret = glusterd_syncop_aggr_rsp_dict (rsp.op, args->dict,
+                                                             rsp_dict);
+                        if (ret)
+                                gf_log (this->name, GF_LOG_ERROR, "%s",
+                                        "Failed to aggregate response from "
+                                        " node/brick");
+                }
+                pthread_mutex_unlock (&args->lock_dict);
+        }
+
+out:
+        if (rsp_dict)
+                dict_unref (rsp_dict);
+
+        STACK_DESTROY (frame->root);
+        synctask_barrier_wake(args);
+        return 0;
+}
+
+
+int
+gd_syncop_mgmt_stage_op (struct rpc_clnt *rpc, struct syncargs *args,
+                         uuid_t my_uuid, uuid_t recv_uuid, int op,
+                         dict_t *dict_out, dict_t *op_ctx)
+{
+        gd1_mgmt_stage_op_req *req  = NULL;
+        int                   ret  = -1;
+
+        req = GF_CALLOC (1, sizeof (*req), gf_gld_mt_mop_stage_req_t);
+        if (!req)
+                goto out;
+
+        uuid_copy (req->uuid, my_uuid);
+        req->op = op;
+
+        ret = dict_allocate_and_serialize (dict_out,
+                                           &req->buf.buf_val, &req->buf.buf_len);
         if (ret)
                 goto out;
 
-        op = tmp_op;
+        ret = gd_syncop_submit_request (rpc, req, args, &gd_mgmt_prog,
+                                        GLUSTERD_MGMT_STAGE_OP,
+                                        gd_syncop_stage_op_cbk,
+                                        (xdrproc_t) xdr_gd1_mgmt_stage_op_req);
+out:
+        gd_stage_op_req_free (req);
+        if (ret)
+                synctask_barrier_wake(args);
 
-        ret = -1;
-        rsp_dict = dict_new ();
-        if (!rsp_dict)
-                goto out;
+        return ret;
 
-        /*  Lock everything */
-        ret = glusterd_lock (MY_UUID);
-        if (ret) {
-                gf_log (THIS->name, GF_LOG_ERROR, "Unable to acquire lock");
-                gf_asprintf (&op_errstr, "Another transaction is in progress. "
-                             "Please try again after sometime.");
+}
+
+int32_t
+gd_syncop_brick_op_cbk (struct rpc_req *req, struct iovec *iov,
+                        int count, void *myframe)
+{
+        struct syncargs        *args  = NULL;
+        gd1_mgmt_brick_op_rsp  rsp   = {0,};
+        int                    ret   = -1;
+        call_frame_t           *frame = NULL;
+
+        frame = myframe;
+        args = frame->local;
+        frame->local = NULL;
+
+        /* initialize */
+        args->op_ret   = -1;
+        args->op_errno = EINVAL;
+
+        if (-1 == req->rpc_status) {
+                args->op_errno = ENOTCONN;
                 goto out;
         }
-        /* successful lock in local node */
-        local_locked = _gf_true;
 
-        INIT_LIST_HEAD (&conf->xaction_peers);
-        list_for_each_entry (peerinfo, &conf->peers, uuid_list) {
+        ret = xdr_to_generic (*iov, &rsp,
+                              (xdrproc_t)xdr_gd1_mgmt_brick_op_rsp);
+        if (ret < 0)
+                goto out;
+
+        if (rsp.output.output_len) {
+                args->dict  = dict_new ();
+                if (!args->dict) {
+                        ret = -1;
+                        args->op_errno = ENOMEM;
+                        goto out;
+                }
+
+                ret = dict_unserialize (rsp.output.output_val,
+                                        rsp.output.output_len,
+                                        &args->dict);
+                if (ret < 0)
+                        goto out;
+        }
+
+        args->op_ret = rsp.op_ret;
+        args->op_errno = rsp.op_errno;
+        args->errstr = gf_strdup (rsp.op_errstr);
+
+out:
+        if (strcmp (rsp.op_errstr, "") != 0)
+                free (rsp.op_errstr);
+        free (rsp.output.output_val);
+
+        STACK_DESTROY (frame->root);
+        __wake (args);
+
+        return 0;
+}
+
+int
+gd_syncop_mgmt_brick_op (struct rpc_clnt *rpc, glusterd_pending_node_t *pnode,
+                         int op, dict_t *dict_out, dict_t *op_ctx,
+                         char **errstr)
+{
+        struct syncargs        args = {0, };
+        gd1_mgmt_brick_op_req  *req  = NULL;
+        int                    ret  = 0;
+        xlator_t               *this = NULL;
+
+        this = THIS;
+        args.op_ret = -1;
+        args.op_errno = ENOTCONN;
+
+        if ((pnode->type == GD_NODE_NFS) ||
+            ((pnode->type == GD_NODE_SHD) &&
+            (op == GD_OP_STATUS_VOLUME))) {
+                ret = glusterd_node_op_build_payload
+                        (op, &req, dict_out);
+
+        } else {
+                ret = glusterd_brick_op_build_payload
+                        (op, pnode->node, &req, dict_out);
+
+        }
+
+        if (ret)
+                goto out;
+
+        GD_SYNCOP (rpc, (&args), gd_syncop_brick_op_cbk,
+                   req, &gd_brick_prog, req->op,
+                   xdr_gd1_mgmt_brick_op_req);
+
+        if (args.errstr && errstr)
+                *errstr = args.errstr;
+        else
+                GF_FREE (args.errstr);
+
+        if (GD_OP_STATUS_VOLUME == op) {
+                ret = dict_set_int32 (args.dict, "index", pnode->index);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Error setting index on brick status"
+                                " rsp dict");
+                        args.op_ret = -1;
+                        goto out;
+                }
+        }
+        if (args.op_ret == 0)
+                glusterd_handle_node_rsp (dict_out, pnode->node, op,
+                                          args.dict, op_ctx, errstr,
+                                          pnode->type);
+
+out:
+        errno = args.op_errno;
+        if (args.dict)
+                dict_unref (args.dict);
+        gd_brick_op_req_free (req);
+        return args.op_ret;
+
+}
+
+int32_t
+gd_syncop_commit_op_cbk (struct rpc_req *req, struct iovec *iov,
+                         int count, void *myframe)
+{
+        int                         ret         = -1;
+        gd1_mgmt_commit_op_rsp      rsp         = {{0},};
+        struct syncargs             *args       = NULL;
+        xlator_t                    *this       = NULL;
+        dict_t                      *rsp_dict   = NULL;
+        call_frame_t                *frame      = NULL;
+
+        this  = THIS;
+        frame = myframe;
+        args  = frame->local;
+        frame->local = NULL;
+
+        if (-1 == req->rpc_status) {
+                args->op_errno = ENOTCONN;
+                goto out;
+        }
+
+        ret = xdr_to_generic (*iov, &rsp,
+                              (xdrproc_t)xdr_gd1_mgmt_commit_op_rsp);
+        if (ret < 0) {
+                goto out;
+        }
+
+        if (rsp.dict.dict_len) {
+                /* Unserialize the dictionary */
+                rsp_dict  = dict_new ();
+
+                ret = dict_unserialize (rsp.dict.dict_val,
+                                        rsp.dict.dict_len,
+                                        &rsp_dict);
+                if (ret < 0) {
+                        GF_FREE (rsp.dict.dict_val);
+                        goto out;
+                } else {
+                        rsp_dict->extra_stdfree = rsp.dict.dict_val;
+                }
+        }
+
+        gd_collate_errors (args, rsp.op_ret, rsp.op_errno, rsp.op_errstr);
+        uuid_copy (args->uuid, rsp.uuid);
+        pthread_mutex_lock (&args->lock_dict);
+        {
+                ret = glusterd_syncop_aggr_rsp_dict (rsp.op, args->dict,
+                                                     rsp_dict);
+                if (ret)
+                        gf_log (this->name, GF_LOG_ERROR, "%s",
+                                "Failed to aggregate response from "
+                                " node/brick");
+        }
+        pthread_mutex_unlock (&args->lock_dict);
+out:
+        if (rsp_dict)
+                dict_unref (rsp_dict);
+
+        STACK_DESTROY (frame->root);
+        synctask_barrier_wake(args);
+
+        return 0;
+}
+
+
+int
+gd_syncop_mgmt_commit_op (struct rpc_clnt *rpc, struct syncargs *args,
+                          uuid_t my_uuid, uuid_t recv_uuid,
+                          int op, dict_t *dict_out, dict_t *op_ctx)
+{
+        gd1_mgmt_commit_op_req *req  = NULL;
+        int                    ret  = -1;
+
+        req = GF_CALLOC (1, sizeof (*req), gf_gld_mt_mop_commit_req_t);
+        if (!req)
+                goto out;
+
+        uuid_copy (req->uuid, my_uuid);
+        req->op = op;
+
+        ret = dict_allocate_and_serialize (dict_out,
+                                           &req->buf.buf_val, &req->buf.buf_len);
+        if (ret)
+                goto out;
+
+        ret = gd_syncop_submit_request (rpc, req, args, &gd_mgmt_prog,
+                                        GLUSTERD_MGMT_COMMIT_OP ,
+                                        gd_syncop_commit_op_cbk,
+                                        (xdrproc_t) xdr_gd1_mgmt_commit_op_req);
+out:
+        gd_commit_op_req_free (req);
+        if (ret)
+                synctask_barrier_wake(args);
+
+        return ret;
+}
+
+
+int
+gd_build_peers_list (struct list_head *peers, struct list_head *xact_peers)
+{
+        glusterd_peerinfo_t *peerinfo = NULL;
+        int                 npeers      = 0;
+
+        list_for_each_entry (peerinfo, peers, uuid_list) {
+                if (!peerinfo->connected)
+                        continue;
                 if (peerinfo->state.state != GD_FRIEND_STATE_BEFRIENDED)
                         continue;
 
-                ret = gd_syncop_mgmt_lock (peerinfo->rpc,
-                                           MY_UUID, tmp_uuid);
-                if (ret == 0)
-                        list_add_tail (&peerinfo->op_peers_list,
-                                       &conf->xaction_peers);
+                list_add_tail (&peerinfo->op_peers_list, xact_peers);
+                npeers++;
+        }
+        return npeers;
+}
+
+int
+gd_lock_op_phase (struct list_head *peers, glusterd_op_t op, dict_t *op_ctx,
+                  char **op_errstr, int npeers)
+{
+        int                 ret         = -1;
+        int                 peer_cnt    = 0;
+        uuid_t              peer_uuid   = {0};
+        xlator_t            *this       = NULL;
+        glusterd_peerinfo_t *peerinfo   = NULL;
+        struct syncargs     args        = {0};
+
+        if (!npeers) {
+                ret = 0;
+                goto out;
         }
 
-        ret = glusterd_op_build_payload (&req_dict, &op_errstr, op_ctx);
-        if (ret)
-                goto out;
-
-        /* stage op */
-        ret = glusterd_op_stage_validate (op, req_dict, &op_errstr, rsp_dict);
-        if (ret)
-                goto out;
-
-        list_for_each_entry (peerinfo, &conf->xaction_peers, op_peers_list) {
-                ret = gd_syncop_mgmt_stage_op (peerinfo->rpc,
-                                               MY_UUID, tmp_uuid,
-                                               op, req_dict, &rsp_dict,
-                                               &op_errstr);
-                if (ret)
-                        goto out;
-
-                if (op == GD_OP_REPLACE_BRICK)
-                        (void) glusterd_syncop_aggr_rsp_dict (op, op_ctx,
-                                                              rsp_dict,
-                                                              op_errstr);
-
-                if (rsp_dict)
-                        dict_unref (rsp_dict);
+        this = THIS;
+        synctask_barrier_init((&args));
+        peer_cnt = 0;
+        list_for_each_entry (peerinfo, peers, op_peers_list) {
+                gd_syncop_mgmt_lock (peerinfo->rpc, &args, MY_UUID, peer_uuid);
+                peer_cnt++;
         }
-
-        /* commit op */
-        ret = glusterd_op_commit_perform (op, req_dict, &op_errstr, rsp_dict);
-        if (ret)
+        synctask_barrier_wait((&args), peer_cnt);
+        ret = args.op_ret;
+        if (ret) {
+                gf_asprintf (op_errstr, "Another transaction could be "
+                             "in progress. Please try again after "
+                             "sometime.");
+                gf_log (this->name, GF_LOG_ERROR, "Failed to acquire lock");
                 goto out;
-
-        list_for_each_entry (peerinfo, &conf->xaction_peers, op_peers_list) {
-                ret = gd_syncop_mgmt_commit_op (peerinfo->rpc,
-                                                MY_UUID, tmp_uuid,
-                                                op, req_dict, &rsp_dict,
-                                                &op_errstr);
-                if (ret)
-                        goto out;
-                (void) glusterd_syncop_aggr_rsp_dict (op, op_ctx, rsp_dict,
-                                                      op_errstr);
-                if (rsp_dict)
-                        dict_unref (rsp_dict);
         }
 
         ret = 0;
 out:
-        if (local_locked) {
-                list_for_each_entry_safe (peerinfo, tmp, &conf->xaction_peers,
-                                          op_peers_list) {
-                        gd_syncop_mgmt_unlock (peerinfo->rpc,
-                                               MY_UUID, tmp_uuid);
-                        list_del_init (&peerinfo->op_peers_list);
-                }
+        return ret;
+}
 
-                /* Local node should be the one to be locked first,
-                   unlocked last to prevent races */
-                glusterd_unlock (MY_UUID);
+int
+gd_stage_op_phase (struct list_head *peers, glusterd_op_t op, dict_t *op_ctx,
+                   dict_t *req_dict, char **op_errstr, int npeers)
+{
+        int                 ret             = -1;
+        int                 peer_cnt           = 0;
+        dict_t              *rsp_dict       = NULL;
+        char                *hostname       = NULL;
+        xlator_t            *this           = NULL;
+        glusterd_peerinfo_t *peerinfo       = NULL;
+        uuid_t              tmp_uuid        = {0};
+        char                *errstr         = NULL;
+        struct syncargs     args            = {0};
+
+        this = THIS;
+        rsp_dict = dict_new ();
+        if (!rsp_dict)
+                goto out;
+
+        ret = glusterd_op_stage_validate (op, req_dict, op_errstr, rsp_dict);
+        if (ret) {
+                hostname = "localhost";
+                goto stage_done;
         }
 
-        glusterd_op_send_cli_response (op, ret, 0, req, op_ctx, op_errstr);
+        if ((op == GD_OP_REPLACE_BRICK)) {
+                ret = glusterd_syncop_aggr_rsp_dict (op, op_ctx, rsp_dict);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR, "%s",
+                                "Failed to aggregate response from node/brick");
+                        goto out;
+                }
+        }
+        dict_unref (rsp_dict);
+        rsp_dict = NULL;
+
+stage_done:
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, LOGSTR_STAGE_FAIL,
+                        gd_op_list[op], hostname, (*op_errstr) ? ":" : " ",
+                        (*op_errstr) ? *op_errstr : " ");
+                if (*op_errstr == NULL)
+                        gf_asprintf (op_errstr, OPERRSTR_STAGE_FAIL, hostname);
+                goto out;
+        }
+
+        if (!npeers) {
+                ret = 0;
+                goto out;
+        }
+
+        gd_syncargs_init (&args, op_ctx);
+        synctask_barrier_init((&args));
+        peer_cnt = 0;
+        list_for_each_entry (peerinfo, peers, op_peers_list) {
+                ret = gd_syncop_mgmt_stage_op (peerinfo->rpc, &args,
+                                               MY_UUID, tmp_uuid,
+                                               op, req_dict, op_ctx);
+                peer_cnt++;
+        }
+        synctask_barrier_wait((&args), peer_cnt);
+        ret = args.op_ret;
+        if (dict_get_str (op_ctx, "errstr", &errstr) == 0)
+                *op_errstr = gf_strdup (errstr);
+
+out:
+        if (rsp_dict)
+                dict_unref (rsp_dict);
+        return ret;
+}
+
+int
+gd_commit_op_phase (struct list_head *peers, glusterd_op_t op, dict_t *op_ctx,
+                    dict_t *req_dict, char **op_errstr, int npeers)
+{
+        dict_t              *rsp_dict       = NULL;
+        int                 peer_cnt           = -1;
+        int                 ret             = -1;
+        char                *hostname       = NULL;
+        glusterd_peerinfo_t *peerinfo       = NULL;
+        xlator_t            *this           = NULL;
+        uuid_t              tmp_uuid        = {0};
+        char                *errstr         = NULL;
+        struct syncargs     args            = {0};
+
+        this = THIS;
+        rsp_dict = dict_new ();
+        if (!rsp_dict) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = glusterd_op_commit_perform (op, req_dict, op_errstr, rsp_dict);
+        if (ret) {
+                hostname = "localhost";
+                goto commit_done;
+        }
+        if (op != GD_OP_SYNC_VOLUME) {
+                ret =  glusterd_syncop_aggr_rsp_dict (op, op_ctx, rsp_dict);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR, "%s",
+                                "Failed to aggregate response "
+                                "from node/brick");
+                        goto out;
+                }
+        }
+        dict_unref (rsp_dict);
+        rsp_dict = NULL;
+
+commit_done:
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, LOGSTR_COMMIT_FAIL,
+                        gd_op_list[op], hostname, (*op_errstr) ? ":" : " ",
+                        (*op_errstr) ? *op_errstr : " ");
+                if (*op_errstr == NULL)
+                        gf_asprintf (op_errstr, OPERRSTR_COMMIT_FAIL,
+                                     hostname);
+                goto out;
+         } else {
+                 glusterd_op_modify_op_ctx (op, op_ctx);
+         }
+
+        if (!npeers) {
+                ret = 0;
+                goto out;
+        }
+        gd_syncargs_init (&args, op_ctx);
+        synctask_barrier_init((&args));
+        peer_cnt = 0;
+        list_for_each_entry (peerinfo, peers, op_peers_list) {
+                ret = gd_syncop_mgmt_commit_op (peerinfo->rpc, &args,
+                                                MY_UUID, tmp_uuid,
+                                                op, req_dict, op_ctx);
+                peer_cnt++;
+        }
+        synctask_barrier_wait((&args), peer_cnt);
+        ret = args.op_ret;
+        if (dict_get_str (op_ctx, "errstr", &errstr) == 0)
+                *op_errstr = gf_strdup (errstr);
+
+out:
+        if (rsp_dict)
+                dict_unref (rsp_dict);
+        return ret;
+}
+
+int
+gd_unlock_op_phase (struct list_head *peers, glusterd_op_t op, int op_ret,
+                    rpcsvc_request_t *req, dict_t *op_ctx, char *op_errstr,
+                    int npeers)
+{
+        glusterd_peerinfo_t *peerinfo   = NULL;
+        glusterd_peerinfo_t *tmp        = NULL;
+        uuid_t              tmp_uuid    = {0};
+        int                 peer_cnt       = 0;
+        int                 ret         = -1;
+        xlator_t            *this       = NULL;
+        struct syncargs     args        = {0};
+
+        if (!npeers) {
+                ret = 0;
+                goto out;
+        }
+
+        this = THIS;
+        synctask_barrier_init((&args));
+        peer_cnt = 0;
+        list_for_each_entry_safe (peerinfo, tmp, peers, op_peers_list) {
+                gd_syncop_mgmt_unlock (peerinfo->rpc, &args, MY_UUID, tmp_uuid);
+                list_del_init (&peerinfo->op_peers_list);
+                peer_cnt++;
+        }
+        synctask_barrier_wait((&args), peer_cnt);
+        ret = args.op_ret;
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to unlock "
+                        "on some peer(s)");
+        }
+
+out:
+        glusterd_op_send_cli_response (op, op_ret, 0, req, op_ctx, op_errstr);
+        glusterd_op_clear_op (op);
+        glusterd_unlock (MY_UUID);
+
+        return 0;
+}
+
+int
+gd_get_brick_count (struct list_head *bricks)
+{
+        glusterd_pending_node_t *pending_node = NULL;
+        int                     npeers        = 0;
+        list_for_each_entry (pending_node, bricks, list) {
+                npeers++;
+        }
+        return npeers;
+}
+
+int
+gd_brick_op_phase (glusterd_op_t op, dict_t *op_ctx, dict_t *req_dict, char **op_errstr)
+{
+        glusterd_pending_node_t *pending_node = NULL;
+        struct list_head        selected = {0,};
+        xlator_t                *this = NULL;
+        int                     brick_count = 0;
+        int                     ret = -1;
+        rpc_clnt_t              *rpc = NULL;
+        dict_t                  *rsp_dict = NULL;
+
+        this = THIS;
+        rsp_dict = dict_new ();
+        if (!rsp_dict) {
+                ret = -1;
+                goto out;
+        }
+
+        INIT_LIST_HEAD (&selected);
+        ret = glusterd_op_bricks_select (op, req_dict, op_errstr, &selected, rsp_dict);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "%s",
+                       (*op_errstr)? *op_errstr: "Brick op failed. Check "
+                       "glusterd log file for more details.");
+                goto out;
+        }
+
+        if (op == GD_OP_HEAL_VOLUME) {
+                ret = glusterd_syncop_aggr_rsp_dict (op, op_ctx, rsp_dict);
+                if (ret)
+                        goto out;
+        }
+        dict_unref (rsp_dict);
+        rsp_dict = NULL;
+
+        brick_count = 0;
+        list_for_each_entry (pending_node, &selected, list) {
+                rpc = glusterd_pending_node_get_rpc (pending_node);
+                if (!rpc) {
+                        if (pending_node->type == GD_NODE_REBALANCE) {
+                                ret = 0;
+                                glusterd_defrag_volume_node_rsp (req_dict,
+                                                                 NULL, op_ctx);
+                                goto out;
+                        }
+
+                        ret = -1;
+                        gf_log (this->name, GF_LOG_ERROR, "Brick Op failed "
+                                "due to rpc failure.");
+                        goto out;
+                }
+                ret = gd_syncop_mgmt_brick_op (rpc, pending_node, op, req_dict,
+                                               op_ctx, op_errstr);
+                if (ret)
+                        goto out;
+
+                brick_count++;
+        }
+
+        ret = 0;
+out:
+        if (rsp_dict)
+                dict_unref (rsp_dict);
+        gf_log (this->name, GF_LOG_DEBUG, "Sent op req to %d bricks",
+                brick_count);
+        return ret;
+}
+
+void
+gd_sync_task_begin (dict_t *op_ctx, rpcsvc_request_t * req)
+{
+        int                         ret             = -1;
+        int                         npeers          = 0;
+        dict_t                      *req_dict       = NULL;
+        glusterd_conf_t             *conf           = NULL;
+        glusterd_op_t               op              = 0;
+        int32_t                     tmp_op          = 0;
+        char                        *op_errstr      = NULL;
+        xlator_t                    *this           = NULL;
+
+        this = THIS;
+        GF_ASSERT (this);
+        conf = this->private;
+        GF_ASSERT (conf);
+
+        ret = dict_get_int32 (op_ctx, GD_SYNC_OPCODE_KEY, &tmp_op);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to get volume "
+                        "operation");
+                goto out;
+        }
+
+        op = tmp_op;
+        ret = glusterd_lock (MY_UUID);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Unable to acquire lock");
+                gf_asprintf (&op_errstr, "Another transaction is in progress. "
+                             "Please try again after sometime.");
+                goto out;
+        }
+
+        /* storing op globally to access in synctask code paths
+         * This is still acceptable, as we are performing this under
+         * the 'cluster' lock*/
+        glusterd_op_set_op  (op);
+        INIT_LIST_HEAD (&conf->xaction_peers);
+        npeers = gd_build_peers_list  (&conf->peers, &conf->xaction_peers);
+
+        ret = gd_lock_op_phase (&conf->xaction_peers, op, op_ctx, &op_errstr, npeers);
+        if (ret)
+                goto out;
+
+        ret = glusterd_op_build_payload (&req_dict, &op_errstr, op_ctx);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, LOGSTR_BUILD_PAYLOAD,
+                        gd_op_list[op]);
+                if (op_errstr == NULL)
+                        gf_asprintf (&op_errstr, OPERRSTR_BUILD_PAYLOAD);
+                goto out;
+        }
+
+        ret = gd_stage_op_phase (&conf->xaction_peers, op, op_ctx, req_dict,
+                                 &op_errstr, npeers);
+        if (ret)
+                goto out;
+
+        ret = gd_brick_op_phase (op, op_ctx, req_dict, &op_errstr);
+        if (ret)
+                goto out;
+
+        ret = gd_commit_op_phase (&conf->xaction_peers, op, op_ctx, req_dict,
+                                  &op_errstr, npeers);
+        if (ret)
+                goto out;
+
+        ret = 0;
+out:
+        (void) gd_unlock_op_phase (&conf->xaction_peers, op, ret, req,
+                                   op_ctx, op_errstr, npeers);
 
         if (req_dict)
                 dict_unref (req_dict);
-
-        if (rsp_dict)
-                dict_unref (rsp_dict);
 
         if (op_errstr)
                 GF_FREE (op_errstr);
@@ -608,9 +1031,8 @@ glusterd_op_begin_synctask (rpcsvc_request_t *req, glusterd_op_t op,
         }
 
         gd_sync_task_begin (dict, req);
+        ret = 0;
 out:
-        if (dict)
-                dict_unref (dict);
 
         return ret;
 }

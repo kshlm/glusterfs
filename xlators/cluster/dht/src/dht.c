@@ -284,6 +284,39 @@ out:
         return ret;
 }
 
+void
+dht_init_regex (xlator_t *this, dict_t *odict, char *name,
+                regex_t *re, gf_boolean_t *re_valid)
+{
+        char    *temp_str;
+
+        if (dict_get_str (odict, name, &temp_str) != 0) {
+                if (strcmp(name,"rsync-hash-regex")) {
+                        return;
+                }
+                temp_str = "^\\.(.+)\\.[^.]+$";
+        }
+
+        if (*re_valid) {
+                regfree(re);
+                *re_valid = _gf_false;
+        }
+
+        if (!strcmp(temp_str,"none")) {
+                return;
+        }
+
+        if (regcomp(re,temp_str,REG_EXTENDED) == 0) {
+                gf_log (this->name, GF_LOG_INFO,
+                        "using regex %s = %s", name, temp_str);
+                *re_valid = _gf_true;
+        }
+        else {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "compiling regex %s failed", temp_str);
+        }
+}
+
 int
 reconfigure (xlator_t *this, dict_t *options)
 {
@@ -349,11 +382,83 @@ reconfigure (xlator_t *this, dict_t *options)
                         goto out;
         }
 
+        dht_init_regex (this, options, "rsync-hash-regex",
+                        &conf->rsync_regex, &conf->rsync_regex_valid);
+        dht_init_regex (this, options, "extra-hash-regex",
+                        &conf->extra_regex, &conf->extra_regex_valid);
+
         ret = 0;
 out:
         return ret;
 }
 
+static int
+gf_defrag_pattern_list_fill (xlator_t *this, gf_defrag_info_t *defrag, char *data)
+{
+        int                    ret = -1;
+        char                  *tmp_str = NULL;
+        char                  *tmp_str1 = NULL;
+        char                  *dup_str = NULL;
+        char                  *num = NULL;
+        char                  *pattern_str = NULL;
+        char                  *pattern = NULL;
+        gf_defrag_pattern_list_t *temp_list = NULL;
+        gf_defrag_pattern_list_t *pattern_list = NULL;
+
+        if (!this || !defrag || !data)
+                goto out;
+
+        /* Get the pattern for pattern list. "pattern:<optional-size>"
+         * eg: *avi, *pdf:10MB, *:1TB
+         */
+        pattern_str = strtok_r (data, ",", &tmp_str);
+        while (pattern_str) {
+                dup_str = gf_strdup (pattern_str);
+                pattern_list = GF_CALLOC (1, sizeof (gf_defrag_pattern_list_t),
+                                        1);
+                if (!pattern_list) {
+                        goto out;
+                }
+                pattern = strtok_r (dup_str, ":", &tmp_str1);
+                num = strtok_r (NULL, ":", &tmp_str1);
+                if (!pattern)
+                        goto out;
+                if (!num) {
+                        if (gf_string2bytesize(pattern, &pattern_list->size)
+                             == 0) {
+                                pattern = "*";
+                        }
+                } else if (gf_string2bytesize (num, &pattern_list->size) != 0) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "invalid number format \"%s\"", num);
+                        goto out;
+                }
+                memcpy (pattern_list->path_pattern, pattern, strlen (dup_str));
+
+                if (!defrag->defrag_pattern)
+                        temp_list = NULL;
+                else
+                        temp_list = defrag->defrag_pattern;
+
+                pattern_list->next = temp_list;
+
+                defrag->defrag_pattern = pattern_list;
+                pattern_list = NULL;
+
+                GF_FREE (dup_str);
+                dup_str = NULL;
+
+                pattern_str = strtok_r (NULL, ",", &tmp_str);
+        }
+
+        ret = 0;
+out:
+        if (ret)
+                GF_FREE (pattern_list);
+        GF_FREE (dup_str);
+
+        return ret;
+}
 
 int
 init (xlator_t *this)
@@ -384,6 +489,7 @@ init (xlator_t *this)
         if (!conf) {
                 goto err;
         }
+        memset (conf, 0, sizeof(*conf));
 
         ret = dict_get_int32 (this->options, "rebalance-cmd", &cmd);
 
@@ -448,6 +554,15 @@ init (xlator_t *this)
 
         if (defrag) {
                 GF_OPTION_INIT ("rebalance-stats", defrag->stats, bool, err);
+                if (dict_get_str (this->options, "rebalance-filter", &temp_str)
+                    == 0) {
+                        if (gf_defrag_pattern_list_fill (this, defrag, temp_str)
+                            == -1) {
+                                gf_log (this->name, GF_LOG_ERROR, "Cannot parse"
+                                        " rebalance-filter (%s)", temp_str);
+                                goto err;
+                        }
+                }
         }
 
         /* option can be any one of percent or bytes */
@@ -466,6 +581,11 @@ init (xlator_t *this)
                         goto err;
         }
 
+        dht_init_regex (this, this->options, "rsync-hash-regex",
+                        &conf->rsync_regex, &conf->rsync_regex_valid);
+        dht_init_regex (this, this->options, "extra-hash-regex",
+                        &conf->extra_regex, &conf->extra_regex_valid);
+
         ret = dht_layouts_init (this, conf);
         if (ret == -1) {
                 goto err;
@@ -480,6 +600,13 @@ init (xlator_t *this)
         if (!this->local_pool) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "failed to create local_t's memory pool");
+                goto err;
+        }
+
+        GF_OPTION_INIT ("xattr-name", conf->xattr_name, str, err);
+        gf_asprintf (&conf->link_xattr_name, "%s.linkto", conf->xattr_name);
+        gf_asprintf (&conf->wild_xattr_name, "%s*", conf->xattr_name);
+        if (!conf->link_xattr_name || !conf->wild_xattr_name) {
                 goto err;
         }
 
@@ -503,6 +630,10 @@ err:
                 GF_FREE (conf->du_stats);
 
                 GF_FREE (conf->defrag);
+
+                GF_FREE (conf->xattr_name);
+                GF_FREE (conf->link_xattr_name);
+                GF_FREE (conf->wild_xattr_name);
 
                 GF_FREE (conf);
         }
@@ -578,18 +709,23 @@ struct volume_options options[] = {
                     "on", "off"},
           .type = GF_OPTION_TYPE_STR,
           .default_value = "on",
+          .description = "This option if set to ON, does a lookup through "
+          "all the sub-volumes, in case a lookup didn't return any result "
+          "from the hash subvolume. If set to OFF, it does not do a lookup "
+          "on the remaining subvolumes."
         },
         { .key  = {"min-free-disk"},
           .type = GF_OPTION_TYPE_PERCENT_OR_SIZET,
           .default_value = "10%",
-          .description = "Percentage/Size of disk space that must be "
-                         "kept free."
+          .description = "Percentage/Size of disk space, after which the "
+          "process starts balancing out the cluster, and logs will appear "
+          "in log files",
         },
 	{ .key  = {"min-free-inodes"},
           .type = GF_OPTION_TYPE_PERCENT,
           .default_value = "5%",
-          .description = "Percentage inodes that must be "
-                         "kept free."
+          .description = "after system has only N% of inodes, warnings "
+          "starts to appear in log files",
         },
         { .key = {"unhashed-sticky-bit"},
           .type = GF_OPTION_TYPE_BOOL,
@@ -598,16 +734,26 @@ struct volume_options options[] = {
         { .key = {"use-readdirp"},
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "on",
+          .description = "This option if set to ON, forces the use of "
+          "readdirp, and hence also displays the stats of the files."
         },
         { .key = {"assert-no-child-down"},
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "off",
+          .description = "This option if set to ON, in the event of "
+          "CHILD_DOWN, will call exit."
         },
         { .key  = {"directory-layout-spread"},
           .type = GF_OPTION_TYPE_INT,
+          .min  = 1,
+          .validate = GF_OPT_VALIDATE_MIN,
+          .description = "Specifies the directory layout spread."
         },
         { .key  = {"decommissioned-bricks"},
           .type = GF_OPTION_TYPE_ANY,
+          .description = "This option if set to ON, decommissions "
+          "the brick, so that no new data is allowed to be created "
+          "on that brick."
         },
         { .key  = {"rebalance-cmd"},
           .type = GF_OPTION_TYPE_INT,
@@ -618,10 +764,41 @@ struct volume_options options[] = {
         { .key = {"rebalance-stats"},
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "off",
+          .description = "This option if set to ON displays and logs the "
+          " time taken for migration of each file, during the rebalance "
+          "process. If set to OFF, the rebalance logs will only display the "
+          "time spent in each directory."
         },
         { .key = {"readdir-optimize"},
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "off",
+          .description = "This option if set to ON enables the optimization "
+          "that allows DHT to requests non-first subvolumes to filter out "
+          "directory entries."
+        },
+        { .key = {"rsync-hash-regex"},
+          .type = GF_OPTION_TYPE_STR,
+          /* Setting a default here doesn't work.  See dht_init_regex. */
+          .description = "Regular expression for stripping temporary-file "
+          "suffix and prefix used by rsync, to prevent relocation when the "
+          "file is renamed."
+        },
+        { .key = {"extra-hash-regex"},
+          .type = GF_OPTION_TYPE_STR,
+          /* Setting a default here doesn't work.  See dht_init_regex. */
+          .description = "Regular expression for stripping temporary-file "
+          "suffix and prefix used by an application, to prevent relocation when "
+          "the file is renamed."
+        },
+        { .key = {"rebalance-filter"},
+          .type = GF_OPTION_TYPE_STR,
+        },
+        { .key = {"xattr-name"},
+          .type = GF_OPTION_TYPE_STR,
+          .default_value = "trusted.glusterfs.dht",
+          .description = "Base for extended attributes used by this "
+          "translator instance, to avoid conflicts with others above or "
+          "below it."
         },
 
         { .key  = {NULL} },

@@ -49,6 +49,21 @@
 
 #define GLUSTERD_SERVER_QUORUM "server"
 
+#define FMTSTR_CHECK_VOL_EXISTS "Volume %s does not exist"
+#define FMTSTR_RESOLVE_BRICK "Could not find peer on which brick %s:%s resides"
+
+#define LOGSTR_FOUND_BRICK  "Found brick %s:%s in volume %s"
+#define LOGSTR_BUILD_PAYLOAD "Failed to build payload for operation 'Volume %s'"
+#define LOGSTR_STAGE_FAIL "Staging of operation 'Volume %s' failed on %s %s %s"
+#define LOGSTR_COMMIT_FAIL "Commit of operation 'Volume %s' failed on %s %s %s"
+
+#define OPERRSTR_BUILD_PAYLOAD "Failed to build payload. Please check the log "\
+                               "file for more details."
+#define OPERRSTR_STAGE_FAIL "Staging failed on %s. Please check the log file " \
+                            "for more details."
+#define OPERRSTR_COMMIT_FAIL "Commit failed on %s. Please check the log file "\
+                             "for more details."
+
 struct glusterd_volinfo_;
 typedef struct glusterd_volinfo_ glusterd_volinfo_t;
 
@@ -99,23 +114,6 @@ typedef struct {
         struct rpc_clnt         *rpc;
         gf_boolean_t            online;
 } nodesrv_t;
-
-#define GD_OP_VERSION_KEY     "operating-version"
-#define GD_MIN_OP_VERSION_KEY "minimum-operating-version"
-#define GD_MAX_OP_VERSION_KEY "maxium-operating-version"
-
-/* Gluster versions - OP-VERSION mapping
- *
- * 3.3.0                - 1
- * 3.3.Next/3.Next      - 2
- *
- * (TODO: Change above comment once gluster version is finalised)
- */
-#define GD_OP_VERSION_MIN  1 /* MIN is the fresh start op-version, mostly
-                                should not change */
-#define GD_OP_VERSION_MAX  2 /* MAX VERSION is the maximum count in VME table,
-                                should keep changing with introduction of newer
-                                versions */
 
 typedef struct {
         gf_boolean_t    quorum;
@@ -270,6 +268,8 @@ struct glusterd_volinfo_ {
         int                     sub_count;  /* backward compatibility */
         int                     stripe_count;
         int                     replica_count;
+        int                     subvol_count; /* Number of subvolumes in a
+                                                 distribute volume */
         int                     dist_leaf_count; /* Number of bricks in one
                                                     distribute subvolume */
         int                     port;
@@ -338,6 +338,7 @@ enum glusterd_vol_comp_status_ {
 #define GLUSTERD_VOLUME_RBSTATE_FILE "rbstate"
 #define GLUSTERD_BRICK_INFO_DIR "bricks"
 #define GLUSTERD_CKSUM_FILE "cksum"
+#define GLUSTERD_TRASH "trash"
 #define GLUSTERD_NODE_STATE_FILE "node_state.info"
 
 /* definitions related to replace brick */
@@ -372,12 +373,14 @@ typedef ssize_t (*gd_serialize_t) (struct iovec outmsg, void *args);
                 }                                                       \
         } while (0)
 
-#define GLUSTERD_GET_BRICK_PIDFILE(pidfile,volpath,hostname,brickpath) { \
-                char exp_path[PATH_MAX] = {0,};                         \
-                GLUSTERD_REMOVE_SLASH_FROM_PATH (brickpath, exp_path);  \
-                snprintf (pidfile, PATH_MAX, "%s/run/%s-%s.pid",        \
-                          volpath, hostname, exp_path);                 \
-        }
+#define GLUSTERD_GET_BRICK_PIDFILE(pidfile,volinfo,brickinfo, priv) do {      \
+                char exp_path[PATH_MAX] = {0,};                               \
+                char volpath[PATH_MAX]  = {0,};                               \
+                GLUSTERD_GET_VOLUME_DIR (volpath, volinfo, priv);             \
+                GLUSTERD_REMOVE_SLASH_FROM_PATH (brickinfo->path, exp_path);  \
+                snprintf (pidfile, PATH_MAX, "%s/run/%s-%s.pid",              \
+                          volpath, brickinfo->hostname, exp_path);            \
+        } while (0)
 
 #define GLUSTERD_GET_NFS_PIDFILE(pidfile,nfspath) {                     \
                 snprintf (pidfile, PATH_MAX, "%s/run/nfs.pid",          \
@@ -673,7 +676,7 @@ int glusterd_op_stage_heal_volume (dict_t *dict, char **op_errstr);
 int glusterd_op_heal_volume (dict_t *dict, char **op_errstr);
 int glusterd_op_stage_gsync_set (dict_t *dict, char **op_errstr);
 int glusterd_op_gsync_set (dict_t *dict, char **op_errstr, dict_t *rsp_dict);
-int glusterd_op_quota (dict_t *dict, char **op_errstr);
+int glusterd_op_quota (dict_t *dict, char **op_errstr, dict_t *rsp_dict);
 int glusterd_op_stage_quota (dict_t *dict, char **op_errstr);
 int glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                                      dict_t *rsp_dict);
@@ -701,7 +704,8 @@ int glusterd_op_stage_statedump_volume (dict_t *dict, char **op_errstr);
 int glusterd_op_statedump_volume (dict_t *dict, char **op_errstr);
 
 int glusterd_op_stage_clearlocks_volume (dict_t *dict, char **op_errstr);
-int glusterd_op_clearlocks_volume (dict_t *dict, char **op_errstr);
+int glusterd_op_clearlocks_volume (dict_t *dict, char **op_errstr,
+                                   dict_t *rsp_dict);
 int glusterd_op_stage_bd (dict_t *dict, char **op_errstr);
 
 /* misc */

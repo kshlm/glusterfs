@@ -2590,6 +2590,10 @@ posix_getxattr (call_frame_t *frame, xlator_t *this,
                                                      "supported (try remounting"
                                                      " brick with 'user_xattr' "
                                                      "flag)");
+                        } else if (op_errno == ENOATTR) {
+                                gf_log (this->name, GF_LOG_DEBUG,
+                                        "No such attribute:%s for file %s",
+                                        key, real_path);
                         } else {
                                 gf_log (this->name, GF_LOG_ERROR,
                                         "getxattr failed on %s: %s (%s)",
@@ -3758,6 +3762,8 @@ posix_readdirp_fill (xlator_t *this, fd_t *fd, gf_dirent_t *entries, dict_t *dic
         struct iatt      stbuf    = {0, };
 	uuid_t           gfid;
 
+	if (list_empty(&entries->list))
+		return 0;
 
         itable = fd->inode->table;
 
@@ -4539,12 +4545,16 @@ struct volume_options options[] = {
         {
           .key = {"brick-uid"},
           .type = GF_OPTION_TYPE_INT,
-          .description = "Support for setting uid of brick's root"
+          .min = 0,
+          .validate = GF_OPT_VALIDATE_MIN,
+          .description = "Support for setting uid of brick's owner"
         },
         {
           .key = {"brick-gid"},
           .type = GF_OPTION_TYPE_INT,
-          .description = "Support for setting gid of brick's root"
+          .min = 0,
+          .validate = GF_OPT_VALIDATE_MIN,
+          .description = "Support for setting gid of brick's owner"
         },
         { .key  = {NULL} }
 };

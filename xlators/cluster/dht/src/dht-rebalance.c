@@ -16,6 +16,7 @@
 
 #include "dht-common.h"
 #include "xlator.h"
+#include <fnmatch.h>
 
 #define GF_DISK_SECTOR_SIZE             512
 #define DHT_REBALANCE_PID               4242 /* Change it if required */
@@ -101,12 +102,16 @@ gf_defrag_handle_hardlink (xlator_t *this, loc_t *loc, dict_t  *xattrs,
         data_t                 *data            = NULL;
         struct iatt             iatt            = {0,};
         int32_t                 op_errno        = 0;
+        dht_conf_t             *conf            = NULL;
 
         GF_VALIDATE_OR_GOTO ("defrag", loc, out);
         GF_VALIDATE_OR_GOTO ("defrag", loc->name, out);
         GF_VALIDATE_OR_GOTO ("defrag", stbuf, out);
         GF_VALIDATE_OR_GOTO ("defrag", this, out);
         GF_VALIDATE_OR_GOTO ("defrag", xattrs, out);
+        GF_VALIDATE_OR_GOTO ("defrag", this->private, out);
+
+        conf = this->private;
 
         if (uuid_is_null (loc->pargfid)) {
                 gf_log ("", GF_LOG_ERROR, "loc->pargfid is NULL for "
@@ -137,10 +142,10 @@ gf_defrag_handle_hardlink (xlator_t *this, loc_t *loc, dict_t  *xattrs,
         gf_log (this->name, GF_LOG_INFO, "Attempting to migrate hardlink %s "
                 "with gfid %s from %s -> %s", loc->name, uuid_utoa (loc->gfid),
                 cached_subvol->name, hashed_subvol->name);
-        data = dict_get (xattrs, DHT_LINKFILE_KEY);
+        data = dict_get (xattrs, conf->link_xattr_name);
         /* set linkto on cached -> hashed if not present, else link it */
         if (!data) {
-                ret = dict_set_str (xattrs, DHT_LINKFILE_KEY,
+                ret = dict_set_str (xattrs, conf->link_xattr_name,
                                     hashed_subvol->name);
                 if (ret) {
                         gf_log (this->name, GF_LOG_ERROR, "Failed to set "
@@ -240,12 +245,14 @@ static inline int
 __dht_rebalance_create_dst_file (xlator_t *to, xlator_t *from, loc_t *loc, struct iatt *stbuf,
                                  dict_t *dict, fd_t **dst_fd)
 {
-        xlator_t *this = NULL;
-        int       ret  = -1;
-        fd_t     *fd   = NULL;
-        struct iatt new_stbuf = {0,};
+        xlator_t    *this = NULL;
+        int          ret  = -1;
+        fd_t        *fd   = NULL;
+        struct iatt  new_stbuf = {0,};
+        dht_conf_t  *conf = NULL;
 
         this = THIS;
+        conf = this->private;
 
         ret = dict_set_static_bin (dict, "gfid-req", stbuf->ia_gfid, 16);
         if (ret) {
@@ -254,7 +261,7 @@ __dht_rebalance_create_dst_file (xlator_t *to, xlator_t *from, loc_t *loc, struc
                 goto out;
         }
 
-        ret = dict_set_str (dict, DHT_LINKFILE_KEY, from->name);
+        ret = dict_set_str (dict, conf->link_xattr_name, from->name);
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "%s: failed to set gfid in dict for create", loc->path);
@@ -299,6 +306,12 @@ __dht_rebalance_create_dst_file (xlator_t *to, xlator_t *from, loc_t *loc, struc
                         loc->path, to->name, strerror (errno));
                 goto out;
         }
+
+        ret = syncop_ftruncate (to, fd, stbuf->ia_size);
+        if (ret < 0)
+                gf_log (this->name, GF_LOG_ERROR,
+                        "ftruncate failed for %s on %s (%s)",
+                        loc->path, to->name, strerror (errno));
 
         ret = syncop_fsetattr (to, fd, stbuf,
                                (GF_SET_ATTR_UID | GF_SET_ATTR_GID),
@@ -442,8 +455,10 @@ __dht_rebalance_open_src_file (xlator_t *from, xlator_t *to, loc_t *loc,
         dict_t      *dict = NULL;
         xlator_t    *this = NULL;
         struct iatt  iatt = {0,};
+        dht_conf_t  *conf = NULL;
 
         this = THIS;
+        conf = this->private;
 
         fd = fd_create (loc->inode, DHT_REBALANCE_PID);
         if (!fd) {
@@ -466,7 +481,7 @@ __dht_rebalance_open_src_file (xlator_t *from, xlator_t *to, loc_t *loc,
         if (!dict)
                 goto out;
 
-        ret = dict_set_str (dict, DHT_LINKFILE_KEY, to->name);
+        ret = dict_set_str (dict, conf->link_xattr_name, to->name);
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "failed to set xattr in dict for %s (linkto:%s)",
@@ -519,12 +534,13 @@ migrate_special_files (xlator_t *this, xlator_t *from, xlator_t *to, loc_t *loc,
         dict_t      *dict     = NULL;
         char        *link     = NULL;
         struct iatt  stbuf    = {0,};
+        dht_conf_t  *conf     = this->private;
 
         dict = dict_new ();
         if (!dict)
                 goto out;
 
-        ret = dict_set_int32 (dict, DHT_LINKFILE_KEY, 256);
+        ret = dict_set_int32 (dict, conf->link_xattr_name, 256);
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "%s: failed to set 'linkto' key in dict", loc->path);
@@ -540,12 +556,13 @@ migrate_special_files (xlator_t *this, xlator_t *from, xlator_t *to, loc_t *loc,
         }
 
         /* we no more require this key */
-        dict_del (dict, DHT_LINKFILE_KEY);
+        dict_del (dict, conf->link_xattr_name);
 
         /* file exists in target node, only if it is 'linkfile' its valid,
            otherwise, error out */
         if (!ret) {
-                if (!check_is_linkfile (loc->inode, &stbuf, rsp_dict)) {
+                if (!check_is_linkfile (loc->inode, &stbuf, rsp_dict,
+                                        conf->link_xattr_name)) {
                         gf_log (this->name, GF_LOG_WARNING,
                                 "%s: file exists in destination", loc->path);
                         ret = -1;
@@ -640,6 +657,7 @@ dht_migrate_file (xlator_t *this, loc_t *loc, xlator_t *from, xlator_t *to,
         dict_t         *xattr          = NULL;
         dict_t         *xattr_rsp      = NULL;
         int             file_has_holes = 0;
+        dht_conf_t     *conf           = this->private;
 
         gf_log (this->name, GF_LOG_INFO, "%s: attempting to move from %s to %s",
                 loc->path, from->name, to->name);
@@ -648,7 +666,7 @@ dht_migrate_file (xlator_t *this, loc_t *loc, xlator_t *from, xlator_t *to,
         if (!dict)
                 goto out;
 
-        ret = dict_set_int32 (dict, DHT_LINKFILE_KEY, 256);
+        ret = dict_set_int32 (dict, conf->link_xattr_name, 256);
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "%s: failed to set 'linkto' key in dict", loc->path);
@@ -664,7 +682,7 @@ dht_migrate_file (xlator_t *this, loc_t *loc, xlator_t *from, xlator_t *to,
         }
 
         /* we no more require this key */
-        dict_del (dict, DHT_LINKFILE_KEY);
+        dict_del (dict, conf->link_xattr_name);
 
         /* preserve source mode, so set the same to the destination */
         src_ia_prot = stbuf.ia_prot;
@@ -835,7 +853,7 @@ dht_migrate_file (xlator_t *this, loc_t *loc, xlator_t *from, xlator_t *to,
         }
 
         /* remove the 'linkto' xattr from the destination */
-        ret = syncop_fremovexattr (to, dst_fd, DHT_LINKFILE_KEY);
+        ret = syncop_fremovexattr (to, dst_fd, conf->link_xattr_name);
         if (ret) {
                 gf_log (this->name, GF_LOG_WARNING,
                         "%s: failed to perform removexattr on %s (%s)",
@@ -1031,6 +1049,31 @@ gf_defrag_handle_migrate_error (int32_t op_errno, gf_defrag_info_t *defrag)
         return 0;
 }
 
+static gf_boolean_t
+gf_defrag_pattern_match (gf_defrag_info_t *defrag, char *name, uint64_t size)
+{
+        gf_defrag_pattern_list_t *trav = NULL;
+        gf_boolean_t               match = _gf_false;
+        gf_boolean_t               ret = _gf_false;
+
+        GF_VALIDATE_OR_GOTO ("dht", defrag, out);
+
+        trav = defrag->defrag_pattern;
+        while (trav) {
+                if (!fnmatch (trav->path_pattern, name, FNM_NOESCAPE)) {
+                        match = _gf_true;
+                        break;
+                }
+                trav = trav->next;
+        }
+
+        if ((match == _gf_true) && (size >= trav->size))
+                ret = _gf_true;
+
+ out:
+        return ret;
+}
+
 /* We do a depth first traversal of directories. But before we move into
  * subdirs, we complete the data migration of those directories whose layouts
  * have been fixed
@@ -1116,6 +1159,12 @@ gf_defrag_migrate_data (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
                         defrag->num_files_lookedup++;
                         if (defrag->stats == _gf_true) {
                                 gettimeofday (&start, NULL);
+                        }
+                        if (defrag->defrag_pattern &&
+                            (gf_defrag_pattern_match (defrag, entry->d_name,
+                                                      entry->d_stat.ia_size)
+                             == _gf_false)) {
+                                continue;
                         }
                         loc_wipe (&entry_loc);
                         ret =dht_build_child_loc (this, &entry_loc, loc,
@@ -1369,7 +1418,7 @@ gf_defrag_fix_layout (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
 
                         if (uuid_is_null (entry->d_stat.ia_gfid)) {
                                 gf_log (this->name, GF_LOG_ERROR, "%s/%s"
-                                        "gfid not present", loc->path,
+                                        " gfid not present", loc->path,
                                          entry->d_name);
                                 continue;
                         }
@@ -1379,7 +1428,7 @@ gf_defrag_fix_layout (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
                         uuid_copy (entry_loc.gfid, entry->d_stat.ia_gfid);
                         if (uuid_is_null (loc->gfid)) {
                                 gf_log (this->name, GF_LOG_ERROR, "%s/%s"
-                                        "gfid not present", loc->path,
+                                        " gfid not present", loc->path,
                                          entry->d_name);
                                 continue;
                         }

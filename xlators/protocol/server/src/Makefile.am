@@ -1,7 +1,7 @@
 xlator_LTLIBRARIES = server.la
 xlatordir = $(libdir)/glusterfs/$(PACKAGE_VERSION)/xlator/protocol
 
-server_la_LDFLAGS = -module -avoidversion
+server_la_LDFLAGS = -module -avoid-version
 
 server_la_LIBADD = $(top_builddir)/libglusterfs/src/libglusterfs.la \
 	$(top_builddir)/rpc/rpc-lib/src/libgfrpc.la \
@@ -20,6 +20,7 @@ AM_CPPFLAGS = $(GF_CPPFLAGS) \
 	-I$(top_srcdir)/rpc/rpc-lib/src/       \
 	-I$(top_srcdir)/rpc/xdr/src/
 
-AM_CFLAGS = -Wall $(GF_CFLAGS)
+AM_CFLAGS = -Wall $(GF_CFLAGS) \
+            -DDATADIR=\"$(localstatedir)\"
 
 CLEANFILES = *~

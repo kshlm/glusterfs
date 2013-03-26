@@ -44,6 +44,7 @@
 #include "stack.h"
 #include "globals.h"
 #include "lkowner.h"
+#include "syscall.h"
 
 #ifndef AI_ADDRCONFIG
 #define AI_ADDRCONFIG 0
@@ -108,6 +109,35 @@ mkdir_p (char *path, mode_t mode, gf_boolean_t allow_symlinks)
 
         ret = 0;
 out:
+
+        return ret;
+}
+
+int
+gf_lstat_dir (const char *path, struct stat *stbuf_in)
+{
+        int ret           = -1;
+        struct stat stbuf = {0,};
+
+        if (path == NULL) {
+                errno = EINVAL;
+                goto out;
+        }
+
+        ret = sys_lstat (path, &stbuf);
+        if (ret)
+                goto out;
+
+        if (!S_ISDIR (stbuf.st_mode)) {
+                errno = ENOTDIR;
+                ret = -1;
+                goto out;
+        }
+        ret = 0;
+
+out:
+        if (!ret && stbuf_in)
+                *stbuf_in = stbuf;
 
         return ret;
 }
@@ -238,30 +268,101 @@ err:
 }
 
 
-void
-gf_log_volume_file (FILE *specfp)
+struct xldump {
+	int lineno;
+	FILE *logfp;
+};
+
+
+static int
+nprintf (struct xldump *dump, const char *fmt, ...)
 {
-        int          lcount = 0;
-        char         data[GF_UNIT_KB];
+	va_list ap;
+	int ret = 0;
+
+
+	ret += fprintf (dump->logfp, "%3d: ", ++dump->lineno);
+
+	va_start (ap, fmt);
+	ret += vfprintf (dump->logfp, fmt, ap);
+	va_end (ap);
+
+	ret += fprintf (dump->logfp, "\n");
+
+	return ret;
+}
+
+
+static int
+xldump_options (dict_t *this, char *key, data_t *value,	void *d)
+{
+	nprintf (d, "    option %s %s", key, value->data);
+	return 0;
+}
+
+
+static void
+xldump_subvolumes (xlator_t *this, void *d)
+{
+	xlator_list_t *subv = NULL;
+	int len = 0;
+	char *subvstr = NULL;
+
+	subv = this->children;
+	if (!this->children)
+		return;
+
+	for (subv = this->children; subv; subv = subv->next)
+		len += (strlen (subv->xlator->name) + 1);
+
+	subvstr = GF_CALLOC (1, len, gf_common_mt_strdup);
+
+	len = 0;
+	for (subv = this->children; subv; subv= subv->next)
+		len += sprintf (subvstr + len, "%s%s", subv->xlator->name,
+				subv->next ? " " : "");
+
+	nprintf (d, "    subvolumes %s", subvstr);
+
+	GF_FREE (subvstr);
+}
+
+
+static void
+xldump (xlator_t *each, void *d)
+{
+	nprintf (d, "volume %s", each->name);
+	nprintf (d, "    type %s", each->type);
+	dict_foreach (each->options, xldump_options, d);
+
+	xldump_subvolumes (each, d);
+
+	nprintf (d, "end-volume");
+	nprintf (d, "");
+}
+
+
+void
+gf_log_dump_graph (FILE *specfp, glusterfs_graph_t *graph)
+{
         glusterfs_ctx_t *ctx;
+	struct xldump xld = {0, };
+
 
         ctx = THIS->ctx;
+	xld.logfp = ctx->log.gf_log_logfile;
 
-        fseek (specfp, 0L, SEEK_SET);
-
-        fprintf (ctx->log.gf_log_logfile, "Given volfile:\n");
+        fprintf (ctx->log.gf_log_logfile, "Final graph:\n");
         fprintf (ctx->log.gf_log_logfile,
                  "+---------------------------------------"
                  "---------------------------------------+\n");
-        while (fgets (data, GF_UNIT_KB, specfp) != NULL){
-                lcount++;
-                fprintf (ctx->log.gf_log_logfile, "%3d: %s", lcount, data);
-        }
+
+	xlator_foreach_depth_first (graph->top, xldump, &xld);
+
         fprintf (ctx->log.gf_log_logfile,
-                 "\n+---------------------------------------"
+                 "+---------------------------------------"
                  "---------------------------------------+\n");
         fflush (ctx->log.gf_log_logfile);
-        fseek (specfp, 0L, SEEK_SET);
 }
 
 static void
@@ -1339,7 +1440,7 @@ gf_string2percent_or_bytesize (const char *str,
 			       uint64_t *n,
 			       gf_boolean_t *is_percent)
 {
-        uint64_t value = 0ULL;
+        double value = 0ULL;
         char *tail = NULL;
         int old_errno = 0;
         const char *s = NULL;
@@ -1361,7 +1462,7 @@ gf_string2percent_or_bytesize (const char *str,
 
         old_errno = errno;
         errno = 0;
-        value = strtoull (str, &tail, 10);
+        value = strtod (str, &tail);
         if (str == tail)
                 errno = EINVAL;
 
@@ -1388,7 +1489,7 @@ gf_string2percent_or_bytesize (const char *str,
                         return -1;
         }
 
-        *n = value;
+        *n = (uint64_t) value;
 
         return 0;
 }
@@ -1678,6 +1779,11 @@ valid_host_name (char *address, int length)
                 goto out;
         }
 
+        if (!isalnum (dup_addr[length - 1]) && (dup_addr[length - 1] != '*')) {
+                ret = 0;
+                goto out;
+        }
+
         /* gen-name */
         temp_str = strtok_r (dup_addr, ".", &save_ptr);
         do {
@@ -1714,8 +1820,13 @@ valid_ipv4_address (char *address, int length, gf_boolean_t wildcard_acc)
 
         tmp = gf_strdup (address);
 
-        /* To prevent cases where last character is '.' */
+        /*
+         * To prevent cases where last character is '.' and which have
+         * consecutive dots like ".." as strtok ignore consecutive
+         * delimeters.
+         */
         if (length <= 0 ||
+            (strstr (address, "..")) ||
             (!isdigit (tmp[length - 1]) && (tmp[length - 1] != '*'))) {
                 ret = 0;
                 goto out;
@@ -2251,17 +2362,11 @@ gf_process_reserved_ports (gf_boolean_t *ports)
                 goto out;
         }
 
-        blocked_port = strtok_r (ports_info, ",",&tmp);
-        if (!blocked_port || !strcmp (blocked_port, ports_info)) {
-                if (!blocked_port)
-                        blocked_port = ports_info;
-                gf_ports_reserved (blocked_port, ports);
-                blocked_port = strtok_r (NULL, ",", &tmp);
-        }
+        blocked_port = strtok_r (ports_info, ",\n",&tmp);
 
         while (blocked_port) {
                 gf_ports_reserved (blocked_port, ports);
-                blocked_port = strtok_r (NULL, ",", &tmp);
+                blocked_port = strtok_r (NULL, ",\n", &tmp);
         }
 
         ret = 0;
@@ -2336,4 +2441,75 @@ gf_ports_reserved (char *blocked_port, gf_boolean_t *ports)
 
 out:
         return result;
+}
+
+/* Takes in client ip{v4,v6} and returns associated hostname, if any
+ * Also, allocates memory for the hostname.
+ * Returns: 0 for success, -1 for failure
+ */
+int
+gf_get_hostname_from_ip (char *client_ip, char **hostname)
+{
+        int                      ret                          = -1;
+        struct sockaddr         *client_sockaddr              = NULL;
+        struct sockaddr_in       client_sock_in               = {0};
+        struct sockaddr_in6      client_sock_in6              = {0};
+        char                     client_hostname[NI_MAXHOST]  = {0};
+        char                    *client_ip_copy               = NULL;
+        char                    *tmp                          = NULL;
+        char                    *ip                           = NULL;
+
+        /* if ipv4, reverse lookup the hostname to
+         * allow FQDN based rpc authentication
+         */
+        if (valid_ipv4_address (client_ip, strlen (client_ip), 0) == _gf_false) {
+                /* most times, we get a.b.c.d:port form, so check that */
+                client_ip_copy = gf_strdup (client_ip);
+                if (!client_ip_copy)
+                        goto out;
+
+                ip = strtok_r (client_ip_copy, ":", &tmp);
+        } else {
+                ip = client_ip;
+        }
+
+        if (valid_ipv4_address (ip, strlen (ip), 0) == _gf_true) {
+                client_sockaddr = (struct sockaddr *)&client_sock_in;
+                client_sock_in.sin_family = AF_INET;
+                ret = inet_pton (AF_INET, ip,
+                                 (void *)&client_sock_in.sin_addr.s_addr);
+
+        } else if (valid_ipv6_address (ip, strlen (ip), 0) == _gf_true) {
+                client_sockaddr = (struct sockaddr *) &client_sock_in6;
+
+                client_sock_in6.sin6_family = AF_INET6;
+                ret = inet_pton (AF_INET6, ip,
+                                 (void *)&client_sock_in6.sin6_addr);
+        } else {
+                goto out;
+        }
+
+        if (ret != 1) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = getnameinfo (client_sockaddr,
+                           sizeof (*client_sockaddr),
+                           client_hostname, sizeof (client_hostname),
+                           NULL, 0, 0);
+        if (ret) {
+                gf_log ("common-utils", GF_LOG_ERROR,
+                        "Could not lookup hostname of %s : %s",
+                        client_ip, gai_strerror (ret));
+                ret = -1;
+                goto out;
+        }
+
+        *hostname = gf_strdup ((char *)client_hostname);
+ out:
+        if (client_ip_copy)
+                GF_FREE (client_ip_copy);
+
+        return ret;
 }

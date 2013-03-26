@@ -148,10 +148,12 @@ typedef int SSL_trinary_func (SSL *, void *, int);
                                       &in->pending_count,               \
                                       &bytes_read);                     \
                 if (ret == -1) {                                        \
-                        gf_log (this->name, GF_LOG_WARNING,             \
-                                "reading from socket failed. Error (%s), " \
-                                "peer (%s)", strerror (errno),          \
-                                this->peerinfo.identifier);             \
+                        if (priv->read_fail_log)                        \
+                                gf_log (this->name, GF_LOG_WARNING,     \
+                                        "reading from socket failed."   \
+                                        "Error (%s), peer (%s)",        \
+                                        strerror (errno),               \
+                                        this->peerinfo.identifier);     \
                         break;                                          \
                 }                                                       \
                 __socket_proto_update_priv_after_read (priv, ret, bytes_read); \
@@ -308,6 +310,15 @@ done:
 	return ret;
 }
 
+
+void
+ssl_teardown_connection (socket_private_t *priv)
+{
+        SSL_shutdown(priv->ssl_ssl);
+        SSL_clear(priv->ssl_ssl);
+        SSL_free(priv->ssl_ssl);
+        priv->ssl_ssl = NULL;
+}
 
 
 ssize_t
@@ -496,9 +507,12 @@ __socket_rwv (rpc_transport_t *this, struct iovec *vector, int count,
                         if (errno == EINTR)
                                 continue;
 
-                        gf_log (this->name, GF_LOG_WARNING,
-                                "%s failed (%s)", write ? "writev" : "readv",
-                                strerror (errno));
+                        if (write || (!write && priv->read_fail_log))
+                                gf_log (this->name, GF_LOG_WARNING,
+                                        "%s on %s failed (%s)",
+                                        write ? "writev":"readv",
+                                        this->peerinfo.identifier,
+                                        strerror (errno));
 			if (priv->use_ssl) {
 				ssl_dump_error_stack(this->name);
 			}
@@ -577,10 +591,29 @@ __socket_writev (rpc_transport_t *this, struct iovec *vector, int count,
 
 
 int
+__socket_shutdown (rpc_transport_t *this)
+{
+        int               ret = -1;
+        socket_private_t *priv = this->private;
+
+        priv->connected = -1;
+        ret = shutdown (priv->sock, SHUT_RDWR);
+        if (ret) {
+                /* its already disconnected.. no need to understand
+                   why it failed to shutdown in normal cases */
+                gf_log (this->name, GF_LOG_DEBUG,
+                        "shutdown() returned %d. %s",
+                        ret, strerror (errno));
+        }
+
+        return ret;
+}
+
+int
 __socket_disconnect (rpc_transport_t *this)
 {
-        socket_private_t *priv = NULL;
         int               ret = -1;
+        socket_private_t *priv = NULL;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
@@ -588,20 +621,7 @@ __socket_disconnect (rpc_transport_t *this)
         priv = this->private;
 
         if (priv->sock != -1) {
-                priv->connected = -1;
-                ret = shutdown (priv->sock, SHUT_RDWR);
-                if (ret) {
-                        /* its already disconnected.. no need to understand
-                           why it failed to shutdown in normal cases */
-                        gf_log (this->name, GF_LOG_DEBUG,
-                                "shutdown() returned %d. %s",
-                                ret, strerror (errno));
-                }
-		if (priv->ssl_ssl) {
-			SSL_shutdown(priv->ssl_ssl);
-			SSL_clear(priv->ssl_ssl);
-			SSL_free(priv->ssl_ssl);
-		}
+                ret = __socket_shutdown(this);
 		if (priv->own_thread) {
 			/*
 			 * Without this, reconnect (= disconnect + connect)
@@ -609,8 +629,19 @@ __socket_disconnect (rpc_transport_t *this)
 			 */
 			close(priv->sock);
 			priv->sock = -1;
-			++(priv->socket_gen);
+                        /*
+                         * Closing the socket forces an error that will wake
+                         * up the polling thread.  Wait for it to notice and
+                         * respond.
+                         */
+                        if (priv->ot_state == OT_ALIVE) {
+                                priv->ot_state = OT_DYING;
+                                pthread_cond_wait(&priv->ot_event,&priv->lock);
+                        }
 		}
+                else if (priv->use_ssl) {
+                        ssl_teardown_connection(priv);
+                }
         }
 
 out:
@@ -1067,7 +1098,7 @@ out:
 }
 
 
-inline int
+static inline int
 __socket_read_simple_msg (rpc_transport_t *this)
 {
         int                           ret            = 0;
@@ -1136,7 +1167,7 @@ out:
 }
 
 
-inline int
+static inline int
 __socket_read_simple_request (rpc_transport_t *this)
 {
         return __socket_read_simple_msg (this);
@@ -1153,7 +1184,7 @@ __socket_read_simple_request (rpc_transport_t *this)
 #define rpc_progver_addr(buf) (buf + RPC_MSGTYPE_SIZE + 8)
 #define rpc_procnum_addr(buf) (buf + RPC_MSGTYPE_SIZE + 12)
 
-inline int
+static inline int
 __socket_read_vectored_request (rpc_transport_t *this, rpcsvc_vector_sizer vector_sizer)
 {
         socket_private_t *priv                   = NULL;
@@ -1325,7 +1356,7 @@ out:
         return ret;
 }
 
-inline int
+static inline int
 __socket_read_request (rpc_transport_t *this)
 {
         socket_private_t *priv               = NULL;
@@ -1406,7 +1437,7 @@ out:
 }
 
 
-inline int
+static inline int
 __socket_read_accepted_successful_reply (rpc_transport_t *this)
 {
         socket_private_t *priv              = NULL;
@@ -1533,7 +1564,7 @@ out:
 #define rpc_reply_verflen_addr(fragcurrent) ((char *)fragcurrent - 4)
 #define rpc_reply_accept_status_addr(fragcurrent) ((char *)fragcurrent - 4)
 
-inline int
+static inline int
 __socket_read_accepted_reply (rpc_transport_t *this)
 {
         socket_private_t *priv           = NULL;
@@ -1629,7 +1660,7 @@ out:
 }
 
 
-inline int
+static inline int
 __socket_read_denied_reply (rpc_transport_t *this)
 {
         return __socket_read_simple_msg (this);
@@ -1639,7 +1670,7 @@ __socket_read_denied_reply (rpc_transport_t *this)
 #define rpc_reply_status_addr(fragcurrent) ((char *)fragcurrent - 4)
 
 
-inline int
+static inline int
 __socket_read_vectored_reply (rpc_transport_t *this)
 {
         socket_private_t *priv           = NULL;
@@ -1705,7 +1736,7 @@ out:
 }
 
 
-inline int
+static inline int
 __socket_read_simple_reply (rpc_transport_t *this)
 {
         return __socket_read_simple_msg (this);
@@ -1713,7 +1744,7 @@ __socket_read_simple_reply (rpc_transport_t *this)
 
 #define rpc_xid_addr(buf) (buf)
 
-inline int
+static inline int
 __socket_read_reply (rpc_transport_t *this)
 {
         socket_private_t   *priv         = NULL;
@@ -1783,7 +1814,7 @@ out:
 
 
 /* returns the number of bytes yet to be read in a fragment */
-inline int
+static inline int
 __socket_read_frag (rpc_transport_t *this)
 {
         socket_private_t *priv           = NULL;
@@ -1852,7 +1883,7 @@ out:
 }
 
 
-inline
+static inline
 void __socket_reset_priv (socket_private_t *priv)
 {
         struct gf_sock_incoming      *in         = NULL;
@@ -2221,7 +2252,6 @@ socket_poller (void *ctx)
 	struct pollfd     pfd[2] = {{0,},};
 	gf_boolean_t      to_write = _gf_false;
 	int               ret = 0;
-	int               orig_gen;
 
         if (priv->use_ssl) {
                 if (ssl_setup_connection(this,priv->connected) < 0) {
@@ -2241,8 +2271,6 @@ socket_poller (void *ctx)
                 }
         }
 
-	orig_gen = ++(priv->socket_gen);
-
         if (priv->connected == 0) {
 		THIS = this->xl;
                 ret = socket_connect_finish (this);
@@ -2260,11 +2288,6 @@ socket_poller (void *ctx)
         }
 
 	for (;;) {
-		if (priv->socket_gen != orig_gen) {
-			gf_log(this->name,GF_LOG_DEBUG,
-			       "redundant poller exiting");
-			return NULL;
-		}
 		pthread_mutex_lock(&priv->lock);
 		to_write = !list_empty(&priv->ioq);
 		pthread_mutex_unlock(&priv->lock);
@@ -2334,13 +2357,57 @@ socket_poller (void *ctx)
 
 err:
 	/* All (and only) I/O errors should come here. */
-	__socket_disconnect (this);
+        pthread_mutex_lock(&priv->lock);
+        if (priv->ot_state == OT_ALIVE) {
+                /*
+                 * We have to do this if we're here because of an error we
+                 * detected ourselves, but need to avoid a recursive call
+                 * if our death is the result of an external disconnect.
+                 */
+                __socket_shutdown(this);
+                close(priv->sock);
+                priv->sock = -1;
+        }
+        if (priv->ssl_ssl) {
+                /*
+                 * We're always responsible for this part, but only actually
+                 * have to do it if we got far enough for ssl_ssl to be valid
+                 * (i.e. errors in ssl_setup_connection don't count).
+                 */
+                ssl_teardown_connection(priv);
+        }
+        priv->ot_state = OT_IDLE;
+        /*
+         * We expect there to be only one waiter, but if there do happen to
+         * be multiple it's probably better to unblock them than to let them
+         * hang.  If there are none, this is a harmless no-op.
+         */
+        pthread_cond_broadcast(&priv->ot_event);
+        pthread_mutex_unlock(&priv->lock);
         rpc_transport_notify (this->listener, RPC_TRANSPORT_DISCONNECT, this);
 	rpc_transport_unref (this);
 	return NULL;
 }
 
 
+void
+socket_spawn (rpc_transport_t *this)
+{
+        socket_private_t        *priv   = this->private;
+
+        if (priv->ot_state == OT_ALIVE) {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "refusing to start redundant poller");
+                return;
+        }
+
+        priv->ot_state = OT_ALIVE;
+
+        if (pthread_create(&priv->thread,NULL,socket_poller,this) != 0) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "could not create poll thread");
+        }
+}
 
 int
 socket_server_event_handler (int fd, int idx, void *data,
@@ -2390,7 +2457,8 @@ socket_server_event_handler (int fd, int idx, void *data,
                                 }
                         }
 
-                        if (priv->keepalive) {
+                        if (priv->keepalive &&
+                            new_sockaddr.ss_family != AF_UNIX) {
                                 ret = __socket_keepalive (new_sock,
                                                           new_sockaddr.ss_family,
                                                           priv->keepaliveintvl,
@@ -2484,12 +2552,7 @@ socket_server_event_handler (int fd, int idx, void *data,
 						gf_log(this->name,GF_LOG_ERROR,
 						       "could not create pipe");
 					}
-					if (pthread_create(&new_priv->thread,
-							NULL, socket_poller,
-							new_trans) != 0) {
-						gf_log(this->name,GF_LOG_ERROR,
-						       "could not create poll thread");
-					}
+                                        socket_spawn(new_trans);
 				}
 				else {
 					new_priv->idx =
@@ -2555,7 +2618,9 @@ socket_connect (rpc_transport_t *this, int port)
         socklen_t                sockaddr_len = 0;
         glusterfs_ctx_t         *ctx = NULL;
         sa_family_t              sa_family = {0, };
+        char                    *local_addr   = NULL;
         union gf_sock_union      sock_union;
+        struct sockaddr_in      *addr         = NULL;
 
         GF_VALIDATE_OR_GOTO ("socket", this, err);
         GF_VALIDATE_OR_GOTO ("socket", this->private, err);
@@ -2662,7 +2727,7 @@ socket_connect (rpc_transport_t *this, int port)
                         }
                 }
 
-                if (priv->keepalive) {
+                if (priv->keepalive && sa_family != AF_UNIX) {
                         ret = __socket_keepalive (priv->sock,
                                                   sa_family,
                                                   priv->keepaliveintvl,
@@ -2676,6 +2741,15 @@ socket_connect (rpc_transport_t *this, int port)
                 SA (&this->myinfo.sockaddr)->sa_family =
                         SA (&this->peerinfo.sockaddr)->sa_family;
 
+                /* If a source addr is explicitly specified, use it */
+                ret = dict_get_str (this->options,
+                                    "transport.socket.source-addr",
+                                    &local_addr);
+                if (!ret && SA (&this->myinfo.sockaddr)->sa_family == AF_INET) {
+                        addr = (struct sockaddr_in *)(&this->myinfo.sockaddr);
+                        ret = inet_pton (AF_INET, local_addr, &(addr->sin_addr.s_addr));
+                }
+
                 ret = client_bind (this, SA (&this->myinfo.sockaddr),
                                    &this->myinfo.sockaddr_len, priv->sock);
                 if (ret == -1) {
@@ -2686,13 +2760,25 @@ socket_connect (rpc_transport_t *this, int port)
                         goto unlock;
                 }
 
+                if (!priv->use_ssl && !priv->bio && !priv->own_thread) {
+                        ret = __socket_nonblock (priv->sock);
+                        if (ret == -1) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "NBIO on %d failed (%s)",
+                                        priv->sock, strerror (errno));
+                                close (priv->sock);
+                                priv->sock = -1;
+                                goto unlock;
+                        }
+                }
+
                 ret = connect (priv->sock, SA (&this->peerinfo.sockaddr),
                                this->peerinfo.sockaddr_len);
 
                 if (ret == -1 && ((errno != EINPROGRESS) && (errno != ENOENT))) {
                         gf_log (this->name, GF_LOG_ERROR,
-                                "connection attempt failed (%s)",
-                                strerror (errno));
+                                "connection attempt on %s failed, (%s)",
+                                this->peerinfo.identifier, strerror (errno));
                         close (priv->sock);
                         priv->sock = -1;
                         goto unlock;
@@ -2736,11 +2822,7 @@ socket_connect (rpc_transport_t *this, int port)
 			}
 
                         this->listener = this;
-			if (pthread_create(&priv->thread,NULL,
-					socket_poller, this) != 0) {
-				gf_log(this->name,GF_LOG_ERROR,
-				       "could not create poll thread");
-			}
+                        socket_spawn(this);
 		}
 		else {
 			priv->idx = event_register (ctx->event_pool, priv->sock,
@@ -3226,6 +3308,7 @@ socket_init (rpc_transport_t *this)
         if (!priv) {
                 return -1;
         }
+        memset(priv,0,sizeof(*priv));
 
         pthread_mutex_init (&priv->lock, NULL);
 
@@ -3450,6 +3533,11 @@ socket_init (rpc_transport_t *this)
 
 		SSL_CTX_set_verify(priv->ssl_ctx,SSL_VERIFY_PEER,0);
 	}
+
+        if (priv->own_thread) {
+                priv->ot_state = OT_IDLE;
+                pthread_cond_init (&priv->ot_event, NULL);
+        }
 
 out:
         this->private = priv;

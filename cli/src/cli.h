@@ -33,6 +33,7 @@
 #define CLI_TOP_CMD_TIMEOUT                  600 //Longer timeout for volume top
 #define DEFAULT_CLI_LOG_FILE_DIRECTORY     DATADIR "/log/glusterfs"
 #define DEFAULT_LOG_FILE_DIRECTORY         DATADIR "/log/glusterfs"
+#define DEFAULT_VAR_RUN_DIRECTORY          DATADIR "/run/gluster"
 #define CLI_VOL_STATUS_BRICK_LEN              55
 #define CLI_TAB_LENGTH                         8
 #define CLI_BRICK_STATUS_LINE_LEN             78
@@ -141,7 +142,7 @@ struct cli_local {
         gf_boolean_t    all;
 #if (HAVE_LIB_XML)
         xmlTextWriterPtr        writer;
-        xmlBufferPtr            buf;
+        xmlDocPtr               doc;
         int                     vol_count;
 #endif
 };
@@ -378,4 +379,7 @@ cli_xml_output_generic_volume (char *op, dict_t *dict, int op_ret, int op_errno,
 int
 cli_xml_output_vol_gsync (dict_t *dict, int op_ret, int op_errno,
                           char *op_errstr);
+
+char *
+is_server_debug_xlator (void *myframe);
 #endif /* __CLI_H__ */

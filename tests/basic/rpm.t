@@ -2,7 +2,6 @@
 
 . $(dirname $0)/../include.rc
 
-cleanup
 RESULT_DIR=$(mktemp -d -p /var/tmp rpm-tests.XXXXXXXX)
 
 # enable some extra debugging
@@ -10,6 +9,32 @@ if [ -n "${DEBUG}" -a "${DEBUG}" != "0" ]
 then
 	exec &> ${RESULT_DIR}/log
 	set -x
+fi
+
+# detect the branch we're based off
+if [ -n "${BRANCH}" ] ; then
+        # $BRANCH is set in the environment (by Jenkins or other)
+        GIT_PARENT="origin/${BRANCH}"
+else
+        # get a reference to the latest clean tree
+        GIT_PARENT=$(git describe --abbrev=0)
+fi
+
+# check for changed files
+CHANGED_FILES=$(git diff --name-only ${GIT_PARENT})
+# filter out any files not affecting the build itself
+CHANGED_FILES=$(grep -E -v \
+        -e '\.c$' \
+        -e '\.h$' \
+        -e '\.py$' \
+        -e '^tests/' \
+        <<< "${CHANGED_FILES}")
+if [ -z "${CHANGED_FILES}" ]
+then
+        # only contents of files were changed, no need to retest rpmbuild
+        SKIP_TESTS
+        cleanup
+        exit 0
 fi
 
 # checkout the sources to a new directory to execute ./configure and all
@@ -20,17 +45,14 @@ cd ${RESULT_DIR}/sources
 git clone -q -s file://${REPO} .
 git checkout -q -b rpm-test ${COMMIT}
 
-# build the .tar.gz
+# build the glusterfs-*.tar.gz and gluster-swift-ufo-*.tar.gz
 [ -e configure ] || ./autogen.sh 2>&1 > /dev/null
 TEST ./configure --enable-fusermount
 TEST make dist
 
-# need to use double quoting because the command is passed to TEST
-# EPEL-5 does not like new versions of rpmbuild and requires some _source_* defines
-TEST rpmbuild --define "'_srcrpmdir $PWD'" \
-	--define "'_source_payload w9.gzdio'" \
-	--define "'_source_filedigest_algorithm 1'" \
-	-ts *.tar.gz
+# build the glusterfs src.rpm
+ls extras
+TEST make -C extras/LinuxRPM testsrpm
 
 chmod g=rwx ${RESULT_DIR}
 chown :mock ${RESULT_DIR}

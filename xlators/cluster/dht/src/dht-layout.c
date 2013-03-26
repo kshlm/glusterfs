@@ -158,7 +158,7 @@ dht_layout_search (xlator_t *this, dht_layout_t *layout, const char *name)
         int        ret = 0;
 
 
-        ret = dht_hash_compute (layout->type, name, &hash);
+        ret = dht_hash_compute (this, layout->type, name, &hash);
         if (ret != 0) {
                 gf_log (this->name, GF_LOG_WARNING,
                         "hash computation failed for type=%d name=%s",
@@ -335,11 +335,12 @@ int
 dht_layout_merge (xlator_t *this, dht_layout_t *layout, xlator_t *subvol,
                   int op_ret, int op_errno, dict_t *xattr)
 {
-        int      i     = 0;
-        int      ret   = -1;
-        int      err   = -1;
-        void    *disk_layout_raw = NULL;
-        int      disk_layout_len = 0;
+        int         i     = 0;
+        int         ret   = -1;
+        int         err   = -1;
+        void       *disk_layout_raw = NULL;
+        int         disk_layout_len = 0;
+        dht_conf_t *conf = this->private;
 
         if (op_ret != 0) {
                 err = op_errno;
@@ -360,7 +361,7 @@ dht_layout_merge (xlator_t *this, dht_layout_t *layout, xlator_t *subvol,
 
         if (xattr) {
                 /* during lookup and not mkdir */
-                ret = dict_get_ptr_and_len (xattr, "trusted.glusterfs.dht",
+                ret = dict_get_ptr_and_len (xattr, conf->xattr_name,
 					    &disk_layout_raw, &disk_layout_len);
         }
 
@@ -410,6 +411,22 @@ dht_layout_entry_swap (dht_layout_t *layout, int i, int j)
         layout->list[j].stop   = stop_swap;
         layout->list[j].xlator = xlator_swap;
         layout->list[j].err    = err_swap;
+}
+
+void
+dht_layout_range_swap (dht_layout_t *layout, int i, int j)
+{
+        uint32_t  start_swap = 0;
+        uint32_t  stop_swap = 0;
+
+        start_swap  = layout->list[i].start;
+        stop_swap   = layout->list[i].stop;
+
+        layout->list[i].start  = layout->list[j].start;
+        layout->list[i].stop   = layout->list[j].stop;
+
+        layout->list[j].start  = start_swap;
+        layout->list[j].stop   = stop_swap;
 }
 
 int64_t
@@ -634,30 +651,29 @@ out:
 }
 
 int
-dht_dir_has_layout (dict_t *xattr)
+dht_dir_has_layout (dict_t *xattr, char *name)
 {
 
         void     *disk_layout_raw = NULL;
 
-        return dict_get_ptr (xattr, "trusted.glusterfs.dht",
-                             &disk_layout_raw);
-
+        return dict_get_ptr (xattr, name, &disk_layout_raw);
 }
 
 int
 dht_layout_dir_mismatch (xlator_t *this, dht_layout_t *layout, xlator_t *subvol,
                          loc_t *loc, dict_t *xattr)
 {
-        int       idx = 0;
-        int       pos = -1;
-        int       ret = 0;
-        int       err = 0;
-        int       dict_ret = 0;
-        int32_t   disk_layout[4];
-        void     *disk_layout_raw = NULL;
-        int32_t   count = -1;
-        uint32_t  start_off = -1;
-        uint32_t  stop_off = -1;
+        int         idx = 0;
+        int         pos = -1;
+        int         ret = 0;
+        int         err = 0;
+        int         dict_ret = 0;
+        int32_t     disk_layout[4];
+        void       *disk_layout_raw = NULL;
+        int32_t     count = -1;
+        uint32_t    start_off = -1;
+        uint32_t    stop_off = -1;
+        dht_conf_t *conf = this->private;
 
 
         for (idx = 0; idx < layout->cnt; idx++) {
@@ -687,7 +703,7 @@ dht_layout_dir_mismatch (xlator_t *this, dht_layout_t *layout, xlator_t *subvol,
                 goto out;
         }
 
-        dict_ret = dict_get_ptr (xattr, "trusted.glusterfs.dht",
+        dict_ret = dict_get_ptr (xattr, conf->xattr_name,
                                  &disk_layout_raw);
 
         if (dict_ret < 0) {

@@ -441,6 +441,10 @@ dht_rename_links_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         local->loc.path, prev->this->name, strerror (op_errno));
         }
 
+        if (local->linked == _gf_true) {
+                local->linked = _gf_false;
+                dht_linkfile_attr_heal (frame, this);
+        }
         DHT_STACK_DESTROY (frame);
 
         return 0;
@@ -501,7 +505,8 @@ dht_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 uuid_copy (link_local->gfid, local->loc.inode->gfid);
 
                 dht_linkfile_create (link_frame, dht_rename_links_create_cbk,
-                                     src_cached, dst_hashed, &link_local->loc);
+                                     this, src_cached, dst_hashed,
+                                     &link_local->loc);
         }
 
 err:
@@ -510,6 +515,11 @@ err:
         dht_iatt_merge (this, &local->postoldparent, postoldparent, prev->this);
         dht_iatt_merge (this, &local->preparent, prenewparent, prev->this);
         dht_iatt_merge (this, &local->postparent, postnewparent, prev->this);
+
+        if (local->linked == _gf_true) {
+                local->linked = _gf_false;
+                dht_linkfile_attr_heal (frame, this);
+        }
 
         /* NOTE: rename_subvol is the same subvolume from which dht_rename_cbk
          *       is called. since rename has already happened on rename_subvol,
@@ -645,6 +655,8 @@ dht_rename_links_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 local->op_ret   = -1;
                 if (op_errno != ENOENT)
                         local->op_errno = op_errno;
+        } else {
+                dht_iatt_merge (this, &local->stbuf, stbuf, prev->this);
         }
 
         this_call_cnt = dht_frame_return (frame);
@@ -748,7 +760,7 @@ dht_rename_create_links (call_frame_t *frame)
                         "linkfile %s @ %s => %s",
                         local->loc.path, dst_hashed->name, src_cached->name);
                 memcpy (local->gfid, local->loc.inode->gfid, 16);
-		dht_linkfile_create (frame, dht_rename_links_cbk,
+		dht_linkfile_create (frame, dht_rename_links_cbk, this,
 				     src_cached, dst_hashed, &local->loc);
 	}
 

@@ -12,7 +12,6 @@
 #include <sys/wait.h>
 #include <stdlib.h>
 #include <signal.h>
-#include <pthread.h>
 
 #ifndef _CONFIG_H
 #define _CONFIG_H
@@ -32,7 +31,6 @@
 #include "xdr-generic.h"
 
 #include "glusterfsd.h"
-#include "glusterfsd-mem-types.h"
 #include "rpcsvc.h"
 #include "cli1-xdr.h"
 #include "statedump.h"
@@ -232,65 +230,6 @@ glusterfs_translator_info_response_send (rpcsvc_request_t *req, int ret,
 }
 
 int
-glusterfs_handle_translator_info_get_cont (gfd_vol_top_priv_t *priv)
-{
-        int                     ret = -1;
-        xlator_t                *any = NULL;
-        xlator_t                *xlator = NULL;
-        glusterfs_graph_t       *active = NULL;
-        glusterfs_ctx_t         *ctx = NULL;
-        char                    msg[2048] = {0,};
-        dict_t                  *output = NULL;
-        dict_t                  *dict = NULL;
-
-        GF_ASSERT (priv);
-
-        dict = dict_new ();
-        ret = dict_unserialize (priv->xlator_req.input.input_val,
-                                priv->xlator_req.input.input_len, &dict);
-        if (ret) {
-                gf_log ("glusterd", GF_LOG_ERROR, "Unable to unserialize dict");
-                goto cont;
-        }
-        ret = dict_set_double (dict, "time", priv->time);
-        if (ret)
-                goto cont;
-        ret = dict_set_double (dict, "throughput", priv->throughput);
-        if (ret)
-                goto cont;
-
-cont:
-        ctx = glusterfsd_ctx;
-        GF_ASSERT (ctx);
-        active = ctx->active;
-        any = active->first;
-
-        xlator = xlator_search_by_name (any, priv->xlator_req.name);
-        if (!xlator) {
-                snprintf (msg, sizeof (msg), "xlator %s is not loaded",
-                          priv->xlator_req.name);
-                goto out;
-        }
-
-        output = dict_new ();
-        ret = xlator->notify (xlator, GF_EVENT_TRANSLATOR_INFO, dict, output);
-
-out:
-        ret = glusterfs_translator_info_response_send (priv->req, ret,
-                                                       msg, output);
-
-        free (priv->xlator_req.name);
-        free (priv->xlator_req.input.input_val);
-        if (dict)
-                dict_unref (dict);
-        if (output)
-                dict_unref (output);
-        GF_FREE (priv);
-
-        return ret;
-}
-
-int
 glusterfs_xlator_op_response_send (rpcsvc_request_t *req, int op_ret,
                                    char *msg, dict_t *output)
 {
@@ -326,15 +265,21 @@ glusterfs_xlator_op_response_send (rpcsvc_request_t *req, int op_ret,
 int
 glusterfs_handle_translator_info_get (rpcsvc_request_t *req)
 {
-        int32_t                  ret     = -1;
-        gd1_mgmt_brick_op_req    xlator_req = {0,};
-        dict_t                   *dict    = NULL;
-        xlator_t                 *this = NULL;
-        gf1_cli_top_op           top_op = 0;
-        uint32_t                 blk_size = 0;
-        uint32_t                 blk_count = 0;
-        gfd_vol_top_priv_t       *priv = NULL;
-        pthread_t                tid = -1;
+        int32_t                 ret     = -1;
+        gd1_mgmt_brick_op_req   xlator_req = {0,};
+        dict_t                  *dict    = NULL;
+        xlator_t                *this = NULL;
+        gf1_cli_top_op          top_op = 0;
+        uint32_t                blk_size = 0;
+        uint32_t                blk_count = 0;
+        double                  time = 0;
+        double                  throughput = 0;
+        xlator_t                *any = NULL;
+        xlator_t                *xlator = NULL;
+        glusterfs_graph_t       *active = NULL;
+        glusterfs_ctx_t         *ctx = NULL;
+        char                    msg[2048] = {0,};
+        dict_t                  *output = NULL;
 
         GF_ASSERT (req);
         this = THIS;
@@ -347,8 +292,8 @@ glusterfs_handle_translator_info_get (rpcsvc_request_t *req)
                 req->rpc_err = GARBAGE_ARGS;
                 goto out;
         }
-        dict = dict_new ();
 
+        dict = dict_new ();
         ret = dict_unserialize (xlator_req.input.input_val,
                                 xlator_req.input.input_len,
                                 &dict);
@@ -359,14 +304,6 @@ glusterfs_handle_translator_info_get (rpcsvc_request_t *req)
                 goto out;
         }
 
-        priv = GF_MALLOC (sizeof (gfd_vol_top_priv_t), gfd_mt_vol_top_priv_t);
-        if (!priv) {
-                gf_log ("glusterd", GF_LOG_ERROR, "failed to allocate memory");
-                goto out;
-        }
-        priv->xlator_req = xlator_req;
-        priv->req = req;
-
         ret = dict_get_int32 (dict, "top-op", (int32_t *)&top_op);
         if ((!ret) && (GF_CLI_TOP_READ_PERF == top_op ||
             GF_CLI_TOP_WRITE_PERF == top_op)) {
@@ -376,61 +313,73 @@ glusterfs_handle_translator_info_get (rpcsvc_request_t *req)
                 ret = dict_get_uint32 (dict, "blk-cnt", &blk_count);
                 if (ret)
                         goto cont;
-                priv->blk_size = blk_size;
-                priv->blk_count = blk_count;
+
                 if (GF_CLI_TOP_READ_PERF == top_op) {
-                        ret = pthread_create (&tid, NULL,
-                                              glusterfs_volume_top_read_perf,
-                                              priv);
+                        ret = glusterfs_volume_top_read_perf
+                                (blk_size, blk_count, xlator_req.name,
+                                 &throughput, &time);
                 } else if ( GF_CLI_TOP_WRITE_PERF == top_op) {
-                        ret = pthread_create (&tid, NULL,
-                                              glusterfs_volume_top_write_perf,
-                                              priv);
+                        ret = glusterfs_volume_top_write_perf
+                                (blk_size, blk_count, xlator_req.name,
+                                 &throughput, &time);
                 }
-                if (ret) {
-                        gf_log ("glusterd", GF_LOG_ERROR,
-                                "Thread create failed");
+                ret = dict_set_double (dict, "time", time);
+                if (ret)
                         goto cont;
-                }
-                gf_log ("glusterd", GF_LOG_DEBUG, "Created new thread with "
-                        "tid %u", (unsigned int)tid);
-                goto out;
+                ret = dict_set_double (dict, "throughput", throughput);
+                if (ret)
+                        goto cont;
         }
 cont:
-        priv->throughput = 0;
-        priv->time = 0;
-        ret = glusterfs_handle_translator_info_get_cont (priv);
+        ctx = glusterfsd_ctx;
+        GF_ASSERT (ctx);
+        active = ctx->active;
+        any = active->first;
+
+        xlator = xlator_search_by_name (any, xlator_req.name);
+        if (!xlator) {
+                snprintf (msg, sizeof (msg), "xlator %s is not loaded",
+                          xlator_req.name);
+                goto out;
+        }
+
+        output = dict_new ();
+        ret = xlator->notify (xlator, GF_EVENT_TRANSLATOR_INFO, dict, output);
+
 out:
+        ret = glusterfs_translator_info_response_send (req, ret, msg, output);
+
+        free (xlator_req.name);
+        free (xlator_req.input.input_val);
+        if (output)
+                dict_unref (output);
         if (dict)
                 dict_unref (dict);
         return ret;
 }
 
-void *
-glusterfs_volume_top_write_perf (void *args)
+int
+glusterfs_volume_top_write_perf (uint32_t blk_size, uint32_t blk_count,
+                                 char *brick_path, double *throughput,
+                                 double *time)
 {
         int32_t                 fd = -1;
         int32_t                 input_fd = -1;
         char                    export_path[PATH_MAX];
         char                    *buf = NULL;
-        uint32_t                blk_size = 0;
-        uint32_t                blk_count = 0;
         int32_t                 iter = 0;
         int32_t                 ret = -1;
         uint64_t                total_blks = 0;
         struct timeval          begin, end = {0,};
-        double                  throughput = 0;
-        double                  time = 0;
-        gfd_vol_top_priv_t      *priv = NULL;
 
-        GF_ASSERT (args);
-        priv = (gfd_vol_top_priv_t *)args;
-
-        blk_size = priv->blk_size;
-        blk_count = priv->blk_count;
+        GF_ASSERT (brick_path);
+        GF_ASSERT (throughput);
+        GF_ASSERT (time);
+        if (!(blk_size > 0) || ! (blk_count > 0))
+                goto out;
 
         snprintf (export_path, sizeof (export_path), "%s/%s",
-                  priv->xlator_req.name, ".gf-tmp-stats-perf");
+                  brick_path, ".gf-tmp-stats-perf");
 
         fd = open (export_path, O_CREAT|O_RDWR, S_IRWXU);
         if (-1 == fd) {
@@ -474,16 +423,13 @@ glusterfs_volume_top_write_perf (void *args)
         }
 
         gettimeofday (&end, NULL);
-        time = (end.tv_sec - begin.tv_sec) * 1e6
+        *time = (end.tv_sec - begin.tv_sec) * 1e6
                      + (end.tv_usec - begin.tv_usec);
-        throughput = total_blks / time;
+        *throughput = total_blks / *time;
         gf_log ("glusterd", GF_LOG_INFO, "Throughput %.2f Mbps time %.2f secs "
-                "bytes written %"PRId64, throughput, time, total_blks);
+                "bytes written %"PRId64, *throughput, *time, total_blks);
 
 out:
-        priv->throughput = throughput;
-        priv->time = time;
-
         if (fd >= 0)
                 close (fd);
         if (input_fd >= 0)
@@ -491,37 +437,32 @@ out:
         GF_FREE (buf);
         unlink (export_path);
 
-        (void)glusterfs_handle_translator_info_get_cont (priv);
-
-        return NULL;
+        return ret;
 }
 
-void *
-glusterfs_volume_top_read_perf (void *args)
+int
+glusterfs_volume_top_read_perf (uint32_t blk_size, uint32_t blk_count,
+                                char *brick_path, double *throughput,
+                                double *time)
 {
         int32_t                 fd = -1;
         int32_t                 input_fd = -1;
         int32_t                 output_fd = -1;
         char                    export_path[PATH_MAX];
         char                    *buf = NULL;
-        uint32_t                blk_size = 0;
-        uint32_t                blk_count = 0;
         int32_t                 iter = 0;
         int32_t                 ret = -1;
         uint64_t                total_blks = 0;
         struct timeval          begin, end = {0,};
-        double                  throughput = 0;
-        double                  time = 0;
-        gfd_vol_top_priv_t      *priv = NULL;
 
-        GF_ASSERT (args);
-        priv = (gfd_vol_top_priv_t *)args;
-
-        blk_size = priv->blk_size;
-        blk_count = priv->blk_count;
+        GF_ASSERT (brick_path);
+        GF_ASSERT (throughput);
+        GF_ASSERT (time);
+        if (!(blk_size > 0) || ! (blk_count > 0))
+                goto out;
 
         snprintf (export_path, sizeof (export_path), "%s/%s",
-                  priv->xlator_req.name, ".gf-tmp-stats-perf");
+                  brick_path, ".gf-tmp-stats-perf");
         fd = open (export_path, O_CREAT|O_RDWR, S_IRWXU);
         if (-1 == fd) {
                 ret = -1;
@@ -597,16 +538,13 @@ glusterfs_volume_top_read_perf (void *args)
         }
 
         gettimeofday (&end, NULL);
-        time = (end.tv_sec - begin.tv_sec) * 1e6
-               + (end.tv_usec - begin.tv_usec);
-        throughput = total_blks / time;
+        *time = (end.tv_sec - begin.tv_sec) * 1e6
+                + (end.tv_usec - begin.tv_usec);
+        *throughput = total_blks / *time;
         gf_log ("glusterd", GF_LOG_INFO, "Throughput %.2f Mbps time %.2f secs "
-                "bytes read %"PRId64, throughput, time, total_blks);
+                "bytes read %"PRId64, *throughput, *time, total_blks);
 
 out:
-        priv->throughput = throughput;
-        priv->time = time;
-
         if (fd >= 0)
                 close (fd);
         if (input_fd >= 0)
@@ -616,9 +554,7 @@ out:
         GF_FREE (buf);
         unlink (export_path);
 
-        (void)glusterfs_handle_translator_info_get_cont (priv);
-
-        return NULL;
+        return ret;
 }
 
 int
@@ -1472,14 +1408,21 @@ glusterfs_volfile_reconfigure (FILE *newvolfile_fp)
 {
         glusterfs_graph_t *oldvolfile_graph = NULL;
         glusterfs_graph_t *newvolfile_graph = NULL;
+        int                oldvolfile_fd    = -1;
         FILE              *oldvolfile_fp    = NULL;
         glusterfs_ctx_t   *ctx              = NULL;
+        char               template[PATH_MAX] = {0};
 
         int ret = -1;
 
-        oldvolfile_fp = tmpfile ();
-        if (!oldvolfile_fp)
+        strcpy (template, "/tmp/tmp.XXXXXX");
+        oldvolfile_fd = mkstemp (template);
+        oldvolfile_fp = fdopen (oldvolfile_fd, "w+b");
+        if (!oldvolfile_fp) {
+                gf_log ("glusterfsd-mgmt", GF_LOG_CRITICAL, "Failed to create "
+                        "temporary volfile");
                 goto out;
+        }
 
         if (!oldvollen) {
                 ret = 1; // Has to call INIT for the whole graph
@@ -1536,8 +1479,13 @@ glusterfs_volfile_reconfigure (FILE *newvolfile_fp)
 
         ret = 0;
 out:
-        if (oldvolfile_fp)
+        if (oldvolfile_fp) {
                 fclose (oldvolfile_fp);
+
+        } else if (-1 != oldvolfile_fd) {
+            close (oldvolfile_fd);
+
+        }
 
         return ret;
 }
@@ -1639,6 +1587,13 @@ out:
 
         emancipate (ctx, ret);
 
+        // Stop if server is running at an unsupported op-version
+        if (ENOTSUP == ret) {
+                gf_log ("mgmt", GF_LOG_ERROR, "Server is operating at an "
+                        "op-version which is not supported");
+                cleanup_and_exit (0);
+        }
+
         if (ret && ctx && !ctx->active) {
                 /* Do it only for the first time */
                 /* Failed to get the volume file, something wrong,
@@ -1648,6 +1603,7 @@ out:
                         ctx->cmd_args.volfile_id);
                 cleanup_and_exit (0);
         }
+
 
         if (tmpfp)
                 fclose (tmpfp);
@@ -1663,6 +1619,7 @@ glusterfs_volfile_fetch (glusterfs_ctx_t *ctx)
         gf_getspec_req    req = {0, };
         int               ret = 0;
         call_frame_t     *frame = NULL;
+        dict_t           *dict = NULL;
 
         cmd_args = &ctx->cmd_args;
 
@@ -1671,9 +1628,40 @@ glusterfs_volfile_fetch (glusterfs_ctx_t *ctx)
         req.key = cmd_args->volfile_id;
         req.flags = 0;
 
+        dict = dict_new ();
+        if (!dict) {
+                ret = -1;
+                goto out;
+        }
+
+        // Set the supported min and max op-versions, so glusterd can make a
+        // decision
+        ret = dict_set_int32 (dict, "min-op-version", GD_OP_VERSION_MIN);
+        if (ret) {
+                gf_log (THIS->name, GF_LOG_ERROR, "Failed to set min-op-version"
+                        " in request dict");
+                goto out;
+        }
+
+        ret = dict_set_int32 (dict, "max-op-version", GD_OP_VERSION_MAX);
+        if (ret) {
+                gf_log (THIS->name, GF_LOG_ERROR, "Failed to set max-op-version"
+                        " in request dict");
+                goto out;
+        }
+
+        ret = dict_allocate_and_serialize (dict, &req.xdata.xdata_val,
+                                           &req.xdata.xdata_len);
+        if (ret < 0) {
+                gf_log (THIS->name, GF_LOG_ERROR,
+                        "Failed to serialize dictionary");
+                goto out;
+        }
+
         ret = mgmt_submit_request (&req, frame, ctx, &clnt_handshake_prog,
                                    GF_HNDSK_GETSPEC, mgmt_getspec_cbk,
                                    (xdrproc_t)xdr_gf_getspec_req);
+out:
         return ret;
 }
 

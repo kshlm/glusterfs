@@ -1236,8 +1236,12 @@ gf_cli_defrag_volume_cbk (struct rpc_req *req, struct iovec *iov,
                         goto done;
                 } else {
                         snprintf (msg, sizeof (msg),
-                                 "Stopped rebalance process on volume %s \n",
-                                  volname);
+                                  "rebalance process may be in the middle of a "
+                                  "file migration.\nThe process will be fully "
+                                  "stopped once the migration of the file is "
+                                  "complete.\nPlease check rebalance process "
+                                  "for completion before doing any further "
+                                  "brick related tasks on the volume.");
                 }
         }
         if (cmd == GF_DEFRAG_CMD_STATUS) {
@@ -1455,6 +1459,51 @@ out:
         return ret;
 }
 
+char *
+is_server_debug_xlator (void *myframe)
+{
+        call_frame_t         *frame        = NULL;
+        cli_local_t          *local        = NULL;
+        char                 **words       = NULL;
+        char                 *key          = NULL;
+        char                 *value        = NULL;
+        char                 *debug_xlator = NULL;
+
+        frame = myframe;
+        local = frame->local;
+        words = (char **)local->words;
+
+        while (*words != NULL) {
+                if (strstr (*words, "trace") == NULL &&
+                    strstr (*words, "error-gen") == NULL) {
+                        words++;
+                        continue;
+                }
+
+                key = *words;
+                words++;
+                value = *words;
+                if (strstr (value, "client")) {
+                        words++;
+                        continue;
+                } else {
+                        if (!(strstr (value, "posix") || strstr (value, "acl")
+                              || strstr (value, "locks") ||
+                              strstr (value, "io-threads") ||
+                              strstr (value, "marker") ||
+                              strstr (value, "index"))) {
+                                words++;
+                                continue;
+                        } else {
+                                debug_xlator = gf_strdup (key);
+                                break;
+                        }
+                }
+        }
+
+        return debug_xlator;
+}
+
 int
 gf_cli_set_volume_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
@@ -1464,6 +1513,8 @@ gf_cli_set_volume_cbk (struct rpc_req *req, struct iovec *iov,
         dict_t               *dict = NULL;
         char                 *help_str = NULL;
         char                 msg[1024] = {0,};
+        char                 *debug_xlator = _gf_false;
+        char                 tmp_str[512] = {0,};
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -1486,9 +1537,21 @@ gf_cli_set_volume_cbk (struct rpc_req *req, struct iovec *iov,
 
         ret = dict_unserialize (rsp.dict.dict_val, rsp.dict.dict_len, &dict);
 
+        /* For brick processes graph change does not happen on the fly.
+         * The proces has to be restarted. So this is a check from the
+         * volume set option such that if debug xlators such as trace/errorgen
+         * are provided in the set command, warn the user.
+         */
+        debug_xlator = is_server_debug_xlator (myframe);
+
         if (dict_get_str (dict, "help-str", &help_str) && !msg[0])
                 snprintf (msg, sizeof (msg), "Set volume %s",
                           (rsp.op_ret) ? "unsuccessful": "successful");
+        if (rsp.op_ret == 0 && debug_xlator) {
+                snprintf (tmp_str, sizeof (tmp_str), "\n%s translator has been "
+                          "added to the server volume file. Please restart the"
+                          " volume for enabling the translator", debug_xlator);
+        }
 
         if ((global_state->mode & GLUSTER_MODE_XML) && (help_str == NULL)) {
                 ret = cli_xml_output_str ("volSet", msg, rsp.op_ret,
@@ -1499,16 +1562,20 @@ gf_cli_set_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
         }
 
-        if (rsp.op_ret &&  strcmp (rsp.op_errstr, ""))
-                cli_err ("volume set: failed: %s", rsp.op_errstr);
-
-        if (!rsp.op_ret) {
-                if (help_str == NULL)
-                        cli_out ("volume set: success");
+        if (rsp.op_ret) {
+                if (strcmp (rsp.op_errstr, ""))
+                        cli_err ("volume set: failed: %s", rsp.op_errstr);
                 else
-                        cli_out ("%s", help_str);
+                        cli_err ("volume set: failed");
         } else {
-                cli_err ("volume set: failed");
+                if (help_str == NULL) {
+                        if (debug_xlator == NULL)
+                                cli_out ("volume set: success");
+                        else
+                                cli_out ("volume set: success%s", tmp_str);
+                }else {
+                        cli_out ("%s", help_str);
+                }
         }
 
         ret = rsp.op_ret;
@@ -1516,6 +1583,7 @@ gf_cli_set_volume_cbk (struct rpc_req *req, struct iovec *iov,
 out:
         if (dict)
                 dict_unref (dict);
+        GF_FREE (debug_xlator);
         cli_cmd_broadcast_response (ret);
         return ret;
 }
@@ -1589,6 +1657,11 @@ gf_cli3_remove_brick_status_cbk (struct rpc_req *req, struct iovec *iov,
         uint64_t                 failures = 0;
         double                   elapsed = 0;
         char                    *size_str = NULL;
+        int32_t                  command = 0;
+        gf1_op_commands          cmd = GF_OP_CMD_NONE;
+        cli_local_t             *local = NULL;
+        call_frame_t            *frame = NULL;
+        char                    *cmd_str = "unknown";
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -1601,14 +1674,33 @@ gf_cli3_remove_brick_status_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
         }
 
+        frame = myframe;
+        if (frame)
+                local = frame->local;
+        ret = dict_get_int32 (local->dict, "command", &command);
+        if (ret)
+                goto out;
+        cmd = command;
+
+        switch (cmd) {
+        case GF_OP_CMD_STOP:
+                cmd_str = "stop";
+                break;
+        case GF_OP_CMD_STATUS:
+                cmd_str = "status";
+                break;
+        default:
+                break;
+        }
+
         ret = rsp.op_ret;
         if (rsp.op_ret == -1) {
                 if (strcmp (rsp.op_errstr, ""))
-                        snprintf (msg, sizeof (msg), "volume remove-brick: "
-                                  "failed: %s", rsp.op_errstr);
+                        snprintf (msg, sizeof (msg), "volume remove-brick %s: "
+                                  "failed: %s", cmd_str, rsp.op_errstr);
                 else
-                        snprintf (msg, sizeof (msg), "volume remove-brick: "
-                                  "failed: status getting failed");
+                        snprintf (msg, sizeof (msg), "volume remove-brick %s: "
+                                  "failed", cmd_str);
 
                 if (global_state->mode & GLUSTER_MODE_XML)
                         goto xml_output;
@@ -1741,6 +1833,15 @@ xml_output:
 
                 i++;
         } while (i <= counter);
+
+        if ((cmd == GF_OP_CMD_STOP) && (rsp.op_ret == 0)) {
+                cli_out ("'remove-brick' process may be in the middle of a "
+                         "file migration.\nThe process will be fully stopped "
+                         "once the migration of the file is complete.\nPlease "
+                         "check remove-brick process for completion before "
+                         "doing any further brick related tasks on the "
+                         "volume.");
+        }
 
 out:
         free (rsp.dict.dict_val); //malloced by xdr
@@ -5940,6 +6041,7 @@ cmd_heal_volume_brick_out (dict_t *dict, int brick)
         uint64_t        i = 0;
         uint32_t        time = 0;
         char            timestr[32] = {0};
+        char            *shd_status = NULL;
 
         snprintf (key, sizeof key, "%d-hostname", brick);
         ret = dict_get_str (dict, key, &hostname);
@@ -5950,33 +6052,45 @@ cmd_heal_volume_brick_out (dict_t *dict, int brick)
         if (ret)
                 goto out;
         cli_out ("\nBrick %s:%s", hostname, path);
-        snprintf (key, sizeof key, "%d-count", brick);
-        ret = dict_get_uint64 (dict, key, &num_entries);
-        cli_out ("Number of entries: %"PRIu64, num_entries);
+
         snprintf (key, sizeof key, "%d-status", brick);
         ret = dict_get_str (dict, key, &status);
         if (status && strlen (status))
                 cli_out ("Status: %s", status);
-        for (i = 0; i < num_entries; i++) {
-                snprintf (key, sizeof key, "%d-%"PRIu64, brick, i);
-                ret = dict_get_str (dict, key, &path);
-                if (ret)
-                        continue;
-                time = 0;
-                snprintf (key, sizeof key, "%d-%"PRIu64"-time", brick, i);
-                ret = dict_get_uint32 (dict, key, &time);
-                if (!time) {
-                        cli_out ("%s", path);
-                } else {
-                        gf_time_fmt (timestr, sizeof timestr,
-                                     time, gf_timefmt_FT);
-                        if (i == 0) {
+
+        snprintf (key, sizeof key, "%d-shd-status",brick);
+        ret = dict_get_str (dict, key, &shd_status);
+
+        if(!shd_status)
+        {
+                snprintf (key, sizeof key, "%d-count", brick);
+                ret = dict_get_uint64 (dict, key, &num_entries);
+                cli_out ("Number of entries: %"PRIu64, num_entries);
+
+
+                for (i = 0; i < num_entries; i++) {
+                        snprintf (key, sizeof key, "%d-%"PRIu64, brick, i);
+                        ret = dict_get_str (dict, key, &path);
+                        if (ret)
+                                continue;
+                        time = 0;
+                        snprintf (key, sizeof key, "%d-%"PRIu64"-time",
+                                  brick, i);
+                        ret = dict_get_uint32 (dict, key, &time);
+                        if (!time) {
+                                cli_out ("%s", path);
+                        } else {
+                                gf_time_fmt (timestr, sizeof timestr,
+                                             time, gf_timefmt_FT);
+                                if (i == 0) {
                                 cli_out ("at                    path on brick");
                                 cli_out ("-----------------------------------");
+                                }
+                                cli_out ("%s %s", timestr, path);
                         }
-                        cli_out ("%s %s", timestr, path);
                 }
         }
+
 out:
         return;
 }

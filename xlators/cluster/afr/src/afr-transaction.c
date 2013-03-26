@@ -165,8 +165,10 @@ __mark_pre_op_undone_on_fd (call_frame_t *frame, xlator_t *this, int child_index
 
         LOCK (&local->fd->lock);
         {
-                if (local->transaction.type == AFR_DATA_TRANSACTION)
+                if (local->transaction.type == AFR_DATA_TRANSACTION) {
+                        GF_ASSERT (fd_ctx->pre_op_done[child_index]);
                         fd_ctx->pre_op_done[child_index]--;
+                }
         }
         UNLOCK (&local->fd->lock);
 out:
@@ -218,9 +220,12 @@ afr_transaction_perform_fop (call_frame_t *frame, xlator_t *this)
 {
         afr_local_t     *local = NULL;
         afr_private_t   *priv = NULL;
+        fd_t            *fd   = NULL;
 
         local = frame->local;
         priv  = this->private;
+        fd    = local->fd;
+
         __mark_all_success (local->pending, priv->child_count,
                             local->transaction.type);
 
@@ -234,6 +239,17 @@ afr_transaction_perform_fop (call_frame_t *frame, xlator_t *this)
         frame->root->lk_owner =
                 local->transaction.main_frame->root->lk_owner;
 
+
+        /* The wake up needs to happen independent of
+           what type of fop arrives here. If it was
+           a write, then it has already inherited the
+           lock and changelog. If it was not a write,
+           then the presumption of the optimization (of
+           optimizing for successive write operations)
+           fails.
+        */
+        if (fd)
+                afr_delayed_changelog_wake_up (this, fd);
         local->transaction.fop (frame, this);
 }
 
@@ -464,7 +480,9 @@ afr_locked_nodes_get (afr_transaction_type type, afr_internal_lock_t *int_lock)
 
         case AFR_ENTRY_TRANSACTION:
         case AFR_ENTRY_RENAME_TRANSACTION:
-                locked_nodes = int_lock->entry_locked_nodes;
+                /*Because same set of subvols participate in all lockee
+                 * entities*/
+                locked_nodes = int_lock->lockee[0].locked_nodes;
         break;
         }
         return locked_nodes;
@@ -655,7 +673,9 @@ afr_changelog_post_op_now (call_frame_t *frame, xlator_t *this)
                                 afr_changelog_post_op_cbk (frame, (void *)(long)i,
                                                            this, 1, 0, xattr[i], NULL);
                         } else {
-                                __mark_pre_op_undone_on_fd (frame, this, i);
+                                if (!piggyback)
+                                        __mark_pre_op_undone_on_fd (frame, this,
+                                                                    i);
                                 STACK_WIND_COOKIE (frame,
                                                    afr_changelog_post_op_cbk,
                                                    (void *) (long) i,
@@ -1207,8 +1227,8 @@ afr_lock_rec (call_frame_t *frame, xlator_t *this)
 
         case AFR_ENTRY_RENAME_TRANSACTION:
 
-                int_lock->lock_cbk = afr_post_blocking_rename_cbk;
-                afr_blocking_lock (frame, this);
+                int_lock->lock_cbk = afr_post_nonblocking_entrylk_cbk;
+                afr_nonblocking_entrylk (frame, this);
                 break;
 
         case AFR_ENTRY_TRANSACTION:
@@ -1271,7 +1291,10 @@ afr_set_delayed_post_op (call_frame_t *frame, xlator_t *this)
 	if (!priv->post_op_delay_secs)
 		return;
 
-	local = frame->local;
+        local = frame->local;
+        if (!local->transaction.eager_lock_on)
+                return;
+
 	if (!local)
 		return;
 
@@ -1383,23 +1406,10 @@ afr_transaction_resume (call_frame_t *frame, xlator_t *this)
         afr_internal_lock_t *int_lock = NULL;
         afr_local_t         *local    = NULL;
         afr_private_t       *priv     = NULL;
-	fd_t                *fd = NULL;
 
         local    = frame->local;
         int_lock = &local->internal_lock;
         priv     = this->private;
-	fd       = local->fd;
-
-	if (fd)
-		/* The wake up needs to happen independent of
-		   what type of fop arrives here. If it was
-		   a write, then it has already inherited the
-		   lock and changelog. If it was not a write,
-		   then the presumption of the optimization (of
-		   optimizing for successive write operations)
-		   fails.
-		*/
-		afr_delayed_changelog_wake_up (this, fd);
 
 	afr_restore_lk_owner (frame);
 
@@ -1435,19 +1445,6 @@ afr_transaction_fop_failed (call_frame_t *frame, xlator_t *this, int child_index
                            child_index, local->transaction.type);
 }
 
-gf_boolean_t
-_does_transaction_conflict_with_delayed_post_op (call_frame_t *frame)
-{
-        afr_local_t     *local = frame->local;
-        //check if it is going to compete with inode lock from the fd
-        if (local->fd)
-                return _gf_false;
-        if ((local->transaction.type == AFR_DATA_TRANSACTION) ||
-            (local->transaction.type == AFR_METADATA_TRANSACTION))
-                return _gf_true;
-        return _gf_false;
-}
-
 int
 afr_transaction (call_frame_t *frame, xlator_t *this, afr_transaction_type type)
 {
@@ -1459,22 +1456,20 @@ afr_transaction (call_frame_t *frame, xlator_t *this, afr_transaction_type type)
         local = frame->local;
         priv  = this->private;
 
+        local->transaction.resume = afr_transaction_resume;
+        local->transaction.type   = type;
+
         ret = afr_transaction_local_init (local, this);
         if (ret < 0) {
             goto out;
         }
 
-        local->transaction.resume = afr_transaction_resume;
-        local->transaction.type   = type;
-
-        if (local->fd && priv->eager_lock &&
-            local->transaction.type == AFR_DATA_TRANSACTION)
+        if (local->fd && local->transaction.eager_lock_on)
                 afr_set_lk_owner (frame, this, local->fd);
         else
                 afr_set_lk_owner (frame, this, frame->root);
 
-        if (_does_transaction_conflict_with_delayed_post_op (frame) &&
-            local->loc.inode) {
+        if (!local->transaction.eager_lock_on && local->loc.inode) {
                 fd = fd_lookup (local->loc.inode, frame->root->pid);
                 if (fd) {
                         afr_delayed_changelog_wake_up (this, fd);

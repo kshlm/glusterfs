@@ -112,8 +112,8 @@ void
 afr_sh_set_error (afr_self_heal_t *sh, int32_t op_errno)
 {
         sh->op_ret = -1;
-        if (afr_error_more_important (sh->op_errno, op_errno))
-                sh->op_errno = op_errno;
+	sh->op_errno = afr_most_important_error(sh->op_errno, op_errno,
+						_gf_false);
 }
 
 void
@@ -140,6 +140,66 @@ afr_sh_print_pending_matrix (int32_t *pending_matrix[], xlator_t *this)
 
         GF_FREE (buf);
 }
+
+void
+afr_sh_print_split_brain_log (int32_t *pending_matrix[], xlator_t *this,
+                              const char *loc)
+{
+        afr_private_t *  priv = this->private;
+        char            *buf  = NULL;
+        char            *ptr  = NULL;
+        int              i    = 0;
+        int              j    = 0;
+        int             child_count = priv->child_count;
+        char            *matrix_begin = "[ [ ";
+        char            *matrix_end = "] ]";
+        char            *seperator = "] [ ";
+        int             pending_entry_strlen = 12; //Including space after entry
+        int             matrix_begin_strlen = 0;
+        int             matrix_end_strlen = 0;
+        int             seperator_strlen = 0;
+        int             string_length = 0;
+        char            *msg = "- Pending matrix:  ";
+
+        /*
+         *  for a list of lists of [ [ a b ] [ c d ] ]
+         * */
+
+        matrix_begin_strlen = strlen (matrix_begin);
+        matrix_end_strlen = strlen (matrix_end);
+        seperator_strlen = strlen (seperator);
+        string_length = matrix_begin_strlen + matrix_end_strlen
+                        + (child_count -1) * seperator_strlen
+                        + (child_count * child_count * pending_entry_strlen);
+
+        buf = GF_CALLOC (1, 1 + strlen (msg) + string_length , gf_afr_mt_char);
+        if (!buf) {
+                buf = "";
+                goto out;
+        }
+
+        ptr = buf;
+        ptr += sprintf (ptr, "%s", msg);
+        ptr += sprintf (ptr, "%s", matrix_begin);
+        for (i = 0; i < priv->child_count; i++) {
+                for (j = 0; j < priv->child_count; j++) {
+                        ptr += sprintf (ptr, "%d ", pending_matrix[i][j]);
+                }
+                if (i < priv->child_count -1)
+                        ptr += sprintf (ptr, "%s", seperator);
+        }
+
+        ptr += sprintf (ptr, "%s", matrix_end);
+
+out:
+        gf_log (this->name, GF_LOG_ERROR, "Unable to self-heal contents of '%s'"
+                " (possible split-brain). Please delete the file from all but "
+                "the preferred subvolume.%s", loc, buf);
+        if (buf)
+                GF_FREE (buf);
+        return;
+}
+
 
 void
 afr_init_pending_matrix (int32_t **pending_matrix, size_t child_count)
@@ -833,14 +893,46 @@ afr_sh_pending_to_delta (afr_private_t *priv, dict_t **xattr,
                          int32_t *delta_matrix[], unsigned char success[],
                          int child_count, afr_transaction_type type)
 {
-        int i = 0;
-        int j = 0;
+        int     tgt     = 0;
+        int     src     = 0;
+        int     value   = 0;
 
         afr_build_pending_matrix (priv->pending_key, delta_matrix, NULL,
                                   xattr, type, priv->child_count);
-        for (i = 0; i < priv->child_count; i++)
-                for (j = 0; j < priv->child_count; j++)
-                        delta_matrix[i][j] = -delta_matrix[i][j];
+
+        /*
+         * The algorithm here has two parts.  First, for each subvol indexed
+         * as tgt, we try to figure out what count everyone should have for it.
+         * If the self-heal succeeded, that's easy; the value is zero.
+         * Otherwise, the value is the maximum of the succeeding nodes' counts.
+         * Once we know the value, we loop through (possibly for a second time)
+         * setting each count to the difference so that when we're done all
+         * succeeding nodes will have the same count for tgt.
+         */
+        for (tgt = 0; tgt < priv->child_count; ++tgt) {
+                value = 0;
+                if (!success[tgt]) {
+                        /* Find the maximum. */
+                        for (src = 0; src < priv->child_count; ++src) {
+                                if (!success[src]) {
+                                        continue;
+                                }
+                                if (delta_matrix[src][tgt] > value) {
+                                        value = delta_matrix[src][tgt];
+                                }
+                        }
+                }
+                /* Force everyone who succeeded to the chosen value. */
+                for (src = 0; src < priv->child_count; ++src) {
+                        if (success[src]) {
+                                delta_matrix[src][tgt] = value
+                                                       - delta_matrix[src][tgt];
+                        }
+                        else {
+                                delta_matrix[src][tgt] = 0;
+                        }
+                }
+        }
 }
 
 
@@ -867,8 +959,14 @@ afr_sh_delta_to_xattr (xlator_t *this,
                         pending = GF_CALLOC (sizeof (int32_t), 3,
                                              gf_afr_mt_int32_t);
 
-                        if (!pending)
+                        if (!pending) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "failed to allocate pending entry "
+                                        "for %s[%d] on %s",
+                                        priv->pending_key[j], type,
+                                        priv->children[i]->name);
                                 continue;
+                        }
                         /* 3 = data+metadata+entry */
 
                         k = afr_index_for_transaction_type (type);
@@ -1914,7 +2012,9 @@ afr_sh_entrylk (call_frame_t *frame, xlator_t *this, loc_t *loc,
 {
         afr_internal_lock_t *int_lock = NULL;
         afr_local_t         *local    = NULL;
+        afr_private_t       *priv     = NULL;
 
+        priv     = this->private;
         local    = frame->local;
         int_lock = &local->internal_lock;
 
@@ -1927,6 +2027,10 @@ afr_sh_entrylk (call_frame_t *frame, xlator_t *this, loc_t *loc,
         int_lock->lk_loc      = loc;
         int_lock->lock_cbk    = lock_cbk;
 
+        int_lock->lockee_count = 0;
+        afr_init_entry_lockee (&int_lock->lockee[0], local, loc,
+                               base_name, priv->child_count);
+        int_lock->lockee_count++;
         afr_nonblocking_entrylk (frame, this);
 
         return 0;
@@ -1985,6 +2089,7 @@ afr_local_t *afr_local_copy (afr_local_t *l, xlator_t *this)
         afr_local_t   *lc     = NULL;
         afr_self_heal_t *sh = NULL;
         afr_self_heal_t *shc = NULL;
+        int              i   = 0;
 
         priv = this->private;
 
@@ -2030,15 +2135,7 @@ afr_local_t *afr_local_copy (afr_local_t *l, xlator_t *this)
                         GF_CALLOC (sizeof (*l->internal_lock.inode_locked_nodes),
                                    priv->child_count,
                                    gf_afr_mt_char);
-        if (l->internal_lock.entry_locked_nodes)
-                lc->internal_lock.entry_locked_nodes =
-                        memdup (l->internal_lock.entry_locked_nodes,
-                                sizeof (*lc->internal_lock.entry_locked_nodes) * priv->child_count);
-        else
-                lc->internal_lock.entry_locked_nodes =
-                        GF_CALLOC (sizeof (*l->internal_lock.entry_locked_nodes),
-                                   priv->child_count,
-                                   gf_afr_mt_char);
+
         if (l->internal_lock.locked_nodes)
                 lc->internal_lock.locked_nodes =
                         memdup (l->internal_lock.locked_nodes,
@@ -2049,10 +2146,37 @@ afr_local_t *afr_local_copy (afr_local_t *l, xlator_t *this)
                                    priv->child_count,
                                    gf_afr_mt_char);
 
+        for (i = 0; i < l->internal_lock.lockee_count; i++) {
+                loc_copy (&lc->internal_lock.lockee[i].loc,
+                          &l->internal_lock.lockee[i].loc);
+
+                lc->internal_lock.lockee[i].locked_count =
+                        l->internal_lock.lockee[i].locked_count;
+
+                if (l->internal_lock.lockee[i].basename)
+                        lc->internal_lock.lockee[i].basename =
+                                gf_strdup (l->internal_lock.lockee[i].basename);
+
+                if (l->internal_lock.lockee[i].locked_nodes) {
+                        lc->internal_lock.lockee[i].locked_nodes =
+                                memdup (l->internal_lock.lockee[i].locked_nodes,
+                                        sizeof (*lc->internal_lock.lockee[i].locked_nodes) *
+                                        priv->child_count);
+                } else {
+                        lc->internal_lock.lockee[i].locked_nodes =
+                                GF_CALLOC (priv->child_count,
+                                           sizeof (*lc->internal_lock.lockee[i].locked_nodes),
+                                           gf_afr_mt_char);
+                }
+
+        }
+        lc->internal_lock.lockee_count = l->internal_lock.lockee_count;
+
         lc->internal_lock.inodelk_lock_count =
                 l->internal_lock.inodelk_lock_count;
         lc->internal_lock.entrylk_lock_count =
                 l->internal_lock.entrylk_lock_count;
+
 
 out:
         return lc;

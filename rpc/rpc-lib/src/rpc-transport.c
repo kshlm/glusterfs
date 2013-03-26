@@ -145,6 +145,7 @@ rpc_transport_load (glusterfs_ctx_t *ctx, dict_t *options, char *trans_name)
 	int8_t is_tcp = 0, is_unix = 0, is_ibsdp = 0;
 	volume_opt_list_t *vol_opt = NULL;
         gf_boolean_t bind_insecure = _gf_false;
+        xlator_t   *this = NULL;
 
 	GF_VALIDATE_OR_GOTO("rpc-transport", options, fail);
 	GF_VALIDATE_OR_GOTO("rpc-transport", ctx, fail);
@@ -266,21 +267,21 @@ rpc_transport_load (glusterfs_ctx_t *ctx, dict_t *options, char *trans_name)
 		goto fail;
 	}
 
-	trans->init = dlsym (handle, "init");
+	*VOID(&(trans->init)) = dlsym (handle, "init");
 	if (trans->init == NULL) {
 		gf_log ("rpc-transport", GF_LOG_ERROR,
 			"dlsym (gf_rpc_transport_init) on %s", dlerror ());
 		goto fail;
 	}
 
-	trans->fini = dlsym (handle, "fini");
+	*VOID(&(trans->fini)) = dlsym (handle, "fini");
 	if (trans->fini == NULL) {
 		gf_log ("rpc-transport", GF_LOG_ERROR,
 			"dlsym (gf_rpc_transport_fini) on %s", dlerror ());
 		goto fail;
 	}
 
-        trans->reconfigure = dlsym (handle, "reconfigure");
+        *VOID(&(trans->reconfigure)) = dlsym (handle, "reconfigure");
         if (trans->fini == NULL) {
                 gf_log ("rpc-transport", GF_LOG_DEBUG,
                         "dlsym (gf_rpc_transport_reconfigure) on %s", dlerror());
@@ -292,26 +293,26 @@ rpc_transport_load (glusterfs_ctx_t *ctx, dict_t *options, char *trans_name)
                 goto fail;
         }
 
+        this = THIS;
 	vol_opt->given_opt = dlsym (handle, "options");
 	if (vol_opt->given_opt == NULL) {
 		gf_log ("rpc-transport", GF_LOG_DEBUG,
 			"volume option validation not specified");
 	} else {
                 INIT_LIST_HEAD (&vol_opt->list);
-		list_add_tail (&vol_opt->list, &(THIS->volume_options));
-                if (xlator_options_validate_list (THIS, options, vol_opt,
+		list_add_tail (&vol_opt->list, &(this->volume_options));
+                if (xlator_options_validate_list (this, options, vol_opt,
                                                   NULL)) {
 			gf_log ("rpc-transport", GF_LOG_ERROR,
 				"volume option validation failed");
 			goto fail;
 		}
-                vol_opt = NULL;
 	}
 
         trans->options = options;
 
         pthread_mutex_init (&trans->lock, NULL);
-        trans->xl = THIS;
+        trans->xl = this;
 
 	ret = trans->init (trans);
 	if (ret != 0) {
@@ -323,8 +324,6 @@ rpc_transport_load (glusterfs_ctx_t *ctx, dict_t *options, char *trans_name)
         return_trans = trans;
 
         GF_FREE (name);
-
-        GF_FREE (vol_opt);
 
 	return return_trans;
 
@@ -340,7 +339,10 @@ fail:
 
         GF_FREE (name);
 
-        GF_FREE (vol_opt);
+        if (vol_opt && !list_empty (&vol_opt->list)) {
+                list_del_init (&vol_opt->list);
+                GF_FREE (vol_opt);
+        }
 
         return NULL;
 }

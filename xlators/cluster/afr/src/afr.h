@@ -29,6 +29,8 @@
 #define AFR_PATHINFO_HEADER "REPLICATE:"
 #define AFR_SH_READDIR_SIZE_KEY "self-heal-readdir-size"
 
+#define AFR_LOCKEE_COUNT_MAX    3
+
 struct _pump_private;
 
 typedef int (*afr_expunge_done_cbk_t) (call_frame_t *frame, xlator_t *this,
@@ -342,10 +344,23 @@ afr_index_for_transaction_type (afr_transaction_type type)
         return -1;  /* make gcc happy */
 }
 
+typedef struct {
+        loc_t                   loc;
+        char                    *basename;
+        unsigned char           *locked_nodes;
+        int                     locked_count;
+
+} afr_entry_lockee_t;
+
+int
+afr_entry_lockee_cmp (const void *l1, const void *l2);
 
 typedef struct {
         loc_t *lk_loc;
         struct gf_flock lk_flock;
+
+        int                     lockee_count;
+        afr_entry_lockee_t      lockee[AFR_LOCKEE_COUNT_MAX];
 
         const char *lk_basename;
         const char *lower_basename;
@@ -356,7 +371,6 @@ typedef struct {
         unsigned char *locked_nodes;
         unsigned char *lower_locked_nodes;
         unsigned char *inode_locked_nodes;
-        unsigned char *entry_locked_nodes;
 
         selfheal_lk_type_t selfheal_lk_type;
         transaction_lk_type_t transaction_lk_type;
@@ -368,6 +382,7 @@ typedef struct {
         uint64_t lock_number;
         int32_t lk_call_count;
         int32_t lk_expected_count;
+        int32_t lk_attempted_count;
 
         int32_t lock_op_ret;
         int32_t lock_op_errno;
@@ -410,7 +425,6 @@ typedef struct _afr_local {
         loc_t newloc;
 
         fd_t *fd;
-        unsigned char *fd_open_on;
 
         glusterfs_fop_t fop;
 
@@ -433,9 +447,6 @@ typedef struct _afr_local {
         dict_t  *dict;
         int      optimistic_change_log;
 	gf_boolean_t      delayed_post_op;
-
-        gf_boolean_t    fop_paused;
-        int (*fop_call_continue) (call_frame_t *frame, xlator_t *this);
 
         /*
           This struct contains the arguments for the "continuation"
@@ -640,6 +651,7 @@ typedef struct _afr_local {
         struct {
                 off_t start, len;
 
+                gf_boolean_t    eager_lock_on;
                 int *eager_lock;
 
                 char *basename;
@@ -687,11 +699,6 @@ typedef enum {
 } afr_fd_open_status_t;
 
 typedef struct {
-        struct list_head call_list;
-        call_frame_t    *frame;
-} afr_fd_paused_call_t;
-
-typedef struct {
         unsigned int *pre_op_done;
         afr_fd_open_status_t *opened_on; /* which subvolumes the fd is open on */
         unsigned int *pre_op_piggyback;
@@ -710,7 +717,6 @@ typedef struct {
         struct list_head entries; /* needed for readdir failover */
 
         unsigned char *locked_on; /* which subvolumes locks have been successful */
-	struct list_head  paused_calls; /* queued calls while fix_open happens  */
 
 	/* used for delayed-post-op optimization */
 	pthread_mutex_t    delay_lock;
@@ -750,6 +756,13 @@ pump_command_reply (call_frame_t *frame, xlator_t *this);
 
 int32_t
 afr_notify (xlator_t *this, int32_t event, void *data, void *data2);
+
+int
+afr_init_entry_lockee (afr_entry_lockee_t *lockee, afr_local_t *local,
+                       loc_t *loc, char *basename, int child_count);
+
+void
+afr_entry_lockee_cleanup (afr_internal_lock_t *int_lock);
 
 int
 afr_attempt_lock_recovery (xlator_t *this, int32_t child_index);
@@ -953,8 +966,9 @@ afr_children_rm_child (int32_t *children, int32_t child,
                              int32_t child_count);
 void
 afr_reset_children (int32_t *children, int32_t child_count);
-gf_boolean_t
-afr_error_more_important (int32_t old_errno, int32_t new_errno);
+int32_t
+afr_most_important_error(int32_t old_errno, int32_t new_errno,
+			 gf_boolean_t eio);
 int
 afr_errno_count (int32_t *children, int *child_errno,
                  unsigned int child_count, int32_t op_errno);
@@ -997,11 +1011,11 @@ afr_launch_self_heal (call_frame_t *frame, xlator_t *this, inode_t *inode,
                       int (*unwind) (call_frame_t *frame, xlator_t *this,
                                      int32_t op_ret, int32_t op_errno,
                                      int32_t sh_failed));
-int
-afr_fix_open (call_frame_t *frame, xlator_t *this, afr_fd_ctx_t *fd_ctx,
-              int need_open_count, int *need_open);
-int
-afr_open_fd_fix (call_frame_t *frame, xlator_t *this, gf_boolean_t pause_fop);
+void
+afr_fix_open (xlator_t *this, fd_t *fd, size_t need_open_count, int *need_open);
+
+void
+afr_open_fd_fix (fd_t *fd, xlator_t *this);
 int
 afr_set_elem_count_get (unsigned char *elems, int child_count);
 
@@ -1034,6 +1048,9 @@ afr_is_errno_set (int *child_errno, int child);
 
 gf_boolean_t
 afr_is_errno_unset (int *child_errno, int child);
+
+gf_boolean_t
+afr_is_fd_fixable (fd_t *fd);
 
 void
 afr_prepare_new_entry_pending_matrix (int32_t **pending,

@@ -28,6 +28,7 @@
 static char *gsync_reserved_opts[] = {
         "gluster-command-dir",
         "pid-file",
+        "remote-gsyncd"
         "state-file",
         "session-owner",
         "state-socket-unencoded",
@@ -52,11 +53,11 @@ glusterd_handle_gsync_set (rpcsvc_request_t *req)
         xlator_t                *this = NULL;
 
         GF_ASSERT (req);
-        GF_ASSERT (THIS);
-        GF_ASSERT (THIS->private);
 
        this = THIS;
+       GF_ASSERT (this);
        priv = this->private;
+       GF_ASSERT (priv);
 
         ret = xdr_to_generic (req->msg[0], &cli_req,
                               (xdrproc_t)xdr_gf_cli_req);
@@ -140,22 +141,15 @@ glusterd_handle_gsync_set (rpcsvc_request_t *req)
                 break;
         }
 
-        ret = glusterd_op_begin (req, GD_OP_GSYNC_SET, dict,
-                                 err_str, sizeof (err_str));
+        ret = glusterd_op_begin_synctask (req, GD_OP_GSYNC_SET, dict);
 
 out:
-        glusterd_friend_sm ();
-        glusterd_op_sm ();
-
-
         if (ret) {
                 if (err_str[0] == '\0')
                         snprintf (err_str, sizeof (err_str),
                                   "Operation failed");
                 ret = glusterd_op_send_cli_response (cli_op, ret, 0, req,
                                                      dict, err_str);
-                if (dict)
-                        dict_unref (dict);
         }
         return ret;
 }
@@ -1433,6 +1427,11 @@ glusterd_gsync_fetch_status_extra (char *path, char *buf, size_t blen)
         s = socket(AF_UNIX, SOCK_STREAM, 0);
         if (s == -1)
                 return -1;
+        ret = fcntl (s, F_GETFL);
+        if (ret != -1)
+                ret = fcntl (s, F_SETFL, ret | O_NONBLOCK);
+        if (ret == -1)
+                goto out;
 
         ret = connect (s, (struct sockaddr *)&sa, sizeof (sa));
         if (ret == -1)

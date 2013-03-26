@@ -48,6 +48,10 @@
 #define RPCSVC_POOLCOUNT_MULT           64
 #define RPCSVC_CONN_READ        (128 * GF_UNIT_KB)
 #define RPCSVC_PAGE_SIZE        (128 * GF_UNIT_KB)
+#define RPC_ROOT_UID             0
+#define RPC_ROOT_GID             0
+#define RPC_NOBODY_UID           65534
+#define RPC_NOBODY_GID           65534
 
 /* RPC Record States */
 #define RPCSVC_READ_FRAGHDR     1
@@ -244,8 +248,6 @@ struct rpcsvc_request {
 #define rpcsvc_request_program_private(req) (((rpcsvc_program_t *)((req)->prog))->private)
 #define rpcsvc_request_accepted(req)    ((req)->rpc_status == MSG_ACCEPTED)
 #define rpcsvc_request_accepted_success(req) ((req)->rpc_err == SUCCESS)
-#define rpcsvc_request_uid(req)         ((req)->uid)
-#define rpcsvc_request_gid(req)         ((req)->gid)
 #define rpcsvc_request_prog_minauth(req) (rpcsvc_request_program(req)->min_auth)
 #define rpcsvc_request_cred_flavour(req) (rpcsvc_auth_flavour(req->cred))
 #define rpcsvc_request_verf_flavour(req) (rpcsvc_auth_flavour(req->verf))
@@ -263,7 +265,22 @@ struct rpcsvc_request {
 #define rpcsvc_request_vecstate(req) ((req)->vecstate)
 #define rpcsvc_request_transport(req) ((req)->trans)
 #define rpcsvc_request_transport_ref(req) (rpc_transport_ref((req)->trans))
-
+#define RPC_AUTH_ROOT_SQUASH(req)                                       \
+        do {                                                            \
+                int gidcount = 0;                                       \
+                if (req->svc->root_squash) {                            \
+                        if (req->uid == RPC_ROOT_UID)                   \
+                                req->uid = RPC_NOBODY_UID;              \
+                        if (req->gid == RPC_ROOT_GID)                   \
+                                req->gid = RPC_NOBODY_GID;              \
+                        for (gidcount = 0; gidcount < req->auxgidcount; \
+                             ++gidcount) {                              \
+                                if (!req->auxgids[gidcount])            \
+                                        req->auxgids[gidcount] =        \
+                                                RPC_NOBODY_GID;         \
+                        }                                               \
+                }                                                       \
+        } while (0);
 
 #define RPCSVC_ACTOR_SUCCESS    0
 #define RPCSVC_ACTOR_ERROR      (-1)
@@ -451,7 +468,7 @@ rpcsvc_error_reply (rpcsvc_request_t *req);
 extern int
 rpcsvc_transport_peername (rpc_transport_t *trans, char *hostname, int hostlen);
 
-extern inline int
+extern int
 rpcsvc_transport_peeraddr (rpc_transport_t *trans, char *addrstr, int addrlen,
                            struct sockaddr_storage *returnsa, socklen_t sasize);
 
@@ -547,6 +564,8 @@ int
 rpcsvc_transport_unix_options_build (dict_t **options, char *filepath);
 int
 rpcsvc_set_allow_insecure (rpcsvc_t *svc, dict_t *options);
+int
+rpcsvc_set_root_squash (rpcsvc_t *svc, dict_t *options);
 int
 rpcsvc_auth_array (rpcsvc_t *svc, char *volname, int *autharr, int arrlen);
 char *

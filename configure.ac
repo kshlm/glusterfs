@@ -24,7 +24,7 @@ if libtool --help 2>&1 | grep -q quiet; then
    AM_LIBTOOLFLAGS="--quiet";
 fi
 
-AM_CONFIG_HEADER([config.h])
+AC_CONFIG_HEADERS([config.h])
 
 AC_CONFIG_FILES([Makefile
 		libglusterfs/Makefile
@@ -73,6 +73,8 @@ AC_CONFIG_FILES([Makefile
 		xlators/performance/symlink-cache/src/Makefile
 		xlators/performance/quick-read/Makefile
 		xlators/performance/quick-read/src/Makefile
+		xlators/performance/open-behind/Makefile
+		xlators/performance/open-behind/src/Makefile
                 xlators/performance/md-cache/Makefile
                 xlators/performance/md-cache/src/Makefile
 		xlators/debug/Makefile
@@ -110,6 +112,8 @@ AC_CONFIG_FILES([Makefile
 		xlators/features/quiesce/src/Makefile
                 xlators/features/index/Makefile
                 xlators/features/index/src/Makefile
+		xlators/features/protect/Makefile
+		xlators/features/protect/src/Makefile
 		xlators/encryption/Makefile
 		xlators/encryption/rot-13/Makefile
 		xlators/encryption/rot-13/src/Makefile
@@ -130,6 +134,7 @@ AC_CONFIG_FILES([Makefile
 		extras/ocf/Makefile
 		extras/ocf/glusterd
 		extras/ocf/volume
+		extras/LinuxRPM/Makefile
 		contrib/fuse-util/Makefile
 		contrib/uuid/uuid_types.h
                 xlators/nfs/Makefile
@@ -434,12 +439,11 @@ fi
 #check if libxml is present if so enable HAVE_LIB_XML
 echo -n "checking if libxml2 is present... "
 
-PKG_CHECK_MODULES([LIBXML2], [libxml-2.0 >= 2.6.19],
-                  [echo "yes (features requiring libxml2 enabled)"  AC_DEFINE(HAVE_LIB_XML, 1, [define if libxml2 is present])],
-                  [echo "no"] )
+AM_PATH_XML2([2.6.19])
 
-AC_SUBST(LIBXML2_CFLAGS)
-AC_SUBST(LIBXML2_LIBS)
+if test "x${no_xml}" = "x"; then
+    AC_DEFINE([HAVE_LIB_XML], [1], [Define to 1 if using libxml2.])
+fi
 
 dnl FreeBSD > 5 has execinfo as a Ported library for giving a workaround
 dnl solution to GCC backtrace functionality
@@ -522,6 +526,18 @@ AC_SUBST(GF_DISTRIBUTION)
 GF_HOST_OS=""
 GF_LDFLAGS="-rdynamic"
 CFLAGS="-g"
+
+# check for gcc -Werror=format-security
+saved_CFLAGS=$CFLAGS
+CFLAGS="-Wformat -Werror=format-security"
+AC_MSG_CHECKING([whether $CC accepts -Werror=format-security])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM()], [cc_werror_format_security=yes], [cc_werror_format_security=no])
+echo $cc_werror_format_security
+if test "x$cc_werror_format_security" = "xno"; then
+    CFLAGS="$saved_CFLAGS"
+else
+    CFLAGS="$saved_CFLAGS $CFLAGS"
+fi
 
 case $host_os in
      linux*)

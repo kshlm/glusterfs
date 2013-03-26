@@ -528,8 +528,6 @@ out:
                 cli_rsp = &rsp;
                 glusterd_to_cli (req, cli_rsp, NULL, 0, NULL,
                                  (xdrproc_t)xdr_gf_cli_rsp, dict);
-                if (dict)
-                        dict_unref (dict);
                 ret = 0; //sent error to cli, prevent second reply
         }
 
@@ -571,6 +569,7 @@ glusterd_handle_remove_brick (rpcsvc_request_t *req)
 
         GF_ASSERT (req);
         this = THIS;
+        GF_ASSERT (this);
 
         ret = xdr_to_generic (req->msg[0], &cli_req,
                               (xdrproc_t)xdr_gf_cli_req);
@@ -795,7 +794,9 @@ glusterd_handle_remove_brick (rpcsvc_request_t *req)
                                 continue;
                         }
 
-                        gf_log (this->name, GF_LOG_INFO, "Found brick");
+                        gf_log (this->name, GF_LOG_DEBUG, LOGSTR_FOUND_BRICK,
+                                brickinfo->hostname, brickinfo->path,
+                                volinfo->volname);
                         if (!sub_volume && (volinfo->dist_leaf_count > 1)) {
                                 sub_volume = (pos / volinfo->dist_leaf_count) + 1;
                                 sub_volume_start = (volinfo->dist_leaf_count *
@@ -806,7 +807,7 @@ glusterd_handle_remove_brick (rpcsvc_request_t *req)
                                 if (pos < sub_volume_start ||
                                     pos >sub_volume_end) {
                                         ret = -1;
-                                        snprintf (err_str, sizeof (err_str), 
+                                        snprintf (err_str, sizeof (err_str),
                                                   "Bricks not from same subvol "
                                                   "for %s", vol_type);
                                         gf_log (this->name, GF_LOG_ERROR,
@@ -832,8 +833,6 @@ out:
                 cli_rsp = &rsp;
                 glusterd_to_cli (req, cli_rsp, NULL, 0, NULL,
                                  (xdrproc_t)xdr_gf_cli_rsp, dict);
-                if (dict)
-                        dict_unref (dict);
 
                 ret = 0; //sent error to cli, prevent second reply
 
@@ -920,12 +919,14 @@ glusterd_op_perform_add_bricks (glusterd_volinfo_t *volinfo, int32_t count,
         if (stripe_count) {
                 volinfo->stripe_count = stripe_count;
         }
-        volinfo->dist_leaf_count = (volinfo->stripe_count *
-                                    volinfo->replica_count);
+        volinfo->dist_leaf_count = glusterd_get_dist_leaf_count (volinfo);
 
         /* backward compatibility */
         volinfo->sub_count = ((volinfo->dist_leaf_count == 1) ? 0:
                               volinfo->dist_leaf_count);
+
+        volinfo->subvol_count = (volinfo->brick_count /
+                                 volinfo->dist_leaf_count);
 
         ret = glusterd_create_volfiles_and_notify_services (volinfo);
         if (ret)
@@ -1509,7 +1510,7 @@ glusterd_op_remove_brick (dict_t *dict, char **op_errstr)
                 }
         }
 
-        /* Clear task-id on completion/stopping of remove-brick operation */
+        /* Clear task-id on commmitting/stopping of remove-brick operation */
         if ((cmd != GF_OP_CMD_START) || (cmd != GF_OP_CMD_STATUS))
                 uuid_clear (volinfo->rebal.rebalance_id);
 
@@ -1617,8 +1618,10 @@ glusterd_op_remove_brick (dict_t *dict, char **op_errstr)
                         volinfo->replica_count, replica_count,
                         volinfo->volname);
                 volinfo->replica_count = replica_count;
-                volinfo->dist_leaf_count = (volinfo->stripe_count *
-                                            replica_count);
+                volinfo->dist_leaf_count = glusterd_get_dist_leaf_count (volinfo);
+                volinfo->subvol_count = (volinfo->brick_count /
+                                         volinfo->dist_leaf_count);
+
                 if (replica_count == 1) {
                         if (volinfo->type == GF_CLUSTER_TYPE_REPLICATE) {
                                 volinfo->type = GF_CLUSTER_TYPE_NONE;

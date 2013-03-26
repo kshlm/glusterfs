@@ -71,6 +71,8 @@ int rpcsvc_programs_count = (sizeof (all_programs) / sizeof (all_programs[0]));
 const char *gd_op_list[GD_OP_MAX + 1] = {
         [GD_OP_NONE]                    = "Invalid op",
         [GD_OP_CREATE_VOLUME]           = "Create",
+        [GD_OP_START_BRICK]             = "Start Brick",
+        [GD_OP_STOP_BRICK]              = "Stop Brick",
         [GD_OP_DELETE_VOLUME]           = "Delete",
         [GD_OP_START_VOLUME]            = "Start",
         [GD_OP_STOP_VOLUME]             = "Stop",
@@ -453,6 +455,7 @@ glusterd_crt_georep_folders (char *georepdir, glusterd_conf_t *conf)
                 goto out;
         }
 
+        /* Slave log file directory */
         if (strlen(DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP"-slaves") >= PATH_MAX) {
                 ret = -1;
                 gf_log ("glusterd", GF_LOG_CRITICAL,
@@ -465,6 +468,22 @@ glusterd_crt_georep_folders (char *georepdir, glusterd_conf_t *conf)
         if (-1 == ret) {
                 gf_log ("glusterd", GF_LOG_CRITICAL,
                         "Unable to create "GEOREP" slave log directory");
+                goto out;
+        }
+
+        /* MountBroker log file directory */
+        if (strlen(DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP"-slaves/mbr") >= PATH_MAX) {
+                ret = -1;
+                gf_log ("glusterd", GF_LOG_CRITICAL,
+                        "Unable to create "GEOREP" moubtbroker directory %s",
+                        georepdir);
+                goto out;
+        }
+        ret = mkdir_p (DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP"-slaves/mbr", 0777,
+                      _gf_true);
+        if (-1 == ret) {
+                gf_log ("glusterd", GF_LOG_CRITICAL,
+                        "Unable to create "GEOREP" mountbroker slave log directory");
                 goto out;
         }
 
@@ -485,6 +504,9 @@ glusterd_crt_georep_folders (char *georepdir, glusterd_conf_t *conf)
                 if (ret == 0)
                         ret = group_write_allow (DEFAULT_LOG_FILE_DIRECTORY"/"
                                                  GEOREP"-slaves", gr->gr_gid);
+                if (ret == 0)
+                        ret = group_write_allow (DEFAULT_LOG_FILE_DIRECTORY"/"
+                                                 GEOREP"-slaves/mbr", gr->gr_gid);
         }
 
  out:
@@ -546,8 +568,8 @@ configure_syncdaemon (glusterd_conf_t *conf)
         RUN_GSYNCD_CMD;
 
         runinit_gsyncd_setrx (&runner, conf);
-        runner_add_args (&runner, "remote-gsyncd",
-                         "/usr/local/libexec/glusterfs/gsyncd", ".", "^ssh:", NULL);
+        runner_add_args (&runner, "remote-gsyncd", "/nonexistent/gsyncd",
+                         ".", "^ssh:", NULL);
         RUN_GSYNCD_CMD;
 
         /* gluster-command-dir */
@@ -637,6 +659,14 @@ configure_syncdaemon (glusterd_conf_t *conf)
         runner_add_args (&runner,
                          "log-file",
                          DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP"-slaves/${session_owner}:${eSlave}.log",
+                         ".", NULL);
+        RUN_GSYNCD_CMD;
+
+        /* MountBroker log-file */
+        runinit_gsyncd_setrx (&runner, conf);
+        runner_add_args (&runner,
+                         "log-file-mbr",
+                         DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP"-slaves/mbr/${session_owner}:${eSlave}.log",
                          ".", NULL);
         RUN_GSYNCD_CMD;
 
@@ -1210,11 +1240,9 @@ notify (xlator_t *this, int32_t event, void *data, ...)
 }
 
 
-struct xlator_fops fops = {
-};
+struct xlator_fops fops;
 
-struct xlator_cbks cbks = {
-};
+struct xlator_cbks cbks;
 
 struct xlator_dumpops dumpops = {
         .priv  = glusterd_priv,
@@ -1269,9 +1297,13 @@ struct volume_options options[] = {
         { .key = {"server-quorum-type"},
           .type = GF_OPTION_TYPE_STR,
           .value = { "none", "server"},
+          .description = "If set to server, enables the specified "
+          "volume to participate in quorum."
         },
         { .key = {"server-quorum-ratio"},
           .type = GF_OPTION_TYPE_PERCENT,
+          .description = "Sets the quorum percentage for the trusted "
+          "storage pool."
         },
         { .key   = {NULL} },
 };

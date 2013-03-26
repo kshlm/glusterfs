@@ -218,19 +218,19 @@ xlator_dynload (xlator_t *xl)
                 goto out;
         }
 
-        if (!(xl->init = dlsym (handle, "init"))) {
+        if (!(*VOID(&xl->init) = dlsym (handle, "init"))) {
                 gf_log ("xlator", GF_LOG_WARNING, "dlsym(init) on %s",
                         dlerror ());
                 goto out;
         }
 
-        if (!(xl->fini = dlsym (handle, "fini"))) {
+        if (!(*VOID(&(xl->fini)) = dlsym (handle, "fini"))) {
                 gf_log ("xlator", GF_LOG_WARNING, "dlsym(fini) on %s",
                         dlerror ());
                 goto out;
         }
 
-        if (!(xl->notify = dlsym (handle, "notify"))) {
+        if (!(*VOID(&(xl->notify)) = dlsym (handle, "notify"))) {
                 gf_log ("xlator", GF_LOG_TRACE,
                         "dlsym(notify) on %s -- neglecting", dlerror ());
         }
@@ -240,13 +240,13 @@ xlator_dynload (xlator_t *xl)
                         "dlsym(dumpops) on %s -- neglecting", dlerror ());
         }
 
-        if (!(xl->mem_acct_init = dlsym (handle, "mem_acct_init"))) {
+        if (!(*VOID(&(xl->mem_acct_init)) = dlsym (handle, "mem_acct_init"))) {
                 gf_log (xl->name, GF_LOG_TRACE,
                         "dlsym(mem_acct_init) on %s -- neglecting",
                         dlerror ());
         }
 
-        if (!(xl->reconfigure = dlsym (handle, "reconfigure"))) {
+        if (!(*VOID(&(xl->reconfigure)) = dlsym (handle, "reconfigure"))) {
                 gf_log ("xlator", GF_LOG_TRACE,
                         "dlsym(reconfigure) on %s -- neglecting",
                         dlerror());
@@ -264,6 +264,7 @@ xlator_dynload (xlator_t *xl)
                 gf_log (xl->name, GF_LOG_TRACE,
                         "Strict option validation not enforced -- neglecting");
         }
+        INIT_LIST_HEAD (&vol_opt->list);
         list_add_tail (&vol_opt->list, &xl->volume_options);
 
         fill_defaults (xl);
@@ -318,6 +319,24 @@ xlator_foreach (xlator_t *this,
 
 out:
         return;
+}
+
+
+void
+xlator_foreach_depth_first (xlator_t *this,
+			    void (*fn)(xlator_t *each, void *data),
+			    void *data)
+{
+	xlator_list_t *subv = NULL;
+
+	subv = this->children;
+
+	while (subv) {
+		xlator_foreach_depth_first (subv->xlator, fn, data);
+		subv = subv->next;
+	}
+
+	fn (this, data);
 }
 
 

@@ -2166,7 +2166,6 @@ conditional_dump (dict_t *dict, char *key, data_t *value, void *data)
                         return -1;
                 }
                 logfp = fopen (filename, "w+");
-                GF_ASSERT (logfp);
                 if (!logfp) {
                         gf_log (this->name, GF_LOG_ERROR, "failed to open %s "
                                 "for writing", filename);
@@ -2861,7 +2860,7 @@ struct volume_options options[] = {
           .type = GF_OPTION_TYPE_STR,
           .default_value = "CRITICAL",
           .description = "Gluster's syslog log-level",
-          .value = { "WARNING", "ERROR", "CRITICAL"}
+          .value = { "WARNING", "ERROR", "INFO", "CRITICAL"}
         },
         { .key = {"brick-log-level"},
           .type = GF_OPTION_TYPE_STR,
