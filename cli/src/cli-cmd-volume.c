@@ -28,6 +28,7 @@
 #include "cli-mem-types.h"
 #include "cli1-xdr.h"
 #include "run.h"
+#include "cli-sync-cmd.h"
 
 extern struct rpc_clnt *global_rpc;
 
@@ -416,23 +417,16 @@ cli_cmd_volume_delete_cbk (struct cli_state *state, struct cli_cmd_word *word,
                            const char **words, int wordcount)
 {
         int                     ret = -1;
-        rpc_clnt_procedure_t    *proc = NULL;
-        call_frame_t            *frame = NULL;
         char                    *volname = NULL;
         gf_answer_t             answer = GF_ANSWER_NO;
         const char              *question = NULL;
-        int                     sent = 0;
         int                     parse_error = 0;
-        cli_local_t             *local = NULL;
         dict_t                  *dict = NULL;
+        dict_t                  *rsp_dict = NULL;
+        char                    *errstr = NULL;
 
         question = "Deleting volume will erase all information about the volume. "
                    "Do you want to continue?";
-        proc = &cli_rpc_prog->proctable[GLUSTER_CLI_DELETE_VOLUME];
-
-        frame = create_frame (THIS, THIS->ctx->pool);
-        if (!frame)
-                goto out;
 
         dict = dict_new ();
         if (!dict)
@@ -460,21 +454,25 @@ cli_cmd_volume_delete_cbk (struct cli_state *state, struct cli_cmd_word *word,
                 goto out;
         }
 
-        CLI_LOCAL_INIT (local, words, frame, dict);
+        ret = cli_sync_volume_cmd (GLUSTER_CLI_DELETE_VOLUME, dict, &rsp_dict,
+                                   &errstr);
 
-        if (proc->fn) {
-                ret = proc->fn (frame, THIS, dict);
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_generic_volume ("volDelete", rsp_dict, ret,
+                                                     errno, errstr);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
         }
+        if (ret && strcmp (errstr, ""))
+                cli_err ("volume delete: %s: failed: %s", volname, errstr);
+        else if (ret)
+                cli_err ("volume delete: %s: failed", volname);
+        else
+                cli_out ("volume delete: %s: success", volname);
 
 out:
-        if (ret) {
-                cli_cmd_sent_status_get (&sent);
-                if ((sent == 0) && (parse_error == 0))
-                        cli_out ("Volume delete failed");
-        }
-
-        CLI_STACK_DESTROY (frame);
-
         return ret;
 }
 
@@ -483,17 +481,12 @@ cli_cmd_volume_start_cbk (struct cli_state *state, struct cli_cmd_word *word,
                           const char **words, int wordcount)
 {
         int                     ret = -1;
-        rpc_clnt_procedure_t    *proc = NULL;
-        call_frame_t            *frame = NULL;
-        int                     sent = 0;
         int                     parse_error = 0;
+        char                    *volname = NULL;
         dict_t                  *dict = NULL;
         int                     flags = 0;
-        cli_local_t             *local = NULL;
-
-        frame = create_frame (THIS, THIS->ctx->pool);
-        if (!frame)
-                goto out;
+        dict_t                  *rsp_dict = NULL;
+        char                    *errstr = NULL;
 
         if (wordcount < 3 || wordcount > 4) {
                cli_usage_out (word->pattern);
@@ -509,7 +502,8 @@ cli_cmd_volume_start_cbk (struct cli_state *state, struct cli_cmd_word *word,
         if (!words[2])
                 goto out;
 
-        ret = dict_set_str (dict, "volname", (char *)words[2]);
+        volname = (char *)words[2];
+        ret = dict_set_str (dict, "volname", volname);
         if (ret) {
                 gf_log (THIS->name, GF_LOG_ERROR, "dict set failed");
                 goto out;
@@ -532,29 +526,24 @@ cli_cmd_volume_start_cbk (struct cli_state *state, struct cli_cmd_word *word,
                  goto out;
         }
 
-        if (ret < 0) {
-                gf_log (THIS->name, GF_LOG_ERROR,
-                        "failed to serialize dict");
+        ret = cli_sync_volume_cmd (GLUSTER_CLI_START_VOLUME, dict, &rsp_dict,
+                                   &errstr);
+
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_generic_volume ("volStart", rsp_dict, ret,
+                                                     errno, errstr);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_ERROR,
+                                "Error outputting to xml");
                 goto out;
         }
-
-        proc = &cli_rpc_prog->proctable[GLUSTER_CLI_START_VOLUME];
-
-        CLI_LOCAL_INIT (local, words, frame, dict);
-
-        if (proc->fn) {
-                ret = proc->fn (frame, THIS, dict);
-        }
-
+        if (ret && strcmp (errstr, ""))
+                cli_err ("volume start: %s: failed: %s", volname, errstr);
+        else if (ret)
+                cli_err ("volume start: %s: failed", volname);
+        else
+                cli_out ("volume start: %s: success", volname);
 out:
-        if (ret) {
-                cli_cmd_sent_status_get (&sent);
-                if ((sent == 0) && (parse_error == 0))
-                        cli_out ("Volume start failed");
-        }
-
-        CLI_STACK_DESTROY (frame);
-
         return ret;
 }
 
@@ -605,22 +594,16 @@ cli_cmd_volume_stop_cbk (struct cli_state *state, struct cli_cmd_word *word,
                            const char **words, int wordcount)
 {
         int                     ret = -1;
-        rpc_clnt_procedure_t    *proc = NULL;
-        call_frame_t            *frame = NULL;
         int                     flags   = 0;
         gf_answer_t             answer = GF_ANSWER_NO;
-        int                     sent = 0;
         int                     parse_error = 0;
         dict_t                  *dict = NULL;
         char                    *volname = NULL;
-        cli_local_t             *local = NULL;
+        dict_t                  *rsp_dict = NULL;
+        char                    *errstr = NULL;
 
         const char *question = "Stopping volume will make its data inaccessible. "
                                "Do you want to continue?";
-
-        frame = create_frame (THIS, THIS->ctx->pool);
-        if (!frame)
-                goto out;
 
         if (wordcount < 3 || wordcount > 4) {
                 cli_usage_out (word->pattern);
@@ -661,23 +644,25 @@ cli_cmd_volume_stop_cbk (struct cli_state *state, struct cli_cmd_word *word,
                 goto out;
         }
 
-        proc = &cli_rpc_prog->proctable[GLUSTER_CLI_STOP_VOLUME];
+        ret = cli_sync_volume_cmd (GLUSTER_CLI_STOP_VOLUME, dict, &rsp_dict,
+                                   &errstr);
 
-        CLI_LOCAL_INIT (local, words, frame, dict);
-
-        if (proc->fn) {
-                ret = proc->fn (frame, THIS, dict);
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_generic_volume ("volStop", rsp_dict, ret,
+                                                     errno, errstr);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
         }
+        if (ret && strcmp (errstr, ""))
+                cli_err ("volume stop: %s: failed: %s", volname, errstr);
+        else if (ret)
+                cli_err ("volume stop: %s: failed", volname);
+        else
+                cli_out ("volume stop: %s: success", volname);
 
 out:
-        if (ret) {
-                cli_cmd_sent_status_get (&sent);
-                if ((sent == 0) && (parse_error == 0))
-                        cli_out ("Volume stop on '%s' failed", volname);
-        }
-
-        CLI_STACK_DESTROY (frame);
-
         return ret;
 }
 

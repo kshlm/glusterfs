@@ -3264,7 +3264,7 @@ cli_xml_output_generic_volume (char *op, dict_t *dict, int op_ret, int op_errno,
         if (ret)
                 goto out;
 
-        if (dict) {
+        if (!op_ret && dict) {
                 /* <"op"> */
                 ret = xmlTextWriterStartElement (writer, (xmlChar *)op);
                 XML_RET_CHECK_AND_GOTO (ret, out);
