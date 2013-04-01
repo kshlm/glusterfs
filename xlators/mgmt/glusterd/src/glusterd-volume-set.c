@@ -449,8 +449,7 @@ struct volopt_map_entry glusterd_volopt_map[] = {
         { .key           = "cluster.self-heal-daemon",
           .voltype       = "cluster/replicate",
           .option        = "!self-heal-daemon",
-          .op_version    = 1,
-          .client_option = _gf_true
+          .op_version    = 1
         },
         { .key           = "cluster.heal-timeout",
           .voltype       = "cluster/replicate",
@@ -729,10 +728,11 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .op_version    = 2,
           .client_option = _gf_true
         },
-        { .key         = "network.remote-dio",
-          .voltype     = "protocol/client",
-          .option      = "filter-O_DIRECT",
-          .op_version  = 1
+        { .key           = "network.remote-dio",
+          .voltype       = "protocol/client",
+          .option        = "filter-O_DIRECT",
+          .op_version    = 1,
+          .client_option = _gf_true
         },
 
         /* Server xlator options */

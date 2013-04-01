@@ -167,43 +167,31 @@ out:
 static gf_boolean_t
 _client_supports_volume (peer_info_t *peerinfo, int32_t *op_errno)
 {
-        gf_boolean_t       ret       = _gf_false;
-        gf_boolean_t       is_volume = _gf_true;
+        gf_boolean_t       ret       = _gf_true;
         glusterd_volinfo_t *volinfo  = NULL;
 
         GF_ASSERT (peerinfo);
         GF_ASSERT (op_errno);
 
 
-        ret = glusterd_volinfo_find (peerinfo->volname, &volinfo);
-        if (ret) {
-                /* Not finding volinfo implies the volfile requested for, is not
-                 * a gluster volume. These requests shouldn't be checked for
-                 * op_version and should be allowed
-                 */
-                is_volume = _gf_false;
-        }
-
-        /* Only check when the volfile being requested is a volume.  A non
-         * volume volfile is requested by the local gluster services like shd
-         * and nfs-server. These need not be checked as they will be running at
-         * the same op-version as glusterd and will be able to support all the
-         * features
+        /* Only check when the volfile being requested is a volume. Not finding
+         * a volinfo implies that the volfile requested for is not of a gluster
+         * volume. A non volume volfile is requested by the local gluster
+         * services like shd and nfs-server. These need not be checked as they
+         * will be running at the same op-version as glusterd and will be able
+         * to support all the features
          */
-        if (is_volume &&
+        if ((glusterd_volinfo_find (peerinfo->volname, &volinfo) == 0) &&
             ((peerinfo->min_op_version > volinfo->client_op_version) ||
              (peerinfo->max_op_version < volinfo->client_op_version))) {
+                ret = _gf_false;
                 *op_errno = ENOTSUP;
                 gf_log ("glusterd", GF_LOG_INFO,
                         "Client %s doesn't support required op-version. "
-                        "Rejecting getspec request.",
+                        "Rejecting volfile request.",
                         peerinfo->identifier);
-                goto out;
         }
 
-        ret = _gf_true;
-
-out:
         return ret;
 }
 
