@@ -398,6 +398,12 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .op_version    = 2,
           .client_option = _gf_true
         },
+        { .key         = "cluster.dht-xattr-name",
+          .voltype     = "cluster/distribute",
+          .option      = "xattr-name",
+          .type        = NO_DOC,
+          .op_version  = 2
+        },
 
         /* AFR xlator options */
         { .key           = "cluster.entry-change-log",

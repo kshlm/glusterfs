@@ -385,15 +385,15 @@ nfs_fop_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 {
         struct nfs_fop_local    *local = NULL;
         fop_lookup_cbk_t        progcbk;
-        char                    *sh_fail_val = NULL;
+        int32_t                 spb = 0;
 
         /*
          * With native protocol, self-heal failures would be detected during
          * open.  NFS doesn't issue that open when revalidating cache, so we
          * have to check for failures here instead.
          */
-        if (dict_get_str(xattr,"sh-failed",&sh_fail_val) == 0) {
-                if (strcmp(sh_fail_val,"1") == 0) {
+        if (dict_get_int32(xattr, "split-brain", &spb) == 0) {
+                if (spb) {
                         op_ret = -1;
                         op_errno = EIO;
                 }
@@ -1379,7 +1379,7 @@ nfs_fop_write (xlator_t *nfsx, xlator_t *xl, nfs_user_t *nfu, fd_t *fd,
         iobref_add (nfl->iobref, srciob);
 */
         STACK_WIND_COOKIE (frame, nfs_fop_writev_cbk, xl, xl,xl->fops->writev,
-                           fd, vector, count, offset, 0, srciobref, NULL);
+                           fd, vector, count, offset, fd->flags, srciobref, NULL);
         ret = 0;
 err:
         if (ret < 0) {
