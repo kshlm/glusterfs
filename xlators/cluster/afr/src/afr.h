@@ -448,6 +448,12 @@ typedef struct _afr_local {
         int      optimistic_change_log;
 	gf_boolean_t      delayed_post_op;
 
+	/* Is the current writev() going to perform a stable write?
+	   i.e, is fd->flags or @flags writev param have O_SYNC or
+	   O_DSYNC?
+	*/
+	gf_boolean_t      stable_write;
+
         /*
           This struct contains the arguments for the "continuation"
           (scheme-like) of fops
@@ -662,6 +668,16 @@ typedef struct _afr_local {
 
                 afr_transaction_type type;
 
+		/* pre-compute the post piggyback status before
+		   entering POST-OP phase
+		*/
+		int              *postop_piggybacked;
+
+		/* stub to resume on destruction
+		   of the transaction frame */
+		call_stub_t      *resume_stub;
+
+
                 int32_t         **txn_changelog;//changelog after pre+post ops
                 unsigned char   *pre_op;
 
@@ -723,6 +739,11 @@ typedef struct {
 	gf_timer_t        *delay_timer;
 	call_frame_t      *delay_frame;
         int               call_child;
+
+	/* set if any write on this fd was a non stable write
+	   (i.e, without O_SYNC or O_DSYNC)
+	*/
+	gf_boolean_t      witnessed_unstable_write;
 } afr_fd_ctx_t;
 
 
@@ -902,6 +923,22 @@ afr_launch_openfd_self_heal (call_frame_t *frame, xlator_t *this, fd_t *fd);
                 }                                               \
         } while (0);
 
+#define AFR_CALL_RESUME(stub)					\
+        do {                                                    \
+                afr_local_t *__local = NULL;                    \
+                xlator_t    *__this = NULL;                     \
+								\
+		__local = stub->frame->local;			\
+		__this = stub->frame->this;			\
+		stub->frame->local = NULL;			\
+								\
+		call_resume (stub);				\
+                if (__local) {                                  \
+                        afr_local_cleanup (__local, __this);    \
+                        mem_put (__local);                      \
+                }                                               \
+        } while (0)
+
 #define AFR_NUM_CHANGE_LOGS            3 /*data + metadata + entry*/
 /* allocate and return a string that is the basename of argument */
 static inline char *
@@ -1077,5 +1114,15 @@ afr_xattr_array_destroy (dict_t **xattr, unsigned int child_count);
                 goto _label;                                             \
         }                                                                \
 } while (0);
+
+
+int
+afr_fd_report_unstable_write (xlator_t *this, fd_t *fd);
+
+gf_boolean_t
+afr_fd_has_witnessed_unstable_write (xlator_t *this, fd_t *fd);
+
+void
+afr_delayed_changelog_wake_resume (xlator_t *this, fd_t *fd, call_stub_t *stub);
 
 #endif /* __AFR_H__ */

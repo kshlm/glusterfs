@@ -850,6 +850,8 @@ afr_local_transaction_cleanup (afr_local_t *local, xlator_t *this)
 
         loc_wipe (&local->transaction.parent_loc);
         loc_wipe (&local->transaction.new_parent_loc);
+
+        GF_FREE (local->transaction.postop_piggybacked);
 }
 
 
@@ -2641,6 +2643,7 @@ afr_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int call_count = -1;
         int child_index = (long) cookie;
         int read_child  = 0;
+	call_stub_t *stub = NULL;
 
         local = frame->local;
 
@@ -2675,10 +2678,31 @@ afr_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         call_count = afr_frame_return (frame);
 
         if (call_count == 0) {
-                AFR_STACK_UNWIND (fsync, frame, local->op_ret, local->op_errno,
-                                  &local->cont.fsync.prebuf,
-                                  &local->cont.fsync.postbuf,
-                                  NULL);
+		/* Make a stub out of the frame, and register it
+		   with the waking up post-op. When the call-stub resumes,
+		   we are guaranteed that there was no post-op pending
+		   (i.e changelogs were unset in the server). This is an
+		   essential "guarantee", that fsync() returns only after
+		   completely finishing EVERYTHING, including the delayed
+		   post-op. This guarantee is expected by FUSE graph switching
+		   for example.
+		*/
+		stub = fop_fsync_cbk_stub (frame, default_fsync_cbk,
+                                           local->op_ret, local->op_errno,
+                                           &local->cont.fsync.prebuf,
+                                           &local->cont.fsync.postbuf, xdata);
+		if (!stub) {
+			AFR_STACK_UNWIND (fsync, frame, -1, ENOMEM, 0, 0, 0);
+			return 0;
+		}
+
+		/* If no new unstable writes happened between the
+		   time we cleared the unstable write witness flag in afr_fsync
+		   and now, calling afr_delayed_changelog_wake_up() should
+		   wake up and skip over the fsync phase and go straight to
+		   afr_changelog_post_op_now()
+		*/
+		afr_delayed_changelog_wake_resume (this, local->fd, stub);
         }
 
         return 0;
@@ -2713,7 +2737,9 @@ afr_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
         local->fd             = fd_ref (fd);
 
-        afr_delayed_changelog_wake_up (this, fd);
+	if (afr_fd_has_witnessed_unstable_write (this, fd)) {
+		/* don't care. we only wanted to CLEAR the bit */
+	}
 
         for (i = 0; i < priv->child_count; i++) {
                 if (local->child_up[i]) {
@@ -3867,6 +3893,15 @@ afr_local_init (afr_local_t *local, afr_private_t *priv, int32_t *op_errno)
                                         sizeof (*local->child_errno),
                                         gf_afr_mt_int32_t);
         if (!local->child_errno) {
+                if (op_errno)
+                        *op_errno = ENOMEM;
+                goto out;
+        }
+
+        local->transaction.postop_piggybacked = GF_CALLOC (priv->child_count,
+							   sizeof (int),
+							   gf_afr_mt_int32_t);
+        if (!local->transaction.postop_piggybacked) {
                 if (op_errno)
                         *op_errno = ENOMEM;
                 goto out;
