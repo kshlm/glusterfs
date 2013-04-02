@@ -9,6 +9,7 @@
 */
 
 #include "cli-sync-cmd.h"
+#include "timer.h"
 
 extern struct rpc_clnt *global_rpc;
 extern rpc_clnt_prog_t *cli_rpc_prog;
@@ -34,6 +35,19 @@ cli_sync_cmd_cbk (struct rpc_req *req, struct iovec *iov, int count, void
         __wake (args);
 
         return ret;
+}
+
+void
+cli_sync_cmd_timedout (void *data)
+{
+        struct syncargs *args = data;
+
+        args->op_ret = -1;
+        args->op_errno = ETIMEDOUT;
+
+        __wake (args);
+
+        return;
 }
 
 int
@@ -94,9 +108,12 @@ int
 cli_sync_cmd_submit (void *req, struct syncargs *args, rpc_clnt_prog_t *prog,
                      int procnum, fop_cbk_fn_t cbkfn, xdrproc_t xdrproc)
 {
-        int ret = -1;
+        int        ret = -1;
+        gf_timer_t *timer = NULL;
+        struct timeval timeout = {0,};
 
         __yawn (args);
+        timeout.tv_sec = CLI_DEFAULT_CMD_TIMEOUT;
 
         ret = _cli_sync_cmd_submit (req, args, prog, procnum, cbkfn, xdrproc);
 
@@ -105,12 +122,13 @@ cli_sync_cmd_submit (void *req, struct syncargs *args, rpc_clnt_prog_t *prog,
                 goto out;
         }
 
-        /* TODO: RPC timeout */
+        timer = gf_timer_call_after (THIS->ctx, timeout, cli_sync_cmd_timedout,
+                                     args);
 
         __yield (args);
-
+        gf_timer_call_cancel (THIS->ctx, timer);
 out:
-        return ret;
+        return args->op_ret;
 }
 
 int
@@ -126,10 +144,8 @@ cli_sync_volume_cmd_cbk (struct rpc_req *req, struct iovec *iov, int count,
         saved_frame = frame;
         args = saved_frame->cookie;
 
-        if (-1 == req->rpc_status) {
-                args->op_ret = -1;
+        if (-1 == req->rpc_status)
                 goto out;
-        }
 
         ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gf_cli_rsp);
         if (ret < 0) {
@@ -155,9 +171,8 @@ cli_sync_volume_cmd_cbk (struct rpc_req *req, struct iovec *iov, int count,
 out:
         if (ret)
                 args->op_ret = ret;
-        __wake (args);
 
-        return ret;
+        return args->op_ret;
 }
 
 int
@@ -168,13 +183,13 @@ cli_sync_volume_cmd (int procnum, dict_t *req_dict, dict_t **rsp_dict,
         struct syncargs         args = {0,};
         gf_cli_req              req = {{0,},};
 
+        args.op_ret = -1;
+        args.op_errno = ENOTCONN;
+
         ret = dict_allocate_and_serialize (req_dict, &req.dict.dict_val,
                                            &req.dict.dict_len);
         if (ret)
                 goto out;
-
-        args.op_ret = -1;
-        args.op_errno = ENOTCONN;
 
         cli_sync_cmd_submit (&req, &args, cli_rpc_prog, procnum,
                              cli_sync_volume_cmd_cbk, (xdrproc_t)xdr_gf_cli_req);
