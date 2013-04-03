@@ -113,7 +113,8 @@ cli_sync_cmd_submit (void *req, struct syncargs *args, rpc_clnt_prog_t *prog,
         struct timeval timeout = {0,};
 
         __yawn (args);
-        timeout.tv_sec = CLI_DEFAULT_CMD_TIMEOUT;
+        timeout.tv_sec = (GLUSTER_CLI_PROFILE_VOLUME == procnum) ?
+                         CLI_TOP_CMD_TIMEOUT : CLI_DEFAULT_CMD_TIMEOUT;
 
         ret = _cli_sync_cmd_submit (req, args, prog, procnum, cbkfn, xdrproc);
 

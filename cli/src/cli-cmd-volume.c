@@ -537,7 +537,7 @@ cli_cmd_volume_start_cbk (struct cli_state *state, struct cli_cmd_word *word,
                                 "Error outputting to xml");
                 goto out;
         }
-        if (ret && strcmp (errstr, ""))
+        if (ret && (errstr != NULL))
                 cli_err ("volume start: %s: failed: %s", volname, errstr);
         else if (ret)
                 cli_err ("volume start: %s: failed", volname);
