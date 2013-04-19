@@ -70,7 +70,7 @@ out:
 }
 
 int
-glusterd_handle_replace_brick (rpcsvc_request_t *req)
+__glusterd_handle_replace_brick (rpcsvc_request_t *req)
 {
         int32_t                         ret = -1;
         gf_cli_req                      cli_req = {{0,}};
@@ -171,6 +171,13 @@ out:
         return ret;
 }
 
+int
+glusterd_handle_replace_brick (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req,
+                                            __glusterd_handle_replace_brick);
+}
+
 static int
 glusterd_get_rb_dst_brickinfo (glusterd_volinfo_t *volinfo,
                                glusterd_brickinfo_t **brickinfo)
@@ -213,6 +220,7 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
         char                                     pidfile[PATH_MAX] = {0};
         char                                    *task_id_str = NULL;
         xlator_t                                *this = NULL;
+        gf_boolean_t                            is_force = _gf_false;
 
         this = THIS;
         GF_ASSERT (this);
@@ -349,6 +357,8 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                                 ret = 0;
                         }
                 }
+                is_force = dict_get_str_boolean (dict, "force", _gf_false);
+
                 break;
 
         case GF_REPLACE_OP_PAUSE:
@@ -383,7 +393,9 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                 }
                 break;
 
-        case GF_REPLACE_OP_COMMIT_FORCE: break;
+        case GF_REPLACE_OP_COMMIT_FORCE:
+                is_force = _gf_true;
+                break;
 
         case GF_REPLACE_OP_STATUS:
 
@@ -507,9 +519,9 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
 
         if (!glusterd_is_rb_ongoing (volinfo) &&
             glusterd_is_local_addr (host)) {
-                ret = glusterd_brick_create_path (host, path,
+                ret = glusterd_validate_and_create_brickpath (dst_brickinfo,
                                                   volinfo->volume_id,
-                                                  op_errstr);
+                                                  op_errstr, is_force);
                 if (ret)
                         goto out;
         }
@@ -745,7 +757,7 @@ rb_spawn_dst_brick (glusterd_volinfo_t *volinfo,
         if (volinfo->memory_accounting)
                 runner_add_arg (&runner, "--mem-accounting");
 
-        ret = runner_run (&runner);
+        ret = runner_run_nowait (&runner);
         if (ret) {
                 pmap_registry_remove (THIS, 0, brickinfo->path,
                                       GF_PMAP_PORT_BRICKSERVER, NULL);

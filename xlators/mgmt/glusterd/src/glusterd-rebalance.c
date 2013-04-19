@@ -70,9 +70,10 @@ out:
         return ret;
 }
 
+
 int32_t
-glusterd_defrag_notify (struct rpc_clnt *rpc, void *mydata,
-                        rpc_clnt_event_t event, void *data)
+__glusterd_defrag_notify (struct rpc_clnt *rpc, void *mydata,
+                          rpc_clnt_event_t event, void *data)
 {
         glusterd_volinfo_t      *volinfo = NULL;
         glusterd_defrag_info_t  *defrag  = NULL;
@@ -160,6 +161,14 @@ glusterd_defrag_notify (struct rpc_clnt *rpc, void *mydata,
         return ret;
 }
 
+int32_t
+glusterd_defrag_notify (struct rpc_clnt *rpc, void *mydata,
+                        rpc_clnt_event_t event, void *data)
+{
+        return glusterd_big_locked_notify (rpc, mydata, event,
+                                           data, __glusterd_defrag_notify);
+}
+
 int
 glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
                               size_t len, int cmd, defrag_cbk_fn_t cbk,
@@ -174,9 +183,8 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
         char                   pidfile[PATH_MAX] = {0,};
         char                   logfile[PATH_MAX] = {0,};
         dict_t                 *options = NULL;
-#ifdef DEBUG
         char                   valgrind_logfile[PATH_MAX] = {0,};
-#endif
+
         priv    = THIS->private;
 
         GF_ASSERT (volinfo);
@@ -218,7 +226,7 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
         snprintf (logfile, PATH_MAX, "%s/%s-rebalance.log",
                     DEFAULT_LOG_FILE_DIRECTORY, volinfo->volname);
         runinit (&runner);
-#ifdef DEBUG
+
         if (priv->valgrind) {
                 snprintf (valgrind_logfile, PATH_MAX,
                           "%s/valgrind-%s-rebalance.log",
@@ -226,10 +234,10 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
                           volinfo->volname);
 
                 runner_add_args (&runner, "valgrind", "--leak-check=full",
-                                 "--trace-children=yes", NULL);
+                                 "--trace-children=yes", "--track-origins=yes",
+                                 NULL);
                 runner_argprintf (&runner, "--log-file=%s", valgrind_logfile);
         }
-#endif
 
         runner_add_args (&runner, SBIN_DIR"/glusterfs",
                          "-s", "localhost", "--volfile-id", volinfo->volname,
@@ -241,6 +249,7 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
                          "*replicate*.metadata-self-heal=off",
                          "--xlator-option", "*replicate*.entry-self-heal=off",
                          "--xlator-option", "*replicate*.readdir-failover=off",
+                         "--xlator-option", "*dht.readdir-optimize=on",
                          NULL);
         runner_add_arg (&runner, "--xlator-option");
         runner_argprintf ( &runner, "*dht.rebalance-cmd=%d",cmd);
@@ -274,8 +283,10 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
                 goto out;
         }
 
+        synclock_unlock (&priv->big_lock);
         ret = glusterd_rpc_create (&defrag->rpc, options,
                                    glusterd_defrag_notify, volinfo);
+        synclock_lock (&priv->big_lock);
         if (ret) {
                 gf_log (THIS->name, GF_LOG_ERROR, "RPC create failed");
                 goto out;
@@ -326,8 +337,10 @@ glusterd_rebalance_rpc_create (glusterd_volinfo_t *volinfo,
                 goto out;
         }
 
+        synclock_unlock (&priv->big_lock);
         ret = glusterd_rpc_create (&defrag->rpc, options,
                                    glusterd_defrag_notify, volinfo);
+        synclock_lock (&priv->big_lock);
         if (ret) {
                 gf_log (THIS->name, GF_LOG_ERROR, "RPC create failed");
                 goto out;
@@ -376,7 +389,7 @@ out:
 }
 
 int
-glusterd_handle_defrag_volume (rpcsvc_request_t *req)
+__glusterd_handle_defrag_volume (rpcsvc_request_t *req)
 {
         int32_t                 ret       = -1;
         gf_cli_req              cli_req   = {{0,}};
@@ -459,6 +472,12 @@ out:
         free (cli_req.dict.dict_val);//malloced by xdr
 
         return 0;
+}
+
+int
+glusterd_handle_defrag_volume (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req, __glusterd_handle_defrag_volume);
 }
 
 

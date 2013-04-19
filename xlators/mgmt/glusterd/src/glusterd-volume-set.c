@@ -862,7 +862,7 @@ struct volopt_map_entry glusterd_volopt_map[] = {
         { .key         = "performance.nfs.write-behind",
           .voltype     = "performance/write-behind",
           .option      = "!nfsperf",
-          .value       = "off",
+          .value       = "on",
           .type        = NO_DOC,
           .op_version  = 1
         },
@@ -1177,6 +1177,10 @@ struct volopt_map_entry glusterd_volopt_map[] = {
         { .key         = "storage.owner-gid",
           .voltype     = "storage/posix",
           .option      = "brick-gid",
+          .op_version  = 2
+        },
+        { .key         = "storage.node-uuid-pathinfo",
+          .voltype     = "storage/posix",
           .op_version  = 2
         },
         { .key           = "config.memory-accounting",

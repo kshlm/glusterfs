@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import logging
-import os, fcntl, time
+import os, sys, fcntl, time, errno
 from ConfigParser import ConfigParser, NoSectionError, NoOptionError
 from swift.common.utils import TRUE_VALUES, search_tree
 from gluster.swift.common.fs_utils import mkdirs
@@ -27,6 +27,7 @@ MOUNT_IP = 'localhost'
 OBJECT_ONLY = False
 RUN_DIR='/var/run/swift'
 SWIFT_DIR = '/etc/swift'
+_do_getsize = False
 if _fs_conf.read(os.path.join('/etc/swift', 'fs.conf')):
     try:
         MOUNT_IP = _fs_conf.get('DEFAULT', 'mount_ip', 'localhost')
@@ -38,6 +39,12 @@ if _fs_conf.read(os.path.join('/etc/swift', 'fs.conf')):
         pass
     try:
         RUN_DIR = _fs_conf.get('DEFAULT', 'run_dir', '/var/run/swift')
+    except (NoSectionError, NoOptionError):
+        pass
+
+    try:
+        _do_getsize = _fs_conf.get('DEFAULT', 'accurate_size_in_listing', \
+                                       "no") in TRUE_VALUES
     except (NoSectionError, NoOptionError):
         pass
 
@@ -79,13 +86,13 @@ def mount(root, drive):
     with os.fdopen(fd, 'r+b') as f:
         try:
             fcntl.lockf(f, fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except:
-            ex = sys.exc_info()[1]
-            if isinstance(ex, IOError) and ex.errno in (EACCES, EAGAIN):
+        except IOError as ex:
+            if ex.errno in (errno.EACCES, errno.EAGAIN):
                 # This means that some other process is mounting the
                 # filesystem, so wait for the mount process to complete
                 return _busy_wait(full_mount_path)
-
+            else:
+                raise ex
         mnt_cmd = 'mount -t glusterfs %s:%s %s' % (MOUNT_IP, export, \
                                                    full_mount_path)
         if os.system(mnt_cmd) or not _busy_wait(full_mount_path):

@@ -124,6 +124,9 @@ struct posix_private {
         io_context_t    ctxp;
         pthread_t       aiothread;
 #endif
+
+        /* node-uuid in pathinfo xattr */
+        gf_boolean_t  node_uuid_pathinfo;
 };
 
 typedef struct {
@@ -135,6 +138,7 @@ typedef struct {
         inode_t     *inode; /* for all do_xattrop() key handling */
         int          fd;
         int          flags;
+        int32_t     op_errno;
 } posix_xattr_filler_t;
 
 

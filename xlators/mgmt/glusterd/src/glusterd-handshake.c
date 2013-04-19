@@ -315,8 +315,14 @@ fail:
         return 0;
 }
 
+int
+server_getspec (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req, __server_getspec);
+}
+
 int32_t
-server_event_notify (rpcsvc_request_t *req)
+__server_event_notify (rpcsvc_request_t *req)
 {
         int32_t                 ret             = -1;
         int32_t                 op_errno        =  0;
@@ -376,6 +382,12 @@ fail:
         return 0;
 }
 
+int32_t
+server_event_notify (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req, __server_event_notify);
+}
+
 int
 gd_validate_cluster_op_version (xlator_t *this, int cluster_op_version,
                                 char *peerid)
@@ -409,7 +421,7 @@ out:
 }
 
 int
-glusterd_mgmt_hndsk_versions (rpcsvc_request_t *req)
+__glusterd_mgmt_hndsk_versions (rpcsvc_request_t *req)
 {
         dict_t            *dict            = NULL;
         xlator_t          *this            = NULL;
@@ -485,7 +497,14 @@ out:
 }
 
 int
-glusterd_mgmt_hndsk_versions_ack (rpcsvc_request_t *req)
+glusterd_mgmt_hndsk_versions (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req,
+                                            __glusterd_mgmt_hndsk_versions);
+}
+
+int
+__glusterd_mgmt_hndsk_versions_ack (rpcsvc_request_t *req)
 {
         dict_t            *clnt_dict       = NULL;
         xlator_t          *this            = NULL;
@@ -553,6 +572,12 @@ out:
         return ret;
 }
 
+int
+glusterd_mgmt_hndsk_versions_ack (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req,
+                                            __glusterd_mgmt_hndsk_versions_ack);
+}
 
 rpcsvc_actor_t gluster_handshake_actors[] = {
         [GF_HNDSK_NULL]         = {"NULL", GF_HNDSK_NULL, NULL, NULL, 0},
@@ -725,7 +750,7 @@ out:
 }
 
 int
-glusterd_mgmt_hndsk_version_ack_cbk (struct rpc_req *req, struct iovec *iov,
+__glusterd_mgmt_hndsk_version_ack_cbk (struct rpc_req *req, struct iovec *iov,
                                      int count, void *myframe)
 {
         int                  ret      = -1;
@@ -804,7 +829,15 @@ out:
 }
 
 int
-glusterd_mgmt_hndsk_version_cbk (struct rpc_req *req, struct iovec *iov,
+glusterd_mgmt_hndsk_version_ack_cbk (struct rpc_req *req, struct iovec *iov,
+                                     int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_mgmt_hndsk_version_ack_cbk);
+}
+
+int
+__glusterd_mgmt_hndsk_version_cbk (struct rpc_req *req, struct iovec *iov,
                                  int count, void *myframe)
 {
         int                  ret       = -1;
@@ -906,6 +939,14 @@ out:
                 dict_unref (rsp_dict);
 
         return 0;
+}
+
+int
+glusterd_mgmt_hndsk_version_cbk (struct rpc_req *req, struct iovec *iov,
+                                     int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_mgmt_hndsk_version_cbk);
 }
 
 int
@@ -1011,7 +1052,7 @@ out:
 }
 
 int
-glusterd_peer_dump_version_cbk (struct rpc_req *req, struct iovec *iov,
+__glusterd_peer_dump_version_cbk (struct rpc_req *req, struct iovec *iov,
                                 int count, void *myframe)
 {
         int                  ret      = -1;
@@ -1116,6 +1157,14 @@ out:
         return 0;
 }
 
+
+int
+glusterd_peer_dump_version_cbk (struct rpc_req *req, struct iovec *iov,
+                                int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_peer_dump_version_cbk);
+}
 
 int
 glusterd_peer_dump_version (xlator_t *this, struct rpc_clnt *rpc,

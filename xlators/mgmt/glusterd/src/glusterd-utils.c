@@ -23,6 +23,7 @@
 #include "timer.h"
 #include "defaults.h"
 #include "compat.h"
+#include "syncop.h"
 #include "run.h"
 #include "compat-errno.h"
 #include "statedump.h"
@@ -924,6 +925,105 @@ out:
         return available;
 }
 
+int
+glusterd_validate_and_create_brickpath (glusterd_brickinfo_t *brickinfo,
+                                        uuid_t volume_id, char **op_errstr,
+                                        gf_boolean_t is_force)
+{
+        int          ret                 = -1;
+        char         parentdir[PATH_MAX] = {0,};
+        struct stat  parent_st           = {0,};
+        struct stat  brick_st            = {0,};
+        struct stat  root_st             = {0,};
+        char         msg[2048]           = {0,};
+        gf_boolean_t is_created          = _gf_false;
+
+        ret = mkdir (brickinfo->path, 0777);
+        if (ret) {
+                if (errno != EEXIST) {
+                        snprintf (msg, sizeof (msg), "Failed to create brick "
+                                  "directory for brick %s:%s. Reason : %s ",
+                                  brickinfo->hostname, brickinfo->path,
+                                  strerror (errno));
+                        goto out;
+                }
+        } else {
+                is_created = _gf_true;
+        }
+
+        ret = lstat (brickinfo->path, &brick_st);
+        if (ret) {
+                snprintf (msg, sizeof (msg), "lstat failed on %s. Reason : %s",
+                          brickinfo->path, strerror (errno));
+                goto out;
+        }
+
+        if ((!is_created) && (!S_ISDIR (brick_st.st_mode))) {
+                snprintf (msg, sizeof (msg), "The provided path %s which is "
+                          "already present, is not a directory",
+                          brickinfo->path);
+                ret = -1;
+                goto out;
+        }
+
+        snprintf (parentdir, sizeof (parentdir), "%s/..", brickinfo->path);
+
+        ret = lstat ("/", &root_st);
+        if (ret) {
+                snprintf (msg, sizeof (msg), "lstat failed on /. Reason : %s",
+                          strerror (errno));
+                goto out;
+        }
+
+        ret = lstat (parentdir, &parent_st);
+        if (ret) {
+                snprintf (msg, sizeof (msg), "lstat failed on %s. Reason : %s",
+                          parentdir, strerror (errno));
+                goto out;
+        }
+
+        if (!is_force) {
+                if (brick_st.st_dev != parent_st.st_dev) {
+                        snprintf (msg, sizeof (msg), "The brick %s:%s is a "
+                                  "mount point. Please create a sub-directory "
+                                  "under the mount point and use that as the "
+                                  "brick directory. Or use 'force' at the end "
+                                  "of the command if you want to override this "
+                                  "behavior.", brickinfo->hostname,
+                                  brickinfo->path);
+                        ret = -1;
+                        goto out;
+                }
+                else if (parent_st.st_dev == root_st.st_dev) {
+                        snprintf (msg, sizeof (msg), "The brick %s:%s is "
+                                  "is being created in the root partition. It "
+                                  "is recommended that you don't use the "
+                                  "system's root partition for storage backend."
+                                  " Or use 'force' at the end of the command if"
+                                  " you want to override this behavior.",
+                                  brickinfo->hostname, brickinfo->path);
+                        ret = -1;
+                        goto out;
+                }
+        }
+
+        ret = glusterd_check_and_set_brick_xattr (brickinfo->hostname,
+                                                  brickinfo->path, volume_id,
+                                                  op_errstr);
+        if (ret)
+                goto out;
+
+        ret = 0;
+
+out:
+        if (ret && is_created)
+                rmdir (brickinfo->path);
+        if (ret && !*op_errstr && msg[0] != '\0')
+                *op_errstr = gf_strdup (msg);
+
+        return ret;
+}
+
 int32_t
 glusterd_volume_brickinfo_get (uuid_t uuid, char *hostname, char *path,
                                glusterd_volinfo_t *volinfo,
@@ -1153,6 +1253,7 @@ glusterd_brick_connect (glusterd_volinfo_t  *volinfo,
         char                    socketpath[PATH_MAX] = {0};
         dict_t                  *options = NULL;
         struct rpc_clnt         *rpc = NULL;
+        glusterd_conf_t         *priv = THIS->private;
 
         GF_ASSERT (volinfo);
         GF_ASSERT (brickinfo);
@@ -1171,9 +1272,11 @@ glusterd_brick_connect (glusterd_volinfo_t  *volinfo,
                                                              socketpath, 600);
                 if (ret)
                         goto out;
+                synclock_unlock (&priv->big_lock);
                 ret = glusterd_rpc_create (&rpc, options,
                                            glusterd_brick_rpc_notify,
                                            brickinfo);
+                synclock_lock (&priv->big_lock);
                 if (ret)
                         goto out;
                 brickinfo->rpc = rpc;
@@ -1229,9 +1332,8 @@ glusterd_volume_start_glusterfs (glusterd_volinfo_t  *volinfo,
         int                     rdma_port = 0;
         char                    socketpath[PATH_MAX] = {0};
         char                    glusterd_uuid[1024] = {0,};
-#ifdef DEBUG
         char                    valgrind_logfile[PATH_MAX] = {0};
-#endif
+
         GF_ASSERT (volinfo);
         GF_ASSERT (brickinfo);
 
@@ -1255,7 +1357,7 @@ glusterd_volume_start_glusterfs (glusterd_volinfo_t  *volinfo,
                 port = pmap_registry_alloc (THIS);
 
         runinit (&runner);
-#ifdef DEBUG
+
         if (priv->valgrind) {
                 /* Run bricks with valgrind */
                 if (volinfo->logdir) {
@@ -1271,10 +1373,11 @@ glusterd_volume_start_glusterfs (glusterd_volinfo_t  *volinfo,
                 }
 
                 runner_add_args (&runner, "valgrind", "--leak-check=full",
-                                "--trace-children=yes", NULL);
+                                 "--trace-children=yes", "--track-origins=yes",
+                                 NULL);
                 runner_argprintf (&runner, "--log-file=%s", valgrind_logfile);
         }
-#endif
+
         GLUSTERD_REMOVE_SLASH_FROM_PATH (brickinfo->path, exp_path);
         snprintf (volfile, PATH_MAX, "%s.%s.%s", volinfo->volname,
                   brickinfo->hostname, exp_path);
@@ -1291,6 +1394,7 @@ glusterd_volume_start_glusterfs (glusterd_volinfo_t  *volinfo,
 
         glusterd_set_brick_socket_filepath (volinfo, brickinfo, socketpath,
                                             sizeof (socketpath));
+
         (void) snprintf (glusterd_uuid, 1024, "*-posix.glusterd-uuid=%s",
                          uuid_utoa (MY_UUID));
         runner_add_args (&runner, SBIN_DIR"/glusterfsd",
@@ -1322,10 +1426,14 @@ glusterd_volume_start_glusterfs (glusterd_volinfo_t  *volinfo,
                 runner_add_arg (&runner, "--mem-accounting");
 
         runner_log (&runner, "", GF_LOG_DEBUG, "Starting GlusterFS");
-        if (wait)
+        if (wait) {
+                synclock_unlock (&priv->big_lock);
                 ret = runner_run (&runner);
-        else
+                synclock_lock (&priv->big_lock);
+
+        } else {
                 ret = runner_run_nowait (&runner);
+        }
 
         if (ret)
                 goto out;
@@ -2301,6 +2409,19 @@ does_gd_meet_server_quorum (xlator_t *this)
         in = _gf_true;
 out:
         return in;
+}
+
+int
+glusterd_spawn_daemons (void *opaque)
+{
+        glusterd_conf_t *conf = THIS->private;
+        gf_boolean_t    start_bricks = (long) opaque;
+
+        if (start_bricks)
+                glusterd_restart_bricks (conf);
+        glusterd_restart_gsyncds (conf);
+        glusterd_restart_rebalance (conf);
+        return 0;
 }
 
 void
@@ -3301,6 +3422,7 @@ glusterd_nodesvc_connect (char *server, char *socketpath) {
         int                     ret = 0;
         dict_t                  *options = NULL;
         struct rpc_clnt         *rpc = NULL;
+        glusterd_conf_t         *priv = THIS->private;
 
         rpc = glusterd_nodesvc_get_rpc (server);
 
@@ -3314,9 +3436,11 @@ glusterd_nodesvc_connect (char *server, char *socketpath) {
                                                              socketpath, 600);
                 if (ret)
                         goto out;
+                synclock_unlock (&priv->big_lock);
                 ret = glusterd_rpc_create (&rpc, options,
                                            glusterd_nodesvc_rpc_notify,
                                            server);
+                synclock_lock (&priv->big_lock);
                 if (ret)
                         goto out;
                 (void) glusterd_nodesvc_set_rpc (server, rpc);
@@ -3355,9 +3479,7 @@ glusterd_nodesvc_start (char *server)
         char                    sockfpath[PATH_MAX] = {0,};
         char                    volfileid[256]             = {0};
         char                    glusterd_uuid_option[1024] = {0};
-#ifdef DEBUG
         char                    valgrind_logfile[PATH_MAX] = {0};
-#endif
 
         this = THIS;
         GF_ASSERT(this);
@@ -3394,7 +3516,6 @@ glusterd_nodesvc_start (char *server)
 
         runinit (&runner);
 
-#ifdef DEBUG
         if (priv->valgrind) {
                 snprintf (valgrind_logfile, PATH_MAX,
                           "%s/valgrind-%s.log",
@@ -3402,10 +3523,10 @@ glusterd_nodesvc_start (char *server)
                           server);
 
                 runner_add_args (&runner, "valgrind", "--leak-check=full",
-                                 "--trace-children=yes", NULL);
+                                 "--trace-children=yes", "--track-origins=yes",
+                                 NULL);
                 runner_argprintf (&runner, "--log-file=%s", valgrind_logfile);
         }
-#endif
 
         runner_add_args (&runner, SBIN_DIR"/glusterfs",
                          "-s", "localhost",
@@ -3960,13 +4081,8 @@ glusterd_restart_bricks (glusterd_conf_t *conf)
                 if (volinfo->status != GLUSTERD_STATUS_STARTED)
                         continue;
                 start_nodesvcs = _gf_true;
-                if (glusterd_is_volume_in_server_quorum (volinfo)) {
-                        //these bricks will be restarted once the quorum is met
-                        continue;
-                }
-
                 list_for_each_entry (brickinfo, &volinfo->bricks, brick_list) {
-                        glusterd_brick_start (volinfo, brickinfo, _gf_true);
+                        glusterd_brick_start (volinfo, brickinfo, _gf_false);
                 }
         }
 
@@ -5049,16 +5165,12 @@ out:
 }
 
 int
-glusterd_brick_create_path (char *host, char *path, uuid_t uuid,
-                            char **op_errstr)
+glusterd_check_and_set_brick_xattr (char *host, char *path, uuid_t uuid,
+                                    char **op_errstr)
 {
         int             ret             = -1;
         char            msg[2048]       = {0,};
         gf_boolean_t    in_use          = _gf_false;
-
-        ret = mkdir_p (path, 0777, _gf_true);
-        if (ret)
-                goto out;
 
         /* Check for xattr support in backend fs */
         ret = sys_lsetxattr (path, "trusted.glusterfs.test",
@@ -5072,7 +5184,6 @@ glusterd_brick_create_path (char *host, char *path, uuid_t uuid,
 
         } else {
                 sys_lremovexattr (path, "trusted.glusterfs.test");
-
         }
 
         ret = glusterd_is_path_in_use (path, &in_use, op_errstr);
@@ -5099,7 +5210,6 @@ out:
                 *op_errstr = gf_strdup (msg);
 
         return ret;
-
 }
 
 int
@@ -5488,7 +5598,9 @@ glusterd_start_gsync (glusterd_volinfo_t *master_vol, char *slave,
         runner_argprintf (&runner, ":%s", master_vol->volname);
         runner_add_args  (&runner, slave, "--config-set", "session-owner",
                           uuid_str, NULL);
+        synclock_unlock (&priv->big_lock);
         ret = runner_run (&runner);
+        synclock_lock (&priv->big_lock);
         if (ret == -1) {
                 errcode = -1;
                 goto out;
@@ -5499,7 +5611,9 @@ glusterd_start_gsync (glusterd_volinfo_t *master_vol, char *slave,
         runner_argprintf (&runner, "%s/"GSYNC_CONF, priv->workdir);
         runner_argprintf (&runner, ":%s", master_vol->volname);
         runner_add_arg   (&runner, slave);
+        synclock_unlock (&priv->big_lock);
         ret = runner_run (&runner);
+        synclock_lock (&priv->big_lock);
         if (ret == -1) {
                 gf_asprintf (op_errstr, GEOREP" start failed for %s %s",
                              master_vol->volname, slave);
@@ -5961,7 +6075,6 @@ glusterd_restart_rebalance (glusterd_conf_t *conf)
         }
         return ret;
 }
-
 
 void
 glusterd_volinfo_reset_defrag_stats (glusterd_volinfo_t *volinfo)

@@ -427,8 +427,8 @@ glusterd_crt_georep_folders (char *georepdir, glusterd_conf_t *conf)
         if (strlen (conf->workdir)+2 > PATH_MAX-strlen(GEOREP)) {
                 ret = -1;
                 gf_log ("glusterd", GF_LOG_CRITICAL,
-                        "Unable to create "GEOREP" directory %s",
-                        georepdir);
+                        "directory path %s/"GEOREP" is longer than PATH_MAX",
+                        conf->workdir);
                 goto out;
         }
 
@@ -444,8 +444,8 @@ glusterd_crt_georep_folders (char *georepdir, glusterd_conf_t *conf)
         if (strlen (DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP) >= PATH_MAX) {
                 ret = -1;
                 gf_log ("glusterd", GF_LOG_CRITICAL,
-                        "Unable to create "GEOREP" directory %s",
-                        georepdir);
+                        "directory path "DEFAULT_LOG_FILE_DIRECTORY"/"
+                        GEOREP" is longer than PATH_MAX");
                 goto out;
         }
         ret = mkdir_p (DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP, 0777, _gf_true);
@@ -459,8 +459,8 @@ glusterd_crt_georep_folders (char *georepdir, glusterd_conf_t *conf)
         if (strlen(DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP"-slaves") >= PATH_MAX) {
                 ret = -1;
                 gf_log ("glusterd", GF_LOG_CRITICAL,
-                        "Unable to create "GEOREP" directory %s",
-                        georepdir);
+                        "directory path "DEFAULT_LOG_FILE_DIRECTORY"/"
+                        GEOREP"-slaves"" is longer than PATH_MAX");
                 goto out;
         }
         ret = mkdir_p (DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP"-slaves", 0777,
@@ -475,8 +475,8 @@ glusterd_crt_georep_folders (char *georepdir, glusterd_conf_t *conf)
         if (strlen(DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP"-slaves/mbr") >= PATH_MAX) {
                 ret = -1;
                 gf_log ("glusterd", GF_LOG_CRITICAL,
-                        "Unable to create "GEOREP" moubtbroker directory %s",
-                        georepdir);
+                        "directory path "DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP
+                        "-slaves/mbr"" is longer than PATH_MAX");
                 goto out;
         }
         ret = mkdir_p (DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP"-slaves/mbr", 0777,
@@ -869,27 +869,31 @@ _install_mount_spec (dict_t *opts, char *key, data_t *value, void *data)
         return -1;
 }
 
+
 static int
-glusterd_default_synctask_cbk (int ret, call_frame_t *frame, void *opaque)
+gd_default_synctask_cbk (int ret, call_frame_t *frame, void *opaque)
 {
-    return ret;
+        glusterd_conf_t     *priv = THIS->private;
+        synclock_unlock (&priv->big_lock);
+        return ret;
 }
 
-static int
-glusterd_launch_synctask (xlator_t *this, synctask_fn_t fn)
+static void
+glusterd_launch_synctask (synctask_fn_t fn, void *opaque)
 {
-    glusterd_conf_t *priv = NULL;
-    int              ret  = -1;
+        xlator_t        *this = NULL;
+        glusterd_conf_t *priv = NULL;
+        int             ret   = -1;
 
-    priv = this->private;
+        this = THIS;
+        priv = this->private;
 
-    ret = synctask_new (this->ctx->env, fn,
-                        glusterd_default_synctask_cbk, NULL, priv);
-
-    if (ret)
-            gf_log (this->name, GF_LOG_CRITICAL, "Failed to create synctask"
-                    "for starting process");
-    return ret;
+        synclock_lock (&priv->big_lock);
+        ret = synctask_new (this->ctx->env, fn, gd_default_synctask_cbk, NULL,
+                            opaque);
+        if (ret)
+                gf_log (this->name, GF_LOG_CRITICAL, "Failed to spawn bricks"
+                        " and other volume related services");
 }
 
 /*
@@ -913,10 +917,8 @@ init (xlator_t *this)
         int                first_time        = 0;
         char              *mountbroker_root  = NULL;
         int                i                 = 0;
-
-#ifdef DEBUG
         char              *valgrind_str      = NULL;
-#endif
+
         dir_data = dict_get (this->options, "working-directory");
 
         if (!dir_data) {
@@ -1084,6 +1086,7 @@ init (xlator_t *this)
         conf->gfs_mgmt = &gd_brick_prog;
         strncpy (conf->workdir, workdir, PATH_MAX);
 
+        synclock_init (&conf->big_lock);
         pthread_mutex_init (&conf->xprt_lock, NULL);
         INIT_LIST_HEAD (&conf->xprt_list);
 
@@ -1098,7 +1101,6 @@ init (xlator_t *this)
                 goto out;
 
         /* Set option to run bricks on valgrind if enabled in glusterd.vol */
-#ifdef DEBUG
         conf->valgrind = _gf_false;
         ret = dict_get_str (this->options, "run-with-valgrind", &valgrind_str);
         if (ret < 0) {
@@ -1111,7 +1113,6 @@ init (xlator_t *this)
                                 "run-with-valgrind value not a boolean string");
                 }
         }
-#endif
 
         this->private = conf;
         (void) glusterd_nodesvc_set_online_status ("glustershd", _gf_false);
@@ -1148,6 +1149,14 @@ init (xlator_t *this)
         if (ret < 0)
                 goto out;
 
+        /* If there are no 'friends', this would be the best time to
+         * spawn process/bricks that may need (re)starting since last
+         * time (this) glusterd was up.*/
+
+        if (list_empty (&conf->peers)) {
+                glusterd_launch_synctask (glusterd_spawn_daemons,
+                                          (void*) _gf_true);
+        }
         ret = glusterd_options_init (this);
         if (ret < 0)
                 goto out;
@@ -1155,13 +1164,6 @@ init (xlator_t *this)
         ret = glusterd_handle_upgrade_downgrade (this->options, conf);
         if (ret)
                 goto out;
-
-        glusterd_launch_synctask (this,
-                                  (synctask_fn_t) glusterd_restart_bricks);
-        glusterd_launch_synctask (this,
-                                  (synctask_fn_t) glusterd_restart_gsyncds);
-        glusterd_launch_synctask (this,
-                                  (synctask_fn_t) glusterd_restart_rebalance);
 
         ret = glusterd_hooks_spawn_worker (this);
         if (ret)
@@ -1289,11 +1291,9 @@ struct volume_options options[] = {
         { .key = {GEOREP"-log-group"},
           .type = GF_OPTION_TYPE_ANY,
         },
-#ifdef DEBUG
         { .key = {"run-with-valgrind"},
           .type = GF_OPTION_TYPE_BOOL,
         },
-#endif
         { .key = {"server-quorum-type"},
           .type = GF_OPTION_TYPE_STR,
           .value = { "none", "server"},

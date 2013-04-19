@@ -2519,8 +2519,13 @@ posix_getxattr (call_frame_t *frame, xlator_t *this,
                 else
                         rpath = real_path;
 
-                (void) snprintf (host_buf, 1024, "<POSIX(%s):%s:%s>",
-                                 priv->base_path, priv->hostname, rpath);
+                (void) snprintf (host_buf, 1024,
+                                 "<POSIX(%s):%s:%s>", priv->base_path,
+                                 ((priv->node_uuid_pathinfo
+                                   && !uuid_is_null(priv->glusterd_uuid))
+                                      ? uuid_utoa (priv->glusterd_uuid)
+                                      : priv->hostname),
+                                 rpath);
 
                 dyn_rpath = gf_strdup (host_buf);
                 if (!dyn_rpath) {
@@ -2976,6 +2981,28 @@ out:
         return 0;
 }
 
+int
+_posix_remove_xattr (dict_t *dict, char *key, data_t *value, void *data)
+{
+        int32_t               op_ret   = 0;
+        xlator_t             *this     = NULL;
+        posix_xattr_filler_t *filler   = NULL;
+
+        filler = (posix_xattr_filler_t *) data;
+        this = filler->this;
+
+        op_ret = sys_lremovexattr (filler->real_path, key);
+        if (op_ret == -1) {
+                filler->op_errno = errno;
+                if (errno != ENOATTR && errno != EPERM)
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "removexattr failed on %s (for %s): %s",
+                                filler->real_path, key, strerror (errno));
+        }
+
+        return op_ret;
+}
+
 
 int32_t
 posix_removexattr (call_frame_t *frame, xlator_t *this,
@@ -2984,6 +3011,7 @@ posix_removexattr (call_frame_t *frame, xlator_t *this,
         int32_t op_ret    = -1;
         int32_t op_errno  = 0;
         char *  real_path = NULL;
+        posix_xattr_filler_t filler = {0,};
 
         DECLARE_OLD_FS_ID_VAR;
 
@@ -2998,6 +3026,22 @@ posix_removexattr (call_frame_t *frame, xlator_t *this,
 
 
         SET_FS_ID (frame->root->uid, frame->root->gid);
+
+        /**
+         * sending an empty key name with xdata containing the
+         * list of key(s) to be removed implies "bulk remove request"
+         * for removexattr.
+         */
+        if (name && (strcmp (name, "") == 0) && xdata) {
+                filler.real_path = real_path;
+                filler.this = this;
+                op_ret = dict_foreach (xdata, _posix_remove_xattr, &filler);
+                if (op_ret) {
+                        op_errno = filler.op_errno;
+                }
+
+                goto out;
+        }
 
         op_ret = sys_lremovexattr (real_path, name);
         if (op_ret == -1) {
@@ -3858,8 +3902,23 @@ posix_do_readdir (call_frame_t *frame, xlator_t *this,
          */
         ret = dict_get_int32 (dict, GF_READDIR_SKIP_DIRS, &skip_dirs);
 
-        count = posix_fill_readdir (fd, dir, off, size, &entries, this,
-                                    skip_dirs);
+	LOCK (&fd->lock);
+	{
+		/* posix_fill_readdir performs multiple separate individual
+		   readdir() calls to fill up the buffer.
+
+		   In case of NFS where the same anonymous FD is shared between
+		   different applications, reading a common directory can
+		   result in the anonymous fd getting re-used unsafely between
+		   the two readdir requests (in two different io-threads).
+
+		   It would also help, in the future, to replace the loop
+		   around readdir() with a single large getdents() call.
+		*/
+		count = posix_fill_readdir (fd, dir, off, size, &entries, this,
+					    skip_dirs);
+	}
+	UNLOCK (&fd->lock);
 
         /* pick ENOENT to indicate EOF */
         op_errno = errno;
@@ -4083,6 +4142,16 @@ reconfigure (xlator_t *this, dict_t *options)
 		posix_aio_on (this);
 	else
 		posix_aio_off (this);
+
+        GF_OPTION_RECONF ("node-uuid-pathinfo", priv->node_uuid_pathinfo,
+                          options, bool, out);
+
+        if (priv->node_uuid_pathinfo &&
+            (uuid_is_null (priv->glusterd_uuid))) {
+                    gf_log (this->name, GF_LOG_INFO,
+                            "glusterd uuid is NULL, pathinfo xattr would"
+                            " fallback to <hostname>:<export>");
+        }
 
 	ret = 0;
 out:
@@ -4445,6 +4514,15 @@ init (xlator_t *this)
 		}
 	}
 
+        GF_OPTION_INIT ("node-uuid-pathinfo",
+                        _private->node_uuid_pathinfo, bool, out);
+        if (_private->node_uuid_pathinfo &&
+            (uuid_is_null (_private->glusterd_uuid))) {
+                        gf_log (this->name, GF_LOG_INFO,
+                                "glusterd uuid is NULL, pathinfo xattr would"
+                                " fallback to <hostname>:<export>");
+        }
+
         pthread_mutex_init (&_private->janitor_lock, NULL);
         pthread_cond_init (&_private->janitor_cond, NULL);
         INIT_LIST_HEAD (&_private->janitor_fds);
@@ -4561,6 +4639,12 @@ struct volume_options options[] = {
           .min = 0,
           .validate = GF_OPT_VALIDATE_MIN,
           .description = "Support for setting gid of brick's owner"
+        },
+        { .key = {"node-uuid-pathinfo"},
+          .type = GF_OPTION_TYPE_BOOL,
+          .default_value = "off",
+          .description = "return glusterd's node-uuid in pathinfo xattr"
+                         " string instead of hostname"
         },
         { .key  = {NULL} }
 };

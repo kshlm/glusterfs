@@ -143,9 +143,7 @@ typedef struct {
         struct rpc_clnt_program *gfs_mgmt;
 
         struct list_head mount_specs;
-#ifdef DEBUG
         gf_boolean_t      valgrind;
-#endif
         pthread_t       brick_thread;
         void           *hooks_priv;
         /* need for proper handshake_t */
@@ -153,6 +151,7 @@ typedef struct {
         xlator_t       *xl;  /* Should be set to 'THIS' before creating thread */
         gf_boolean_t   pending_quorum_action;
         dict_t             *opts;
+        synclock_t      big_lock;
 } glusterd_conf_t;
 
 
@@ -431,6 +430,16 @@ __glusterd_uuid()
 		glusterd_uuid_init();
 	return &priv->uuid[0];
 }
+
+int glusterd_big_locked_notify (struct rpc_clnt *rpc, void *mydata,
+                                rpc_clnt_event_t event,
+                                void *data, rpc_clnt_notify_t notify_fn);
+
+int
+glusterd_big_locked_cbk (struct rpc_req *req, struct iovec *iov,
+                         int count, void *myframe, fop_cbk_fn_t fn);
+
+int glusterd_big_locked_handler (rpcsvc_request_t *req, rpcsvc_actor actor_fn);
 
 int32_t
 glusterd_brick_from_brickinfo (glusterd_brickinfo_t *brickinfo,
