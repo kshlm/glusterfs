@@ -126,6 +126,7 @@ _get_client_op_versions (gf_getspec_req *args, peer_info_t *peerinfo)
         if (args->xdata.xdata_len) {
                 dict = dict_new ();
                 if (!dict) {
+                        ret = -1;
                         goto out;
                 }
 
@@ -196,7 +197,7 @@ _client_supports_volume (peer_info_t *peerinfo, int32_t *op_errno)
 }
 
 int
-server_getspec (rpcsvc_request_t *req)
+__server_getspec (rpcsvc_request_t *req)
 {
         int32_t               ret                    = -1;
         int32_t               op_errno               = 0;
