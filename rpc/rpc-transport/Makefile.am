@@ -1,1 +1,1 @@
-SUBDIRS = socket $(RDMA_SUBDIR) zmq
+SUBDIRS = socket $(RDMA_SUBDIR) $(ZMQ_SUBDIR)

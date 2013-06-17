@@ -375,7 +375,6 @@ AC_SUBST(IBVERBS_SUBDIR)
 AC_SUBST(RDMA_SUBDIR)
 # end IBVERBS section
 
-
 # SYNCDAEMON section
 AC_ARG_ENABLE([georeplication],
 	      AC_HELP_STRING([--disable-georeplication],
@@ -705,6 +704,21 @@ if test "x$BUILD_GLUPY" = "xyes"; then
 fi
 # end glupy section
 
+# ZMQ section
+AC_ARG_ENABLE([zmq], AC_HELP_STRING([--enable-zmq], [Enable zeromq transport]),, [enable_zmq="no"])
+BUILD_ZMQ="no"
+ZMQ_SUBDIR=""
+if test "x$enable_zmq" != "xno"; then
+   AC_CHECK_LIB([zmq],[zmq_ctx_new],[HAVE_ZMQ="yes"])
+   if test "x$HAVE_ZMQ" = "xyes"; then
+      ZMQ_SUBDIR="zmq"
+      BUILD_ZMQ="yes"
+   else
+      AC_MSG_ERROR([zmq transport requires libzmq to be installed])
+   fi
+fi
+AC_SUBST(ZMQ_SUBDIR)
+# end ZMQ section
 AC_SUBST(GF_HOST_OS)
 AC_SUBST([GF_GLUSTERFS_LIBS])
 AC_SUBST(GF_GLUSTERFS_CFLAGS)
@@ -747,4 +761,5 @@ echo "Enable Debug         : $BUILD_DEBUG"
 echo "systemtap            : $BUILD_SYSTEMTAP"
 echo "Block Device backend : $BUILD_BD_XLATOR"
 echo "glupy                : $BUILD_GLUPY"
+echo "zmq                  : $BUILD_ZMQ"
 echo
