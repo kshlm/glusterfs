@@ -39,6 +39,8 @@ AC_CONFIG_FILES([Makefile
                 rpc/rpc-transport/socket/src/Makefile
                 rpc/rpc-transport/rdma/Makefile
                 rpc/rpc-transport/rdma/src/Makefile
+                rpc/rpc-transport/zmq/Makefile
+                rpc/rpc-transport/zmq/src/Makefile
                 rpc/xdr/Makefile
                 rpc/xdr/src/Makefile
 		xlators/Makefile

@@ -1,6 +1,6 @@
 #include <zmq.h>
 
-#include "gf-zmq.h"
+#include "zmq.h"
 #include "rpc-transport.h"
 
 int32_t
