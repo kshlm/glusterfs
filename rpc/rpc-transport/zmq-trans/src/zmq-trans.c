@@ -1,50 +1,71 @@
-#include "zmq.h"
+#include "zmq-trans.h"
 #include "rpc-transport.h"
 #include "mem-types.h"
 #include "common-utils.h"
 #include "glusterfs.h"
+#include "event.h"
+
+#define GF_DEFAULT_ZMQ_LISTEN_PORT  GF_DEFAULT_BASE_PORT
 
 int32_t
-zmq_submit_request (rpc_transport_t *this, rpc_transport_req_t *req)
+zmq_trans_submit_request (rpc_transport_t *this, rpc_transport_req_t *req)
 {
         return 0;
 }
 
 int32_t
-zmq_submit_reply (rpc_transport_t *this, rpc_transport_reply_t *reply)
+zmq_trans_submit_reply (rpc_transport_t *this, rpc_transport_reply_t *reply)
 {
         return 0;
 }
 
 int32_t
-zmq_connect (rpc_transport_t *this, int port)
+zmq_trans_connect (rpc_transport_t *this, int port)
 {
         return 0;
 }
 
 int32_t
-zmq_disconnect (rpc_transport_t *this)
+zmq_trans_disconnect (rpc_transport_t *this)
 {
         return 0;
 }
 
 static int
-zmq_server_event_handler (int fd, int idx, void *data, int poll_int,
+zmq_trans_server_event_handler (int fd, int idx, void *data, int poll_int,
                           int poll_out, int poll_err)
 {
         int                     ret = -1;
         rpc_transport_t         *this = NULL;
         zmq_private_t           *priv = NULL;
+        int                     poll = 0;
+        size_t                  size = sizeof (poll);
 
-        this = date;
+        this = data;
         GF_VALIDATE_OR_GOTO ("zmq", this, out);
         GF_VALIDATE_OR_GOTO ("zmq", this->private, out);
 
         priv = this->private;
+
+        /* A poll event on a ZMQ_FD doesn't mean there is something to
+         * read from or write to the fd. We need to get the actual state by
+         * getting the ZMQ_EVENTS option of the zmq socket
+         */
+        ret = zmq_getsockopt (priv->zmq_sock, ZMQ_EVENTS, &poll, &size);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Failed to get zmq poll event");
+                goto out;
+        }
+
+        //TODO: Figure out what socket_server_event_handler is doing on pollin
+        //      and implement this section
+out:
+        return ret;
 }
 
 int32_t
-zmq_listen (rpc_transport_t *this)
+zmq_trans_listen (rpc_transport_t *this)
 {
         int             ret = -1;
         zmq_private_t   *priv = NULL;
@@ -66,10 +87,10 @@ zmq_listen (rpc_transport_t *this)
         ret = dict_get_uint16 (this->options, "transport.socket.listen-port",
                                &listen_port);
         if (ret || (uint16_t)-1 == listen_port)
-                listen_port = GF_DEFAULT_SOCKET_LISTEN_PORT;
+                listen_port = GF_DEFAULT_ZMQ_LISTEN_PORT;
 
-        ret = dict_get_str (this->options, "transport.socket.bind-addres",
-                            &listen_port);
+        ret = dict_get_str (this->options, "transport.socket.bind-address",
+                            &listen_host);
 
         ret = gf_asprintf (&zmq_endpoint, "tcp://%s:%"PRIu16,
                            (listen_host ? listen_host : "*"), listen_port);
@@ -105,7 +126,7 @@ zmq_listen (rpc_transport_t *this)
         priv->zmq_sock = zmq_sock;
 
         priv->idx = event_register (this->ctx->event_pool, priv->sock_fd,
-                                    zmq_server_event_handler, this, 1, 0);
+                                    zmq_trans_server_event_handler, this, 1, 0);
         if (priv->idx == -1) {
                 ret = -1;
                 gf_log (this->name, GF_LOG_ERROR,
@@ -126,11 +147,11 @@ out:
 }
 
 struct rpc_transport_ops tops = {
-        .submit_request = zmq_submit_request,
-        .submit_reply   = zmq_submit_reply,
-        .connect        = zmq_connect,
-        .disconnect     = zmq_disconnect,
-        .listen         = zmq_listen,
+        .submit_request = zmq_trans_submit_request,
+        .submit_reply   = zmq_trans_submit_reply,
+        .connect        = zmq_trans_connect,
+        .disconnect     = zmq_trans_disconnect,
+        .listen         = zmq_trans_listen,
 };
 
 int32_t

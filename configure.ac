@@ -39,8 +39,8 @@ AC_CONFIG_FILES([Makefile
                 rpc/rpc-transport/socket/src/Makefile
                 rpc/rpc-transport/rdma/Makefile
                 rpc/rpc-transport/rdma/src/Makefile
-                rpc/rpc-transport/zmq/Makefile
-                rpc/rpc-transport/zmq/src/Makefile
+                rpc/rpc-transport/zmq-trans/Makefile
+                rpc/rpc-transport/zmq-trans/src/Makefile
                 rpc/xdr/Makefile
                 rpc/xdr/src/Makefile
 		xlators/Makefile
@@ -711,15 +711,18 @@ AC_ARG_ENABLE([zmq], AC_HELP_STRING([--enable-zmq], [Enable zeromq transport]),,
 BUILD_ZMQ="no"
 ZMQ_SUBDIR=""
 if test "x$enable_zmq" != "xno"; then
-   AC_CHECK_LIB([zmq],[zmq_ctx_new],[HAVE_ZMQ="yes"])
+   PKG_CHECK_MODULES([ZeroMQ], [libzmq], [HAVE_ZMQ=yes],[HAVE_ZMQ=])
    if test "x$HAVE_ZMQ" = "xyes"; then
-      ZMQ_SUBDIR="zmq"
+      ZMQ_CFLAGS="$ZeroMQ_CFLAGS"
+      ZMQ_LDFLAGS="$ZeroMQ_LIBS"
       BUILD_ZMQ="yes"
    else
       AC_MSG_ERROR([zmq transport requires libzmq to be installed])
    fi
 fi
-AC_SUBST(ZMQ_SUBDIR)
+AM_CONDITIONAL([BUILD_ZMQ], [test "x$BUILD_ZMQ" = "xyes"])
+AC_SUBST(ZMQ_CFLAGS)
+AC_SUBST(ZMQ_LDFLAGS)
 # end ZMQ section
 AC_SUBST(GF_HOST_OS)
 AC_SUBST([GF_GLUSTERFS_LIBS])
