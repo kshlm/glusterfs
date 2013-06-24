@@ -8,6 +8,7 @@
 typedef struct {
         void    *zmq_ctx;
         void    *zmq_sock;
+        char    *zmq_endpoint;
         int     sock_fd;
         int     idx;
 } zmq_private_t;

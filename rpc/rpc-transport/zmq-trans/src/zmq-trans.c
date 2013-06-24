@@ -222,9 +222,6 @@ zmq_trans_connect (rpc_transport_t *this, int port)
                 goto out;
         }
 
-        priv->sock_fd = sock_fd;
-        priv->zmq_sock = zmq_sock;
-
         priv->idx = event_register (this->ctx->event_pool, priv->sock_fd,
                                     zmq_trans_event_handler, this, 1, 1);
         if (priv->idx == -1) {
@@ -233,6 +230,11 @@ zmq_trans_connect (rpc_transport_t *this, int port)
                         "Failed to register zmq event handler");
                 goto out;
         }
+
+        priv->sock_fd = sock_fd;
+        priv->zmq_sock = zmq_sock;
+        priv->zmq_endpoint = zmq_endpoint;
+        zmq_endpoint = NULL;
 
 out:
         if (ret) {
@@ -249,7 +251,29 @@ out:
 int32_t
 zmq_trans_disconnect (rpc_transport_t *this)
 {
-        return 0;
+        int             ret = -1;
+        zmq_private_t   *priv = NULL;
+
+        GF_VALIDATE_OR_GOTO ("zmq", this, out);
+        GF_VALIDATE_OR_GOTO ("zmq", this->private, out);
+
+        priv = this->private;
+        GF_VALIDATE_OR_GOTO ("zmq", priv->zmq_sock, out);
+        GF_VALIDATE_OR_GOTO ("zmq", priv->zmq_endpoint, out);
+
+        ret = zmq_disconnect (priv->zmq_sock, priv->zmq_endpoint);
+        if (ret) {
+                /* We don't consider this a failure */
+                ret = 0;
+                gf_log (this->name, GF_LOG_WARNING, "zmq socket disconnect "
+                        "failed (%s)", strerror (errno));
+        }
+
+        priv->sock_fd = (uint16_t)-1;
+        GF_FREE (priv->zmq_endpoint);
+        priv->zmq_endpoint = NULL;
+out:
+        return ret;
 }
 
 static int
