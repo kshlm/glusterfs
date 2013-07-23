@@ -117,6 +117,9 @@ glusterd_peer_hostname_new (char *hostname, glusterd_peer_hostname_t **name);
 int32_t
 glusterd_volinfo_find (char *volname, glusterd_volinfo_t **volinfo);
 
+int
+glusterd_volinfo_find_by_volume_id (uuid_t volume_id, glusterd_volinfo_t **volinfo);
+
 int32_t
 glusterd_service_stop(const char *service, char *pidfile, int sig,
                       gf_boolean_t force_kill);
@@ -147,9 +150,6 @@ int32_t
 glusterd_volume_brickinfo_get_by_brick (char *brick,
                                         glusterd_volinfo_t *volinfo,
                                         glusterd_brickinfo_t **brickinfo);
-
-gf_boolean_t
-glusterd_is_local_addr (char *hostname);
 
 int32_t
 glusterd_build_volume_dict (dict_t **vols);
@@ -525,6 +525,10 @@ glusterd_is_same_address (char *name1, char *name2);
 
 void
 gd_update_volume_op_versions (glusterd_volinfo_t *volinfo);
+
 char*
 gd_peer_uuid_str (glusterd_peerinfo_t *peerinfo);
+
+gf_boolean_t
+gd_is_remove_brick_committed (glusterd_volinfo_t *volinfo);
 #endif

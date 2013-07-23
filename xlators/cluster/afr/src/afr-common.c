@@ -826,7 +826,8 @@ afr_local_sh_cleanup (afr_local_t *local, xlator_t *this)
 void
 afr_local_transaction_cleanup (afr_local_t *local, xlator_t *this)
 {
-        afr_private_t * priv = NULL;
+        afr_private_t *priv    = NULL;
+        int           i        = 0;
 
         priv = this->private;
 
@@ -836,7 +837,9 @@ afr_local_transaction_cleanup (afr_local_t *local, xlator_t *this)
 
         GF_FREE (local->internal_lock.locked_nodes);
 
-        GF_FREE (local->internal_lock.inode_locked_nodes);
+        for (i = 0; local->internal_lock.inodelk[i].domain; i++) {
+                GF_FREE (local->internal_lock.inodelk[i].locked_nodes);
+        }
 
         GF_FREE (local->internal_lock.lower_locked_nodes);
 
@@ -1270,7 +1273,7 @@ afr_detect_self_heal_by_iatt (afr_local_t *local, xlator_t *this,
 
         if (uuid_compare (buf->ia_gfid, lookup_buf->ia_gfid)) {
                 /* mismatching gfid */
-                gf_log (this->name, GF_LOG_WARNING,
+                gf_log (this->name, GF_LOG_DEBUG,
                         "%s: gfid different on subvolume", local->loc.path);
         }
 }
@@ -1494,7 +1497,7 @@ afr_conflicting_iattrs (struct iatt *bufs, int32_t *success_children,
 
                 child2 = &bufs[success_children[i-1]];
                 if (FILETYPE_DIFFERS (child1, child2)) {
-                        gf_log (xlator_name, GF_LOG_WARNING, "%s: filetype "
+                        gf_log (xlator_name, GF_LOG_DEBUG, "%s: filetype "
                                 "differs on subvolumes (%d, %d)", path,
                                 success_children[i-1], success_children[i]);
                         conflicting = _gf_true;
@@ -1503,7 +1506,7 @@ afr_conflicting_iattrs (struct iatt *bufs, int32_t *success_children,
                 if (!gfid || uuid_is_null (child1->ia_gfid))
                         continue;
                 if (uuid_compare (*gfid, child1->ia_gfid)) {
-                       gf_log (xlator_name, GF_LOG_WARNING, "%s: gfid differs"
+                       gf_log (xlator_name, GF_LOG_DEBUG, "%s: gfid differs"
                                " on subvolume %d", path, success_children[i]);
                        conflicting = _gf_true;
                        goto out;
@@ -1632,7 +1635,6 @@ afr_self_heal_lookup_unwind (call_frame_t *frame, xlator_t *this,
         afr_local_t *local = NULL;
         int         ret    = -1;
         dict_t      *xattr = NULL;
-        int32_t     spb    = 0;
 
         local = frame->local;
 
@@ -1663,10 +1665,6 @@ afr_self_heal_lookup_unwind (call_frame_t *frame, xlator_t *this,
                                        local->loc.path,
                                        local->self_heal.actual_sh_started);
                 }
-
-                if (local->loc.inode)
-                        spb = afr_is_split_brain (this, local->loc.inode);
-                ret = dict_set_int32 (xattr, "split-brain", spb);
         }
 out:
         AFR_STACK_UNWIND (lookup, frame, local->op_ret, local->op_errno,
@@ -2578,15 +2576,37 @@ afr_flush_cbk(call_frame_t *frame, void *cookie, xlator_t *this,
         return 0;
 }
 
+static int
+afr_flush_wrapper (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
+{
+        int           i      = 0;
+        afr_local_t   *local = NULL;
+        afr_private_t *priv  = NULL;
+
+        priv = this->private;
+        local = frame->local;
+
+        for (i = 0; i < priv->child_count; i++) {
+                if (local->child_up[i]) {
+                        STACK_WIND_COOKIE (frame, afr_flush_cbk,
+                                           (void *) (long) i,
+                                           priv->children[i],
+                                           priv->children[i]->fops->flush,
+                                           local->fd, NULL);
+                }
+        }
+
+        return 0;
+}
+
 int
 afr_flush (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
         afr_local_t   *local = NULL;
+        call_stub_t   *stub = NULL;
         int            ret        = -1;
         int            op_errno   = 0;
-	int	       call_count = -1;
-	int	       i = 0;
 
         VALIDATE_OR_GOTO (frame, out);
         VALIDATE_OR_GOTO (this, out);
@@ -2602,23 +2622,14 @@ afr_flush (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
 		goto out;
 
 	local->fd = fd_ref(fd);
-        call_count = local->call_count;
-
-	afr_delayed_changelog_wake_up (this, fd);
-
-        for (i = 0; i < priv->child_count; i++) {
-                if (local->child_up[i]) {
-                        STACK_WIND_COOKIE (frame, afr_flush_cbk,
-                                           (void *) (long) i,
-                                           priv->children[i],
-                                           priv->children[i]->fops->flush,
-                                           local->fd, NULL);
-
-                        if (!--call_count)
-                                break;
-                }
+        stub = fop_flush_stub (frame, afr_flush_wrapper, fd, xdata);
+        if (!stub) {
+                ret = -1;
+                op_errno = ENOMEM;
+                goto out;
         }
 
+        afr_delayed_changelog_wake_resume (this, fd, stub);
 	ret = 0;
 
 out:
@@ -2694,6 +2705,16 @@ afr_release (xlator_t *this, fd_t *fd)
 /* {{{ fsync */
 
 int
+afr_fsync_unwind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                      int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
+                      struct iatt *postbuf, dict_t *xdata)
+{
+        AFR_STACK_UNWIND (fsync, frame, op_ret, op_errno, prebuf, postbuf,
+                          xdata);
+        return 0;
+}
+
+int
 afr_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
                struct iatt *postbuf, dict_t *xdata)
@@ -2746,7 +2767,7 @@ afr_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 		   post-op. This guarantee is expected by FUSE graph switching
 		   for example.
 		*/
-		stub = fop_fsync_cbk_stub (frame, default_fsync_cbk,
+		stub = fop_fsync_cbk_stub (frame, afr_fsync_unwind_cbk,
                                            local->op_ret, local->op_errno,
                                            &local->cont.fsync.prebuf,
                                            &local->cont.fsync.postbuf, xdata);
@@ -4462,11 +4483,6 @@ afr_internal_lock_init (afr_internal_lock_t *lk, size_t child_count,
 {
         int             ret = -ENOMEM;
 
-        lk->inode_locked_nodes = GF_CALLOC (sizeof (*lk->inode_locked_nodes),
-                                            child_count, gf_afr_mt_char);
-        if (NULL == lk->inode_locked_nodes)
-                goto out;
-
         lk->locked_nodes = GF_CALLOC (sizeof (*lk->locked_nodes),
                                       child_count, gf_afr_mt_char);
         if (NULL == lk->locked_nodes)
@@ -4525,6 +4541,21 @@ out:
 }
 
 int
+afr_inodelk_init (afr_inodelk_t *lk, char *dom, size_t child_count)
+{
+        int             ret = -ENOMEM;
+
+        lk->domain = dom;
+        lk->locked_nodes = GF_CALLOC (sizeof (*lk->locked_nodes),
+                                      child_count, gf_afr_mt_char);
+        if (NULL == lk->locked_nodes)
+                goto out;
+        ret = 0;
+out:
+        return ret;
+}
+
+int
 afr_transaction_local_init (afr_local_t *local, xlator_t *this)
 {
         int            child_up_count = 0;
@@ -4536,6 +4567,14 @@ afr_transaction_local_init (afr_local_t *local, xlator_t *this)
                                       AFR_TRANSACTION_LK);
         if (ret < 0)
                 goto out;
+
+        if ((local->transaction.type == AFR_DATA_TRANSACTION) ||
+            (local->transaction.type == AFR_METADATA_TRANSACTION)) {
+                ret = afr_inodelk_init (&local->internal_lock.inodelk[0],
+                                        this->name, priv->child_count);
+                if (ret < 0)
+                        goto out;
+        }
 
         ret = -ENOMEM;
         child_up_count = afr_up_children_count (local->child_up,

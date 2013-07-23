@@ -31,17 +31,20 @@ server_statfs_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno, struct statvfs *buf,
                    dict_t *xdata)
 {
-        gfs3_statfs_rsp   rsp = {0,};
-        rpcsvc_request_t *req = NULL;
+        gfs3_statfs_rsp      rsp  = {0,};
+        rpcsvc_request_t    *req  = NULL;
+        server_connection_t *conn = NULL;
 
         req = frame->local;
+
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_WARNING,
-                        "%"PRId64": STATFS (%s)",
+                        "(conn:%s) %"PRId64": STATFS (%s)", conn->id,
                         frame->root->unique, strerror (op_errno));
                 goto out;
         }
@@ -67,16 +70,18 @@ server_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    inode_t *inode, struct iatt *stbuf, dict_t *xdata,
                    struct iatt *postparent)
 {
-        rpcsvc_request_t *req        = NULL;
-        server_state_t   *state      = NULL;
-        inode_t          *root_inode = NULL;
-        inode_t          *link_inode = NULL;
-        loc_t             fresh_loc  = {0,};
-        gfs3_lookup_rsp   rsp        = {0,};
-        uuid_t            rootgfid   = {0,};
+        rpcsvc_request_t    *req        = NULL;
+        server_state_t      *state      = NULL;
+        inode_t             *root_inode = NULL;
+        inode_t             *link_inode = NULL;
+        loc_t                fresh_loc  = {0,};
+        gfs3_lookup_rsp      rsp        = {0,};
+        uuid_t               rootgfid   = {0,};
+        server_connection_t *conn       = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         if (state->is_revalidate == 1 && op_ret == -1) {
                 state->is_revalidate = 2;
@@ -137,16 +142,17 @@ out:
                 if (state->resolve.bname) {
                         gf_log (this->name, ((op_errno == ENOENT) ?
                                              GF_LOG_TRACE : GF_LOG_INFO),
-                                "%"PRId64": LOOKUP %s (%s/%s) ==> (%s)",
-                                frame->root->unique, state->loc.path,
+                                "(conn:%s) %"PRId64": LOOKUP %s (%s/%s) ==> "
+                                "(%s)",conn->id, frame->root->unique,
+                                state->loc.path,
                                 uuid_utoa (state->resolve.pargfid),
                                 state->resolve.bname,
                                 strerror (op_errno));
                 } else {
                         gf_log (this->name, ((op_errno == ENOENT) ?
                                              GF_LOG_TRACE : GF_LOG_INFO),
-                                "%"PRId64": LOOKUP %s (%s) ==> (%s)",
-                                frame->root->unique, state->loc.path,
+                                "(conn:%s) %"PRId64": LOOKUP %s (%s) ==> (%s)",
+                                conn->id, frame->root->unique, state->loc.path,
                                 uuid_utoa (state->resolve.gfid),
                                 strerror (op_errno));
                 }
@@ -166,12 +172,15 @@ server_lk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                int32_t op_ret, int32_t op_errno, struct gf_flock *lock,
                dict_t *xdata)
 {
-        gfs3_lk_rsp       rsp   = {0,};
-        rpcsvc_request_t *req   = NULL;
-        server_state_t   *state = NULL;
+        gfs3_lk_rsp          rsp   = {0,};
+        rpcsvc_request_t    *req   = NULL;
+        server_state_t      *state = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
@@ -179,8 +188,9 @@ server_lk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (op_ret) {
                 if ((op_errno != ENOSYS) && (op_errno != EAGAIN)) {
                         gf_log (this->name, GF_LOG_INFO,
-                                "%"PRId64": LK %"PRId64" (%s) ==> (%s)",
-                                frame->root->unique, state->resolve.fd_no,
+                                "(conn: %s) %"PRId64": LK %"PRId64" (%s) ==> "
+                                "(%s)", conn->id, frame->root->unique,
+                                state->resolve.fd_no,
                                 uuid_utoa (state->resolve.gfid),
                                 strerror (op_errno));
                 }
@@ -237,8 +247,8 @@ server_inodelk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (op_ret < 0) {
                 if ((op_errno != ENOSYS) && (op_errno != EAGAIN)) {
                         gf_log (this->name, GF_LOG_INFO,
-                                "%"PRId64": INODELK %s (%s) ==> (%s)",
-                                frame->root->unique, state->loc.path,
+                                "(conn:%s) %"PRId64": INODELK %s (%s) ==> (%s)",
+                                conn->id, frame->root->unique, state->loc.path,
                                 uuid_utoa (state->resolve.gfid),
                                 strerror (op_errno));
                 }
@@ -287,8 +297,9 @@ server_finodelk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (op_ret < 0) {
                 if ((op_errno != ENOSYS) && (op_errno != EAGAIN)) {
                         gf_log (this->name, GF_LOG_INFO,
-                                "%"PRId64": FINODELK %"PRId64" (%s) ==> (%s)",
-                                frame->root->unique, state->resolve.fd_no,
+                                "(conn:%s) %"PRId64": FINODELK %"PRId64" (%s) "
+                                "==> (%s)", conn->id, frame->root->unique,
+                                state->resolve.fd_no,
                                 uuid_utoa (state->resolve.gfid),
                                 strerror (op_errno));
                 }
@@ -336,8 +347,8 @@ server_entrylk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (op_ret < 0) {
                 if ((op_errno != ENOSYS) && (op_errno != EAGAIN)) {
                         gf_log (this->name, GF_LOG_INFO,
-                                "%"PRId64": ENTRYLK %s (%s) ==> (%s)",
-                                frame->root->unique, state->loc.path,
+                                "(conn:%s) %"PRId64": ENTRYLK %s (%s) ==> (%s)",
+                                conn->id, frame->root->unique, state->loc.path,
                                 uuid_utoa (state->resolve.gfid),
                                 strerror (op_errno));
                 }
@@ -386,7 +397,8 @@ server_fentrylk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (op_ret < 0) {
                 if ((op_errno != ENOSYS) && (op_errno != EAGAIN)) {
                         gf_log (this->name, GF_LOG_INFO,
-                                "%"PRId64": FENTRYLK %"PRId64" (%s) ==>(%s)",
+                                "(conn:%s) %"PRId64": FENTRYLK %"PRId64" (%s) "
+                                "==>(%s)", conn->id,
                                 frame->root->unique, state->resolve.fd_no,
                                 uuid_utoa (state->resolve.gfid),
                                 strerror (op_errno));
@@ -420,20 +432,22 @@ int
 server_access_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
-        gf_common_rsp     rsp = {0,};
-        rpcsvc_request_t *req = NULL;
-        server_state_t   *state = NULL;
+        gf_common_rsp        rsp   = {0,};
+        rpcsvc_request_t    *req   = NULL;
+        server_state_t      *state = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": ACCESS %s (%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": ACCESS %s (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.gfid),
                         strerror (op_errno));
                 goto out;
@@ -456,21 +470,23 @@ server_rmdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno, struct iatt *preparent,
                   struct iatt *postparent, dict_t *xdata)
 {
-        gfs3_rmdir_rsp    rsp    = {0,};
-        server_state_t   *state  = NULL;
-        inode_t          *parent = NULL;
-        rpcsvc_request_t *req    = NULL;
+        gfs3_rmdir_rsp       rsp    = {0,};
+        server_state_t      *state  = NULL;
+        inode_t             *parent = NULL;
+        rpcsvc_request_t    *req    = NULL;
+        server_connection_t *conn   = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": RMDIR %s (%s/%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": RMDIR %s (%s/%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.pargfid),
                         state->resolve.bname, strerror (op_errno));
                 goto out;
@@ -509,21 +525,23 @@ server_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   struct iatt *stbuf, struct iatt *preparent,
                   struct iatt *postparent, dict_t *xdata)
 {
-        gfs3_mkdir_rsp    rsp        = {0,};
-        server_state_t   *state      = NULL;
-        inode_t          *link_inode = NULL;
-        rpcsvc_request_t *req        = NULL;
+        gfs3_mkdir_rsp       rsp        = {0,};
+        server_state_t      *state      = NULL;
+        inode_t             *link_inode = NULL;
+        rpcsvc_request_t    *req        = NULL;
+        server_connection_t *conn       = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": MKDIR %s (%s/%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": MKDIR %s (%s/%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.pargfid),
                         state->resolve.bname, strerror (op_errno));
                 goto out;
@@ -556,21 +574,23 @@ server_mknod_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   inode_t *inode, struct iatt *stbuf, struct iatt *preparent,
                   struct iatt *postparent, dict_t *xdata)
 {
-        gfs3_mknod_rsp    rsp        = {0,};
-        server_state_t   *state      = NULL;
-        inode_t          *link_inode = NULL;
-        rpcsvc_request_t *req        = NULL;
+        gfs3_mknod_rsp       rsp        = {0,};
+        server_state_t      *state      = NULL;
+        inode_t             *link_inode = NULL;
+        rpcsvc_request_t    *req        = NULL;
+        server_connection_t *conn       = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": MKNOD %s (%s/%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": MKNOD %s (%s/%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.pargfid),
                         state->resolve.bname, strerror (op_errno));
                 goto out;
@@ -601,20 +621,22 @@ int
 server_fsyncdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
-        gf_common_rsp     rsp   = {0,};
-        server_state_t   *state = NULL;
-        rpcsvc_request_t *req   = NULL;
+        gf_common_rsp        rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": FSYNCDIR %"PRId64" (%s) ==> (%s)",
-                        frame->root->unique, state->resolve.fd_no,
+                        "(conn:%s) %"PRId64": FSYNCDIR %"PRId64" (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->resolve.fd_no,
                         uuid_utoa (state->resolve.gfid),
                         strerror (op_errno));
                 goto out;
@@ -637,21 +659,23 @@ server_readdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     int32_t op_ret, int32_t op_errno, gf_dirent_t *entries,
                     dict_t *xdata)
 {
-        gfs3_readdir_rsp  rsp   = {0,};
-        server_state_t   *state = NULL;
-        rpcsvc_request_t *req   = NULL;
-        int               ret   = 0;
+        gfs3_readdir_rsp     rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        int                  ret   = 0;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": READDIR %"PRId64" (%s) ==> (%s)",
-                        frame->root->unique, state->resolve.fd_no,
+                        "(conn:%s) %"PRId64": READDIR %"PRId64" (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->resolve.fd_no,
                         uuid_utoa (state->resolve.gfid),
                         strerror (op_errno));
                 goto out;
@@ -700,8 +724,8 @@ server_opendir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": OPENDIR %s (%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": OPENDIR %s (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.gfid), strerror (op_errno));
                 goto out;
         }
@@ -727,19 +751,22 @@ int
 server_removexattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
-        gf_common_rsp     rsp = {0,};
-        rpcsvc_request_t *req = NULL;
-        server_state_t   *state = NULL;
+        gf_common_rsp        rsp   = {0,};
+        rpcsvc_request_t    *req   = NULL;
+        server_state_t      *state = NULL;
+        server_connection_t *conn  = NULL;
 
         req   = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret == -1) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": REMOVEXATTR %s (%s) of key %s ==> (%s)",
+                        "(conn:%s) %"PRId64": REMOVEXATTR %s (%s) of key %s "
+                        "==> (%s)", conn->id,
                         frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.gfid),
                         state->name, strerror (op_errno));
@@ -762,19 +789,22 @@ int
 server_fremovexattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                          int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
-        gf_common_rsp     rsp = {0,};
-        rpcsvc_request_t *req = NULL;
+        gf_common_rsp        rsp   = {0,};
+        rpcsvc_request_t    *req   = NULL;
         server_state_t      *state = NULL;
+        server_connection_t *conn  = NULL;
 
         req   = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret == -1) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": FREMOVEXATTR %"PRId64" (%s) (%s) ==> (%s)",
+                        "(conn:%s) %"PRId64": FREMOVEXATTR %"PRId64" (%s) (%s) "
+                        "==> (%s)", conn->id,
                         frame->root->unique, state->resolve.fd_no,
                         uuid_utoa (state->resolve.gfid), state->name,
                         strerror (op_errno));
@@ -798,12 +828,14 @@ server_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno, dict_t *dict,
                      dict_t *xdata)
 {
-        gfs3_getxattr_rsp  rsp   = {0,};
-        rpcsvc_request_t  *req   = NULL;
-        server_state_t    *state = NULL;
+        gfs3_getxattr_rsp    rsp   = {0,};
+        rpcsvc_request_t    *req   = NULL;
+        server_state_t      *state = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE (frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
@@ -813,8 +845,8 @@ server_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                       (op_errno == ENODATA) ||
                                       (op_errno == ENOENT)) ?
                                      GF_LOG_DEBUG : GF_LOG_INFO),
-                        "%"PRId64": GETXATTR %s (%s) (%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": GETXATTR %s (%s) (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.gfid),
                         state->name, strerror (op_errno));
                 goto out;
@@ -843,12 +875,14 @@ server_fgetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                       int32_t op_ret, int32_t op_errno, dict_t *dict,
                       dict_t *xdata)
 {
-        gfs3_fgetxattr_rsp  rsp   = {0,};
-        server_state_t     *state = NULL;
-        rpcsvc_request_t   *req   = NULL;
+        gfs3_fgetxattr_rsp   rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE (frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
@@ -856,7 +890,8 @@ server_fgetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (op_ret == -1) {
                 gf_log (this->name, ((op_errno == ENOTSUP) ?
                                      GF_LOG_DEBUG : GF_LOG_INFO),
-                        "%"PRId64": FGETXATTR %"PRId64" (%s) (%s) ==> (%s)",
+                        "(conn:%s) %"PRId64": FGETXATTR %"PRId64" (%s) (%s) "
+                        "==> (%s)", conn->id,
                         frame->root->unique, state->resolve.fd_no,
                         uuid_utoa (state->resolve.gfid),
                         state->name, strerror (op_errno));
@@ -886,15 +921,17 @@ static int
 _gf_server_log_setxattr_failure (dict_t *d, char *k, data_t *v,
                                  void *tmp)
 {
-        server_state_t *state = NULL;
-        call_frame_t   *frame = NULL;
+        server_state_t      *state = NULL;
+        call_frame_t        *frame = NULL;
+        server_connection_t *conn  = NULL;
 
         frame = tmp;
+        conn = SERVER_CONNECTION (frame);
         state = CALL_STATE(frame);
 
         gf_log (THIS->name, GF_LOG_INFO,
-                "%"PRId64": SETXATTR %s (%s) ==> %s",
-                frame->root->unique, state->loc.path,
+                "(conn:%s) %"PRId64": SETXATTR %s (%s) ==> %s",
+                conn->id, frame->root->unique, state->loc.path,
                 uuid_utoa (state->resolve.gfid), k);
         return 0;
 }
@@ -942,15 +979,17 @@ static int
 _gf_server_log_fsetxattr_failure (dict_t *d, char *k, data_t *v,
                                  void *tmp)
 {
-        call_frame_t   *frame = NULL;
-        server_state_t *state = NULL;
+        call_frame_t        *frame = NULL;
+        server_state_t      *state = NULL;
+        server_connection_t *conn  = NULL;
 
         frame = tmp;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         gf_log (THIS->name, GF_LOG_INFO,
-                "%"PRId64": FSETXATTR %"PRId64" (%s) ==> %s",
-                frame->root->unique, state->resolve.fd_no,
+                "(conn:%s) %"PRId64": FSETXATTR %"PRId64" (%s) ==> %s",
+                conn->id, frame->root->unique, state->resolve.fd_no,
                 uuid_utoa (state->resolve.gfid), k);
 
         return 0;
@@ -1001,16 +1040,18 @@ server_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    struct iatt *prenewparent, struct iatt *postnewparent,
                    dict_t *xdata)
 {
-        gfs3_rename_rsp   rsp   = {0,};
-        server_state_t   *state = NULL;
-        rpcsvc_request_t *req   = NULL;
-        inode_t     *tmp_inode = NULL;
-        inode_t     *tmp_parent = NULL;
-        char         oldpar_str[50] = {0,};
-        char         newpar_str[50] = {0,};
+        gfs3_rename_rsp      rsp        = {0,};
+        server_state_t      *state      = NULL;
+        rpcsvc_request_t    *req        = NULL;
+        inode_t             *tmp_inode  = NULL;
+        inode_t             *tmp_parent = NULL;
+        char         oldpar_str[50]     = {0,};
+        char         newpar_str[50]     = {0,};
+        server_connection_t *conn       = NULL;
 
         req   = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
@@ -1019,7 +1060,8 @@ server_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 uuid_utoa_r (state->resolve.gfid, oldpar_str);
                 uuid_utoa_r (state->resolve2.gfid, newpar_str);
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": RENAME %s (%s/%s) -> %s (%s/%s) ==> (%s)",
+                        "(conn:%s) %"PRId64": RENAME %s (%s/%s) -> %s (%s/%s) "
+                        "==> (%s)", conn->id,
                         frame->root->unique, state->loc.path,
                         oldpar_str, state->resolve.bname, state->loc2.path,
                         newpar_str, state->resolve2.bname, strerror (op_errno));
@@ -1030,7 +1072,7 @@ server_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         /* TODO: log gfid of the inodes */
         gf_log (state->conn->bound_xl->name, GF_LOG_TRACE,
-                "%"PRId64": RENAME_CBK  %s ==> %s",
+                "(conn:%s) %"PRId64": RENAME_CBK  %s ==> %s", conn->id,
                 frame->root->unique, state->loc.name, state->loc2.name);
 
         /* Before renaming the inode, we have to get the inode for the
@@ -1084,13 +1126,15 @@ server_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno, struct iatt *preparent,
                    struct iatt *postparent, dict_t *xdata)
 {
-        gfs3_unlink_rsp   rsp    = {0,};
-        server_state_t   *state  = NULL;
-        inode_t          *parent = NULL;
-        rpcsvc_request_t *req    = NULL;
+        gfs3_unlink_rsp      rsp    = {0,};
+        server_state_t      *state  = NULL;
+        inode_t             *parent = NULL;
+        rpcsvc_request_t    *req    = NULL;
+        server_connection_t *conn   = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
@@ -1098,8 +1142,8 @@ server_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (op_ret) {
                 gf_log (this->name, (op_errno == ENOENT)?
                         GF_LOG_DEBUG:GF_LOG_ERROR,
-                        "%"PRId64": UNLINK %s (%s/%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": UNLINK %s (%s/%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.pargfid),
                         state->resolve.bname, strerror (op_errno));
                 goto out;
@@ -1107,7 +1151,7 @@ server_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         /* TODO: log gfid of the inodes */
         gf_log (state->conn->bound_xl->name, GF_LOG_TRACE,
-                "%"PRId64": UNLINK_CBK %s",
+                "(conn:%s) %"PRId64": UNLINK_CBK %s", conn->id,
                 frame->root->unique, state->loc.name);
 
         inode_unlink (state->loc.inode, state->loc.parent,
@@ -1140,21 +1184,23 @@ server_symlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     struct iatt *stbuf, struct iatt *preparent,
                     struct iatt *postparent, dict_t *xdata)
 {
-        gfs3_symlink_rsp  rsp        = {0,};
-        server_state_t   *state      = NULL;
-        inode_t          *link_inode = NULL;
-        rpcsvc_request_t *req        = NULL;
+        gfs3_symlink_rsp     rsp        = {0,};
+        server_state_t      *state      = NULL;
+        inode_t             *link_inode = NULL;
+        rpcsvc_request_t    *req        = NULL;
+        server_connection_t *conn       = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": SYMLINK %s (%s/%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": SYMLINK %s (%s/%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.pargfid),
                         state->resolve.bname, strerror (op_errno));
                 goto out;
@@ -1188,15 +1234,17 @@ server_link_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                  struct iatt *stbuf, struct iatt *preparent,
                  struct iatt *postparent, dict_t *xdata)
 {
-        gfs3_link_rsp     rsp        = {0,};
-        server_state_t   *state      = NULL;
-        inode_t          *link_inode = NULL;
-        rpcsvc_request_t *req        = NULL;
+        gfs3_link_rsp        rsp         = {0,};
+        server_state_t      *state       = NULL;
+        inode_t             *link_inode  = NULL;
+        rpcsvc_request_t    *req         = NULL;
         char              gfid_str[50]   = {0,};
         char              newpar_str[50] = {0,};
+        server_connection_t *conn        = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
@@ -1206,9 +1254,10 @@ server_link_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 uuid_utoa_r (state->resolve2.pargfid, newpar_str);
 
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": LINK %s (%s) -> %s/%s ==> (%s)",
-                        frame->root->unique, state->loc.path, gfid_str,
-                        newpar_str, state->resolve2.bname, strerror (op_errno));
+                        "(conn:%s) %"PRId64": LINK %s (%s) -> %s/%s ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
+                        gfid_str, newpar_str, state->resolve2.bname,
+                        strerror (op_errno));
                 goto out;
         }
 
@@ -1237,20 +1286,22 @@ server_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
                      struct iatt *postbuf, dict_t *xdata)
 {
-        gfs3_truncate_rsp  rsp   = {0,};
-        server_state_t    *state = NULL;
-        rpcsvc_request_t  *req   = NULL;
+        gfs3_truncate_rsp    rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE (frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": TRUNCATE %s (%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": TRUNCATE %s (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.gfid), strerror (op_errno));
                 goto out;
         }
@@ -1275,20 +1326,22 @@ server_fstat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno, struct iatt *stbuf,
                   dict_t *xdata)
 {
-        gfs3_fstat_rsp    rsp   = {0,};
-        server_state_t   *state = NULL;
-        rpcsvc_request_t *req   = NULL;
+        gfs3_fstat_rsp       rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": FSTAT %"PRId64" (%s) ==> (%s)",
-                        frame->root->unique, state->resolve.fd_no,
+                        "(conn:%s) %"PRId64": FSTAT %"PRId64" (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->resolve.fd_no,
                         uuid_utoa (state->resolve.gfid), strerror (op_errno));
                 goto out;
         }
@@ -1312,20 +1365,22 @@ server_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                       int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
                       struct iatt *postbuf, dict_t *xdata)
 {
-        gfs3_ftruncate_rsp  rsp   = {0};
-        server_state_t     *state = NULL;
-        rpcsvc_request_t   *req   = NULL;
+        gfs3_ftruncate_rsp   rsp   = {0};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE (frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": FTRUNCATE %"PRId64" (%s)==> (%s)",
-                        frame->root->unique, state->resolve.fd_no,
+                        "(conn:%s) %"PRId64": FTRUNCATE %"PRId64" (%s)==> (%s)",
+                        conn->id, frame->root->unique, state->resolve.fd_no,
                         uuid_utoa (state->resolve.gfid), strerror (op_errno));
                 goto out;
         }
@@ -1349,20 +1404,22 @@ int
 server_flush_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
-        gf_common_rsp     rsp   = {0,};
-        server_state_t   *state = NULL;
-        rpcsvc_request_t *req   = NULL;
+        gf_common_rsp        rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": FLUSH %"PRId64" (%s) ==>  (%s)",
-                        frame->root->unique, state->resolve.fd_no,
+                        "(conn:%s) %"PRId64": FLUSH %"PRId64" (%s) ==>  (%s)",
+                        conn->id, frame->root->unique, state->resolve.fd_no,
                          uuid_utoa (state->resolve.gfid), strerror (op_errno));
                 goto out;
         }
@@ -1384,20 +1441,22 @@ server_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
                   struct iatt *postbuf, dict_t *xdata)
 {
-        gfs3_fsync_rsp    rsp   = {0,};
-        server_state_t   *state = NULL;
-        rpcsvc_request_t *req   = NULL;
+        gfs3_fsync_rsp       rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": FSYNC %"PRId64" (%s) ==> (%s)",
-                        frame->root->unique, state->resolve.fd_no,
+                        "(conn:%s) %"PRId64": FSYNC %"PRId64" (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->resolve.fd_no,
                         uuid_utoa (state->resolve.gfid), strerror (op_errno));
                 goto out;
         }
@@ -1422,20 +1481,22 @@ server_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
                    struct iatt *postbuf, dict_t *xdata)
 {
-        gfs3_write_rsp    rsp   = {0,};
-        server_state_t   *state = NULL;
-        rpcsvc_request_t *req   = NULL;
+        gfs3_write_rsp       rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": WRITEV %"PRId64" (%s) ==> (%s)",
-                        frame->root->unique, state->resolve.fd_no,
+                        "(conn:%s) %"PRId64": WRITEV %"PRId64" (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->resolve.fd_no,
                          uuid_utoa (state->resolve.gfid), strerror (op_errno));
                 goto out;
         }
@@ -1462,12 +1523,14 @@ server_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   struct iovec *vector, int32_t count,
                   struct iatt *stbuf, struct iobref *iobref, dict_t *xdata)
 {
-        gfs3_read_rsp     rsp   = {0,};
-        server_state_t   *state = NULL;
-        rpcsvc_request_t *req   = NULL;
+        gfs3_read_rsp        rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
 #ifdef GF_TESTING_IO_XDATA
         {
@@ -1484,8 +1547,8 @@ server_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": READV %"PRId64" (%s) ==> (%s)",
-                        frame->root->unique, state->resolve.fd_no,
+                        "(conn:%s) %"PRId64": READV %"PRId64" (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->resolve.fd_no,
                         uuid_utoa (state->resolve.gfid), strerror (op_errno));
                 goto out;
         }
@@ -1511,20 +1574,22 @@ server_rchecksum_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                       uint32_t weak_checksum, uint8_t *strong_checksum,
                       dict_t *xdata)
 {
-        gfs3_rchecksum_rsp  rsp = {0,};
-        rpcsvc_request_t   *req = NULL;
+        gfs3_rchecksum_rsp   rsp   = {0,};
+        rpcsvc_request_t    *req   = NULL;
         server_state_t      *state = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": RCHECKSUM %"PRId64" (%s)==> (%s)",
-                        frame->root->unique, state->resolve.fd_no,
+                        "(conn:%s) %"PRId64": RCHECKSUM %"PRId64" (%s)==> (%s)",
+                        conn->id, frame->root->unique, state->resolve.fd_no,
                         uuid_utoa (state->resolve.gfid), strerror (op_errno));
                 goto out;
         }
@@ -1566,8 +1631,8 @@ server_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": OPEN %s (%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": OPEN %s (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.gfid),
                         strerror (op_errno));
                 goto out;
@@ -1612,8 +1677,8 @@ server_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": CREATE %s (%s/%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": CREATE %s (%s/%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.pargfid),
                         state->resolve.bname, strerror (op_errno));
                 goto out;
@@ -1621,8 +1686,8 @@ server_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         /* TODO: log gfid too */
         gf_log (state->conn->bound_xl->name, GF_LOG_TRACE,
-                "%"PRId64": CREATE %s (%s)",
-                frame->root->unique, state->loc.name,
+                "(conn:%s) %"PRId64": CREATE %s (%s)",
+                conn->id, frame->root->unique, state->loc.name,
                 uuid_utoa (stbuf->ia_gfid));
 
         link_inode = inode_link (inode, state->loc.parent,
@@ -1679,20 +1744,22 @@ server_readlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno, const char *buf,
                      struct iatt *stbuf, dict_t *xdata)
 {
-        gfs3_readlink_rsp  rsp   = {0,};
-        server_state_t    *state = NULL;
-        rpcsvc_request_t  *req   = NULL;
+        gfs3_readlink_rsp    rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": READLINK %s (%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": READLINK %s (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.gfid),
                         strerror (op_errno));
                 goto out;
@@ -1721,20 +1788,22 @@ server_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                  int32_t op_ret, int32_t op_errno, struct iatt *stbuf,
                  dict_t *xdata)
 {
-        gfs3_stat_rsp     rsp   = {0,};
-        server_state_t   *state = NULL;
-        rpcsvc_request_t *req   = NULL;
+        gfs3_stat_rsp        rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state  = CALL_STATE (frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": STAT %s (%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": STAT %s (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.gfid),
                         strerror (op_errno));
                 goto out;
@@ -1760,20 +1829,22 @@ server_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     int32_t op_ret, int32_t op_errno,
                     struct iatt *statpre, struct iatt *statpost, dict_t *xdata)
 {
-        gfs3_setattr_rsp  rsp   = {0,};
-        server_state_t   *state = NULL;
-        rpcsvc_request_t *req   = NULL;
+        gfs3_setattr_rsp     rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE (frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": SETATTR %s (%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": SETATTR %s (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.gfid),
                         strerror (op_errno));
                 goto out;
@@ -1799,20 +1870,22 @@ server_fsetattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno,
                      struct iatt *statpre, struct iatt *statpost, dict_t *xdata)
 {
-        gfs3_fsetattr_rsp  rsp   = {0,};
-        server_state_t    *state = NULL;
-        rpcsvc_request_t  *req   = NULL;
+        gfs3_fsetattr_rsp    rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state  = CALL_STATE (frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": FSETATTR %"PRId64" (%s) ==> (%s)",
-                        frame->root->unique, state->resolve.fd_no,
+                        "(conn:%s) %"PRId64": FSETATTR %"PRId64" (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->resolve.fd_no,
                         uuid_utoa (state->resolve.gfid),
                         strerror (op_errno));
                 goto out;
@@ -1839,20 +1912,22 @@ server_xattrop_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     int32_t op_ret, int32_t op_errno, dict_t *dict,
                     dict_t *xdata)
 {
-        gfs3_xattrop_rsp  rsp   = {0,};
-        server_state_t   *state = NULL;
-        rpcsvc_request_t *req   = NULL;
+        gfs3_xattrop_rsp     rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE (frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": XATTROP %s (%s) ==> (%s)",
-                        frame->root->unique, state->loc.path,
+                        "(conn:%s) %"PRId64": XATTROP %s (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->loc.path,
                         uuid_utoa (state->resolve.gfid),
                         strerror (op_errno));
                 goto out;
@@ -1881,20 +1956,22 @@ server_fxattrop_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno, dict_t *dict,
                      dict_t *xdata)
 {
-        gfs3_xattrop_rsp  rsp   = {0,};
-        server_state_t   *state = NULL;
-        rpcsvc_request_t *req   = NULL;
+        gfs3_xattrop_rsp     rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": FXATTROP %"PRId64" (%s) ==> (%s)",
-                        frame->root->unique, state->resolve.fd_no,
+                        "(conn:%s) %"PRId64": FXATTROP %"PRId64" (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->resolve.fd_no,
                         uuid_utoa (state->resolve.gfid),
                         strerror (op_errno));
                 goto out;
@@ -1920,23 +1997,26 @@ out:
 
 int
 server_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                     int32_t op_ret, int32_t op_errno, gf_dirent_t *entries, dict_t *xdata)
+                     int32_t op_ret, int32_t op_errno, gf_dirent_t *entries,
+                     dict_t *xdata)
 {
-        gfs3_readdirp_rsp  rsp   = {0,};
-        server_state_t    *state = NULL;
-        rpcsvc_request_t  *req   = NULL;
-        int                ret   = 0;
+        gfs3_readdirp_rsp    rsp   = {0,};
+        server_state_t      *state = NULL;
+        rpcsvc_request_t    *req   = NULL;
+        int                  ret   = 0;
+        server_connection_t *conn  = NULL;
 
         req = frame->local;
         state = CALL_STATE(frame);
+        conn = SERVER_CONNECTION (frame);
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
         if (op_ret < 0) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": READDIRP %"PRId64" (%s) ==> (%s)",
-                        frame->root->unique, state->resolve.fd_no,
+                        "(conn:%s) %"PRId64": READDIRP %"PRId64" (%s) ==> (%s)",
+                        conn->id, frame->root->unique, state->resolve.fd_no,
                         uuid_utoa (state->resolve.gfid),
                         strerror (op_errno));
                 goto out;
@@ -5946,52 +6026,52 @@ out:
 
 
 rpcsvc_actor_t glusterfs3_3_fop_actors[] = {
-        [GFS3_OP_NULL]        = { "NULL",       GFS3_OP_NULL, server_null, NULL, 0},
-        [GFS3_OP_STAT]        = { "STAT",       GFS3_OP_STAT, server3_3_stat, NULL, 0},
-        [GFS3_OP_READLINK]    = { "READLINK",   GFS3_OP_READLINK, server3_3_readlink, NULL, 0},
-        [GFS3_OP_MKNOD]       = { "MKNOD",      GFS3_OP_MKNOD, server3_3_mknod, NULL, 0},
-        [GFS3_OP_MKDIR]       = { "MKDIR",      GFS3_OP_MKDIR, server3_3_mkdir, NULL, 0},
-        [GFS3_OP_UNLINK]      = { "UNLINK",     GFS3_OP_UNLINK, server3_3_unlink, NULL, 0},
-        [GFS3_OP_RMDIR]       = { "RMDIR",      GFS3_OP_RMDIR, server3_3_rmdir, NULL, 0},
-        [GFS3_OP_SYMLINK]     = { "SYMLINK",    GFS3_OP_SYMLINK, server3_3_symlink, NULL, 0},
-        [GFS3_OP_RENAME]      = { "RENAME",     GFS3_OP_RENAME, server3_3_rename, NULL, 0},
-        [GFS3_OP_LINK]        = { "LINK",       GFS3_OP_LINK, server3_3_link, NULL, 0},
-        [GFS3_OP_TRUNCATE]    = { "TRUNCATE",   GFS3_OP_TRUNCATE, server3_3_truncate, NULL, 0},
-        [GFS3_OP_OPEN]        = { "OPEN",       GFS3_OP_OPEN, server3_3_open, NULL, 0},
-        [GFS3_OP_READ]        = { "READ",       GFS3_OP_READ, server3_3_readv, NULL, 0},
-        [GFS3_OP_WRITE]       = { "WRITE",      GFS3_OP_WRITE, server3_3_writev, server3_3_writev_vecsizer, 0},
-        [GFS3_OP_STATFS]      = { "STATFS",     GFS3_OP_STATFS, server3_3_statfs, NULL, 0},
-        [GFS3_OP_FLUSH]       = { "FLUSH",      GFS3_OP_FLUSH, server3_3_flush, NULL, 0},
-        [GFS3_OP_FSYNC]       = { "FSYNC",      GFS3_OP_FSYNC, server3_3_fsync, NULL, 0},
-        [GFS3_OP_SETXATTR]    = { "SETXATTR",   GFS3_OP_SETXATTR, server3_3_setxattr, NULL, 0},
-        [GFS3_OP_GETXATTR]    = { "GETXATTR",   GFS3_OP_GETXATTR, server3_3_getxattr, NULL, 0},
-        [GFS3_OP_REMOVEXATTR] = { "REMOVEXATTR", GFS3_OP_REMOVEXATTR, server3_3_removexattr, NULL, 0},
-        [GFS3_OP_OPENDIR]     = { "OPENDIR",    GFS3_OP_OPENDIR, server3_3_opendir, NULL, 0},
-        [GFS3_OP_FSYNCDIR]    = { "FSYNCDIR",   GFS3_OP_FSYNCDIR, server3_3_fsyncdir, NULL, 0},
-        [GFS3_OP_ACCESS]      = { "ACCESS",     GFS3_OP_ACCESS, server3_3_access, NULL, 0},
-        [GFS3_OP_CREATE]      = { "CREATE",     GFS3_OP_CREATE, server3_3_create, NULL, 0},
-        [GFS3_OP_FTRUNCATE]   = { "FTRUNCATE",  GFS3_OP_FTRUNCATE, server3_3_ftruncate, NULL, 0},
-        [GFS3_OP_FSTAT]       = { "FSTAT",      GFS3_OP_FSTAT, server3_3_fstat, NULL, 0},
-        [GFS3_OP_LK]          = { "LK",         GFS3_OP_LK, server3_3_lk, NULL, 0},
-        [GFS3_OP_LOOKUP]      = { "LOOKUP",     GFS3_OP_LOOKUP, server3_3_lookup, NULL, 0},
-        [GFS3_OP_READDIR]     = { "READDIR",    GFS3_OP_READDIR, server3_3_readdir, NULL, 0},
-        [GFS3_OP_INODELK]     = { "INODELK",    GFS3_OP_INODELK, server3_3_inodelk, NULL, 0},
-        [GFS3_OP_FINODELK]    = { "FINODELK",   GFS3_OP_FINODELK, server3_3_finodelk, NULL, 0},
-        [GFS3_OP_ENTRYLK]     = { "ENTRYLK",    GFS3_OP_ENTRYLK, server3_3_entrylk, NULL, 0},
-        [GFS3_OP_FENTRYLK]    = { "FENTRYLK",   GFS3_OP_FENTRYLK, server3_3_fentrylk, NULL, 0},
-        [GFS3_OP_XATTROP]     = { "XATTROP",    GFS3_OP_XATTROP, server3_3_xattrop, NULL, 0},
-        [GFS3_OP_FXATTROP]    = { "FXATTROP",   GFS3_OP_FXATTROP, server3_3_fxattrop, NULL, 0},
-        [GFS3_OP_FGETXATTR]   = { "FGETXATTR",  GFS3_OP_FGETXATTR, server3_3_fgetxattr, NULL, 0},
-        [GFS3_OP_FSETXATTR]   = { "FSETXATTR",  GFS3_OP_FSETXATTR, server3_3_fsetxattr, NULL, 0},
-        [GFS3_OP_RCHECKSUM]   = { "RCHECKSUM",  GFS3_OP_RCHECKSUM, server3_3_rchecksum, NULL, 0},
-        [GFS3_OP_SETATTR]     = { "SETATTR",    GFS3_OP_SETATTR, server3_3_setattr, NULL, 0},
-        [GFS3_OP_FSETATTR]    = { "FSETATTR",   GFS3_OP_FSETATTR, server3_3_fsetattr, NULL, 0},
-        [GFS3_OP_READDIRP]    = { "READDIRP",   GFS3_OP_READDIRP, server3_3_readdirp, NULL, 0},
-	[GFS3_OP_FALLOCATE]    = { "FALLOCATE",	GFS3_OP_FALLOCATE, server3_3_fallocate, NULL, 0},
-	[GFS3_OP_DISCARD]     = { "DISCARD",	GFS3_OP_DISCARD, server3_3_discard, NULL, 0},
-        [GFS3_OP_RELEASE]     = { "RELEASE",    GFS3_OP_RELEASE, server3_3_release, NULL, 0},
-        [GFS3_OP_RELEASEDIR]  = { "RELEASEDIR", GFS3_OP_RELEASEDIR, server3_3_releasedir, NULL, 0},
-        [GFS3_OP_FREMOVEXATTR] = { "FREMOVEXATTR", GFS3_OP_FREMOVEXATTR, server3_3_fremovexattr, NULL, 0},
+        [GFS3_OP_NULL]         = {"NULL",         GFS3_OP_NULL,         server_null,            NULL, 0, DRC_NA},
+        [GFS3_OP_STAT]         = {"STAT",         GFS3_OP_STAT,         server3_3_stat,         NULL, 0, DRC_NA},
+        [GFS3_OP_READLINK]     = {"READLINK",     GFS3_OP_READLINK,     server3_3_readlink,     NULL, 0, DRC_NA},
+        [GFS3_OP_MKNOD]        = {"MKNOD",        GFS3_OP_MKNOD,        server3_3_mknod,        NULL, 0, DRC_NA},
+        [GFS3_OP_MKDIR]        = {"MKDIR",        GFS3_OP_MKDIR,        server3_3_mkdir,        NULL, 0, DRC_NA},
+        [GFS3_OP_UNLINK]       = {"UNLINK",       GFS3_OP_UNLINK,       server3_3_unlink,       NULL, 0, DRC_NA},
+        [GFS3_OP_RMDIR]        = {"RMDIR",        GFS3_OP_RMDIR,        server3_3_rmdir,        NULL, 0, DRC_NA},
+        [GFS3_OP_SYMLINK]      = {"SYMLINK",      GFS3_OP_SYMLINK,      server3_3_symlink,      NULL, 0, DRC_NA},
+        [GFS3_OP_RENAME]       = {"RENAME",       GFS3_OP_RENAME,       server3_3_rename,       NULL, 0, DRC_NA},
+        [GFS3_OP_LINK]         = {"LINK",         GFS3_OP_LINK,         server3_3_link,         NULL, 0, DRC_NA},
+        [GFS3_OP_TRUNCATE]     = {"TRUNCATE",     GFS3_OP_TRUNCATE,     server3_3_truncate,     NULL, 0, DRC_NA},
+        [GFS3_OP_OPEN]         = {"OPEN",         GFS3_OP_OPEN,         server3_3_open,         NULL, 0, DRC_NA},
+        [GFS3_OP_READ]         = {"READ",         GFS3_OP_READ,         server3_3_readv,        NULL, 0, DRC_NA},
+        [GFS3_OP_WRITE]        = {"WRITE",        GFS3_OP_WRITE,        server3_3_writev,       server3_3_writev_vecsizer, 0, DRC_NA},
+        [GFS3_OP_STATFS]       = {"STATFS",       GFS3_OP_STATFS,       server3_3_statfs,       NULL, 0, DRC_NA},
+        [GFS3_OP_FLUSH]        = {"FLUSH",        GFS3_OP_FLUSH,        server3_3_flush,        NULL, 0, DRC_NA},
+        [GFS3_OP_FSYNC]        = {"FSYNC",        GFS3_OP_FSYNC,        server3_3_fsync,        NULL, 0, DRC_NA},
+        [GFS3_OP_SETXATTR]     = {"SETXATTR",     GFS3_OP_SETXATTR,     server3_3_setxattr,     NULL, 0, DRC_NA},
+        [GFS3_OP_GETXATTR]     = {"GETXATTR",     GFS3_OP_GETXATTR,     server3_3_getxattr,     NULL, 0, DRC_NA},
+        [GFS3_OP_REMOVEXATTR]  = {"REMOVEXATTR",  GFS3_OP_REMOVEXATTR,  server3_3_removexattr,  NULL, 0, DRC_NA},
+        [GFS3_OP_OPENDIR]      = {"OPENDIR",      GFS3_OP_OPENDIR,      server3_3_opendir,      NULL, 0, DRC_NA},
+        [GFS3_OP_FSYNCDIR]     = {"FSYNCDIR",     GFS3_OP_FSYNCDIR,     server3_3_fsyncdir,     NULL, 0, DRC_NA},
+        [GFS3_OP_ACCESS]       = {"ACCESS",       GFS3_OP_ACCESS,       server3_3_access,       NULL, 0, DRC_NA},
+        [GFS3_OP_CREATE]       = {"CREATE",       GFS3_OP_CREATE,       server3_3_create,       NULL, 0, DRC_NA},
+        [GFS3_OP_FTRUNCATE]    = {"FTRUNCATE",    GFS3_OP_FTRUNCATE,    server3_3_ftruncate,    NULL, 0, DRC_NA},
+        [GFS3_OP_FSTAT]        = {"FSTAT",        GFS3_OP_FSTAT,        server3_3_fstat,        NULL, 0, DRC_NA},
+        [GFS3_OP_LK]           = {"LK",           GFS3_OP_LK,           server3_3_lk,           NULL, 0, DRC_NA},
+        [GFS3_OP_LOOKUP]       = {"LOOKUP",       GFS3_OP_LOOKUP,       server3_3_lookup,       NULL, 0, DRC_NA},
+        [GFS3_OP_READDIR]      = {"READDIR",      GFS3_OP_READDIR,      server3_3_readdir,      NULL, 0, DRC_NA},
+        [GFS3_OP_INODELK]      = {"INODELK",      GFS3_OP_INODELK,      server3_3_inodelk,      NULL, 0, DRC_NA},
+        [GFS3_OP_FINODELK]     = {"FINODELK",     GFS3_OP_FINODELK,     server3_3_finodelk,     NULL, 0, DRC_NA},
+        [GFS3_OP_ENTRYLK]      = {"ENTRYLK",      GFS3_OP_ENTRYLK,      server3_3_entrylk,      NULL, 0, DRC_NA},
+        [GFS3_OP_FENTRYLK]     = {"FENTRYLK",     GFS3_OP_FENTRYLK,     server3_3_fentrylk,     NULL, 0, DRC_NA},
+        [GFS3_OP_XATTROP]      = {"XATTROP",      GFS3_OP_XATTROP,      server3_3_xattrop,      NULL, 0, DRC_NA},
+        [GFS3_OP_FXATTROP]     = {"FXATTROP",     GFS3_OP_FXATTROP,     server3_3_fxattrop,     NULL, 0, DRC_NA},
+        [GFS3_OP_FGETXATTR]    = {"FGETXATTR",    GFS3_OP_FGETXATTR,    server3_3_fgetxattr,    NULL, 0, DRC_NA},
+        [GFS3_OP_FSETXATTR]    = {"FSETXATTR",    GFS3_OP_FSETXATTR,    server3_3_fsetxattr,    NULL, 0, DRC_NA},
+        [GFS3_OP_RCHECKSUM]    = {"RCHECKSUM",    GFS3_OP_RCHECKSUM,    server3_3_rchecksum,    NULL, 0, DRC_NA},
+        [GFS3_OP_SETATTR]      = {"SETATTR",      GFS3_OP_SETATTR,      server3_3_setattr,      NULL, 0, DRC_NA},
+        [GFS3_OP_FSETATTR]     = {"FSETATTR",     GFS3_OP_FSETATTR,     server3_3_fsetattr,     NULL, 0, DRC_NA},
+        [GFS3_OP_READDIRP]     = {"READDIRP",     GFS3_OP_READDIRP,     server3_3_readdirp,     NULL, 0, DRC_NA},
+        [GFS3_OP_RELEASE]      = {"RELEASE",      GFS3_OP_RELEASE,      server3_3_release,      NULL, 0, DRC_NA},
+        [GFS3_OP_RELEASEDIR]   = {"RELEASEDIR",   GFS3_OP_RELEASEDIR,   server3_3_releasedir,   NULL, 0, DRC_NA},
+        [GFS3_OP_FREMOVEXATTR] = {"FREMOVEXATTR", GFS3_OP_FREMOVEXATTR, server3_3_fremovexattr, NULL, 0, DRC_NA},
+	[GFS3_OP_FALLOCATE]    = {"FALLOCATE",	  GFS3_OP_FALLOCATE,    server3_3_fallocate,    NULL, 0, DRC_NA},
+	[GFS3_OP_DISCARD]      = {"DISCARD",	  GFS3_OP_DISCARD,      server3_3_discard,      NULL, 0, DRC_NA},
 };
 
 

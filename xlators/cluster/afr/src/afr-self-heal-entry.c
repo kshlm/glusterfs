@@ -162,7 +162,7 @@ afr_sh_entry_erase_pending (call_frame_t *frame, xlator_t *this)
         sh = &local->self_heal;
 
         if (sh->entries_skipped) {
-                sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
+                afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
                 goto out;
         }
         afr_sh_erase_pending (frame, this, AFR_ENTRY_TRANSACTION,
@@ -799,7 +799,7 @@ afr_sh_entry_expunge_all (call_frame_t *frame, xlator_t *this)
         active_src = next_active_sink (frame, this, sh->active_source);
         sh->active_source = active_src;
 
-        if (is_self_heal_failed (sh)) {
+        if (is_self_heal_failed (sh, AFR_CHECK_SPECIFIC)) {
                 goto out;
         }
 
@@ -1255,6 +1255,35 @@ afr_sh_entry_impunge_mknod (call_frame_t *impunge_frame, xlator_t *this,
         if (ret)
                 gf_log (this->name, GF_LOG_INFO, "%s: gfid set failed",
                         impunge_local->loc.path);
+
+        /*
+         * Reason for adding GLUSTERFS_INTERNAL_FOP_KEY :
+         *
+         * Problem:
+         * While a brick is down in a replica pair, lets say the user creates
+         * one file(file-A) and a hard link to that file(h-file-A). After the
+         * brick comes back up, entry self-heal is attempted on parent dir of
+         * these two files. As part of readdir in self-heal it reads both the
+         * entries file-A and h-file-A for both of them it does name less lookup
+         * to check if there are any hardlinks already present in the
+         * destination brick. It finds that there are no hard links already
+         * present for files file-A, h-file-A. Self-heal does mknods for both
+         * file-A and h-file-A. This leads to file-A and h-file-A not being
+         * hardlinks anymore.
+         *
+         * Fix: (More like shrinking of race-window, the race itself is still
+         * present in posix-mknod).
+         * If mknod comes with the presence of GLUSTERFS_INTERNAL_FOP_KEY then
+         * posix_mknod checks if there are already any gfid-links and does
+         * link() instead of mknod. There still can be a race where two
+         * posix_mknods same gfid see that
+         * gfid-link file is not present and proceeds with mknods and result in
+         * two different files with same gfid.
+         */
+        ret = dict_set_str (dict, GLUSTERFS_INTERNAL_FOP_KEY, "yes");
+        if (ret)
+                gf_log (this->name, GF_LOG_INFO, "%s: %s set failed",
+                        impunge_local->loc.path, GLUSTERFS_INTERNAL_FOP_KEY);
 
         STACK_WIND_COOKIE (impunge_frame, afr_sh_entry_impunge_newfile_cbk,
                            (void *) (long) child_index,
@@ -1946,7 +1975,7 @@ afr_sh_entry_impunge_readdir_cbk (call_frame_t *frame, void *cookie,
                                 local->loc.path,
                                 priv->children[active_src]->name,
                                 strerror (op_errno));
-                        sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
+                        afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
                 } else {
                         gf_log (this->name, GF_LOG_TRACE,
                                 "readdir of %s on subvolume %s complete",
@@ -2019,7 +2048,7 @@ afr_sh_entry_impunge_all (call_frame_t *frame, xlator_t *this)
         active_src = next_active_source (frame, this, sh->active_source);
         sh->active_source = active_src;
 
-        if (is_self_heal_failed (sh)) {
+        if (is_self_heal_failed (sh, AFR_CHECK_SPECIFIC)) {
                 afr_sh_entry_finish (frame, this);
                 return 0;
         }
@@ -2068,7 +2097,7 @@ afr_sh_entry_opendir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 local->loc.path,
                                 priv->children[child_index]->name,
                                 strerror (op_errno));
-                        sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
+                        afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
                 }
         }
         UNLOCK (&frame->lock);
@@ -2076,7 +2105,7 @@ afr_sh_entry_opendir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         call_count = afr_frame_return (frame);
 
         if (call_count == 0) {
-                if (is_self_heal_failed (sh)) {
+                if (is_self_heal_failed (sh, AFR_CHECK_SPECIFIC)) {
                         afr_sh_entry_finish (frame, this);
                         return 0;
                 }
@@ -2231,7 +2260,7 @@ afr_sh_entry_fix (call_frame_t *frame, xlator_t *this,
         priv = this->private;
 
         if (op_ret < 0) {
-                sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
+                afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
                 afr_sh_set_error (sh, op_errno);
                 afr_sh_entry_finish (frame, this);
                 goto out;
@@ -2294,7 +2323,7 @@ afr_sh_post_nonblocking_entry_cbk (call_frame_t *frame, xlator_t *this)
         if (int_lock->lock_op_ret < 0) {
                 gf_log (this->name, GF_LOG_ERROR, "Non Blocking entrylks "
                         "failed for %s.", local->loc.path);
-                sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
+                afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
                 afr_sh_entry_done (frame, this);
         } else {
 
@@ -2321,9 +2350,10 @@ afr_self_heal_entry (call_frame_t *frame, xlator_t *this)
         local = frame->local;
         sh = &local->self_heal;
 
-        sh->afr_set_self_heal_status = afr_set_entry_sh_status;
+        sh->sh_type_in_action = AFR_SELF_HEAL_ENTRY;
+
         if (local->self_heal.do_entry_self_heal && priv->entry_self_heal) {
-                sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_STARTED);
+                afr_set_self_heal_status (sh, AFR_SELF_HEAL_STARTED);
                 afr_sh_entrylk (frame, this, &local->loc, NULL,
                                 afr_sh_post_nonblocking_entry_cbk);
         } else {

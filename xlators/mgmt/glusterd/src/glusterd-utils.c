@@ -11,7 +11,6 @@
 #define _CONFIG_H
 #include "config.h"
 #endif
-#include <openssl/md5.h>
 #include <inttypes.h>
 
 #include "globals.h"
@@ -49,7 +48,6 @@
 #include <unistd.h>
 #include <fnmatch.h>
 #include <sys/statvfs.h>
-#include <ifaddrs.h>
 
 #ifdef GF_LINUX_HOST_OS
 #include <mntent.h>
@@ -89,16 +87,6 @@ gd_peer_uuid_str (glusterd_peerinfo_t *peerinfo)
         return peerinfo->uuid_str;
 }
 
-static void
-md5_wrapper(const unsigned char *data, size_t len, char *md5)
-{
-        unsigned short i = 0;
-        unsigned short lim = MD5_DIGEST_LENGTH*2+1;
-        unsigned char scratch[MD5_DIGEST_LENGTH] = {0,};
-        MD5(data, len, scratch);
-        for (; i < MD5_DIGEST_LENGTH; i++)
-                snprintf(md5 + i * 2, lim-i*2, "%02x", scratch[i]);
-}
 
 int32_t
 glusterd_get_lock_owner (uuid_t *uuid)
@@ -135,189 +123,6 @@ glusterd_is_fuse_available ()
                 return _gf_true;
         else
                 return _gf_false;
-}
-
-gf_boolean_t
-glusterd_is_loopback_localhost (const struct sockaddr *sa, char *hostname)
-{
-        GF_ASSERT (sa);
-
-        gf_boolean_t is_local = _gf_false;
-        const struct in_addr *addr4 = NULL;
-        const struct in6_addr *addr6 = NULL;
-        uint8_t      *ap   = NULL;
-        struct in6_addr loopbackaddr6 = IN6ADDR_LOOPBACK_INIT;
-
-        switch (sa->sa_family) {
-                case AF_INET:
-                        addr4 = &(((struct sockaddr_in *)sa)->sin_addr);
-                        ap = (uint8_t*)&addr4->s_addr;
-                        if (ap[0] == 127)
-                                is_local = _gf_true;
-                        break;
-
-                case AF_INET6:
-                        addr6 = &(((struct sockaddr_in6 *)sa)->sin6_addr);
-                        if (memcmp (addr6, &loopbackaddr6,
-                                    sizeof (loopbackaddr6)) == 0)
-                                is_local = _gf_true;
-                        break;
-
-                default:
-                        if (hostname)
-                                gf_log ("glusterd", GF_LOG_ERROR,
-                                        "unknown address family %d for %s",
-                                        sa->sa_family, hostname);
-                        break;
-        }
-
-        return is_local;
-}
-
-char *
-get_ip_from_addrinfo (struct addrinfo *addr, char **ip)
-{
-        char buf[64];
-        void *in_addr = NULL;
-        struct sockaddr_in *s4 = NULL;
-        struct sockaddr_in6 *s6 = NULL;
-
-        switch (addr->ai_family)
-        {
-                case AF_INET:
-                        s4 = (struct sockaddr_in *)addr->ai_addr;
-                        in_addr = &s4->sin_addr;
-                        break;
-
-                case AF_INET6:
-                        s6 = (struct sockaddr_in6 *)addr->ai_addr;
-                        in_addr = &s6->sin6_addr;
-                        break;
-
-                default:
-                        gf_log ("glusterd", GF_LOG_ERROR, "Invalid family");
-                        return NULL;
-        }
-
-        if (!inet_ntop(addr->ai_family, in_addr, buf, sizeof(buf))) {
-                gf_log ("glusterd", GF_LOG_ERROR, "String conversion failed");
-                return NULL;
-        }
-
-        *ip = strdup (buf);
-        return *ip;
-}
-
-gf_boolean_t
-glusterd_interface_search (char *ip)
-{
-        int32_t         ret = -1;
-        gf_boolean_t    found = _gf_false;
-        struct          ifaddrs *ifaddr, *ifa;
-        int             family;
-        char            host[NI_MAXHOST];
-        xlator_t        *this = NULL;
-        char            *pct = NULL;
-
-        this = THIS;
-
-        ret = getifaddrs (&ifaddr);
-
-        if (ret != 0) {
-                gf_log (this->name, GF_LOG_ERROR, "getifaddrs() failed: %s\n",
-                        gai_strerror(ret));
-                goto out;
-        }
-
-        for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
-                if (!ifa->ifa_addr) {
-                        /*
-                         * This seemingly happens if an interface hasn't
-                         * been bound to a particular protocol (seen with
-                         * TUN devices).
-                         */
-                        continue;
-                }
-                family = ifa->ifa_addr->sa_family;
-
-                if (family != AF_INET && family != AF_INET6)
-                        continue;
-
-                ret = getnameinfo (ifa->ifa_addr,
-                        (family == AF_INET) ? sizeof(struct sockaddr_in) :
-                                              sizeof(struct sockaddr_in6),
-                        host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
-
-                if (ret != 0) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "getnameinfo() failed: %s\n",
-                                gai_strerror(ret));
-                        goto out;
-                }
-
-                /*
-                 * Sometimes the address comes back as addr%eth0 or
-                 * similar.  Since % is an invalid character, we can
-                 * strip it out with confidence that doing so won't
-                 * harm anything.
-                 */
-                pct = index(host,'%');
-                if (pct) {
-                        *pct = '\0';
-                }
-
-                if (strncmp (ip, host, NI_MAXHOST) == 0) {
-                        gf_log (this->name, GF_LOG_DEBUG,
-                                "%s is local address at interface %s",
-                                ip, ifa->ifa_name);
-                        found = _gf_true;
-                        goto out;
-                }
-        }
-out:
-        if(ifaddr)
-                freeifaddrs (ifaddr);
-        return found;
-}
-
-
-gf_boolean_t
-glusterd_is_local_addr (char *hostname)
-{
-        int32_t         ret = -1;
-        struct          addrinfo *result = NULL;
-        struct          addrinfo *res = NULL;
-        gf_boolean_t    found = _gf_false;
-        char            *ip = NULL;
-        xlator_t        *this = NULL;
-
-        this = THIS;
-        ret = getaddrinfo (hostname, NULL, NULL, &result);
-
-        if (ret != 0) {
-                gf_log (this->name, GF_LOG_ERROR, "error in getaddrinfo: %s\n",
-                        gai_strerror(ret));
-                goto out;
-        }
-
-        for (res = result; res != NULL; res = res->ai_next) {
-                gf_log (this->name, GF_LOG_DEBUG, "%s ",
-                        get_ip_from_addrinfo (res, &ip));
-
-                found = glusterd_is_loopback_localhost (res->ai_addr, hostname)
-                        || glusterd_interface_search (ip);
-                if (found)
-                        goto out;
-        }
-
-out:
-        if (result)
-                freeaddrinfo (result);
-
-        if (!found)
-                gf_log (this->name, GF_LOG_DEBUG, "%s is not local", hostname);
-
-        return found;
 }
 
 int32_t
@@ -1156,6 +961,32 @@ glusterd_friend_cleanup (glusterd_peerinfo_t *peerinfo)
         return 0;
 }
 
+int
+glusterd_volinfo_find_by_volume_id (uuid_t volume_id, glusterd_volinfo_t **volinfo)
+{
+        int32_t                 ret = -1;
+        xlator_t                *this = NULL;
+        glusterd_volinfo_t      *voliter = NULL;
+        glusterd_conf_t         *priv = NULL;
+
+        if (!volume_id)
+                return -1;
+
+        this = THIS;
+        priv = this->private;
+
+        list_for_each_entry (voliter, &priv->volumes, vol_list) {
+                if (uuid_compare (volume_id, voliter->volume_id))
+                        continue;
+                *volinfo = voliter;
+                ret = 0;
+                gf_log (this->name, GF_LOG_DEBUG, "Volume %s found",
+                        voliter->volname);
+                break;
+        }
+        return ret;
+}
+
 int32_t
 glusterd_volinfo_find (char *volname, glusterd_volinfo_t **volinfo)
 {
@@ -1269,6 +1100,8 @@ glusterd_brick_connect (glusterd_volinfo_t  *volinfo,
 {
         int                     ret = 0;
         char                    socketpath[PATH_MAX] = {0};
+        char                    volume_id_str[64];
+        char                    *brickid = NULL;
         dict_t                  *options = NULL;
         struct rpc_clnt         *rpc = NULL;
         glusterd_conf_t         *priv = THIS->private;
@@ -1290,10 +1123,17 @@ glusterd_brick_connect (glusterd_volinfo_t  *volinfo,
                                                         600);
                 if (ret)
                         goto out;
+
+                uuid_utoa_r (volinfo->volume_id, volume_id_str);
+                ret = gf_asprintf (&brickid, "%s:%s:%s", volume_id_str,
+                                   brickinfo->hostname, brickinfo->path);
+                if (ret < 0)
+                        goto out;
+
                 synclock_unlock (&priv->big_lock);
                 ret = glusterd_rpc_create (&rpc, options,
                                            glusterd_brick_rpc_notify,
-                                           brickinfo);
+                                           brickid);
                 synclock_lock (&priv->big_lock);
                 if (ret)
                         goto out;
@@ -1501,18 +1341,25 @@ glusterd_brick_unlink_socket_file (glusterd_volinfo_t *volinfo,
 int32_t
 glusterd_brick_disconnect (glusterd_brickinfo_t *brickinfo)
 {
-        GF_ASSERT (brickinfo);
+        rpc_clnt_t              *rpc = NULL;
         glusterd_conf_t         *priv = THIS->private;
 
-        if (brickinfo->rpc) {
-                /* cleanup the saved-frames before last unref */
-                synclock_unlock (&priv->big_lock);
-                rpc_clnt_connection_cleanup (&brickinfo->rpc->conn);
-                synclock_lock (&priv->big_lock);
+        GF_ASSERT (brickinfo);
 
-                rpc_clnt_unref (brickinfo->rpc);
-                brickinfo->rpc = NULL;
+        if (!brickinfo) {
+                gf_log_callingfn ("glusterd", GF_LOG_WARNING, "!brickinfo");
+                return -1;
         }
+
+        rpc            = brickinfo->rpc;
+        brickinfo->rpc = NULL;
+
+        if (rpc) {
+                synclock_unlock (&priv->big_lock);
+                rpc_clnt_unref (rpc);
+                synclock_lock (&priv->big_lock);
+        }
+
         return 0;
 }
 
@@ -3014,7 +2861,7 @@ glusterd_delete_stale_volume (glusterd_volinfo_t *stale_volinfo,
         (void) glusterd_delete_all_bricks (stale_volinfo);
         if (stale_volinfo->shandle) {
                 unlink (stale_volinfo->shandle->path);
-                (void) glusterd_store_handle_destroy (stale_volinfo->shandle);
+                (void) gf_store_handle_destroy (stale_volinfo->shandle);
                 stale_volinfo->shandle = NULL;
         }
         (void) glusterd_volinfo_delete (stale_volinfo);
@@ -3478,17 +3325,12 @@ int32_t
 glusterd_nodesvc_disconnect (char *server)
 {
         struct rpc_clnt         *rpc = NULL;
-        glusterd_conf_t         *priv = THIS->private;
 
         rpc = glusterd_nodesvc_get_rpc (server);
+        (void)glusterd_nodesvc_set_rpc (server, NULL);
 
-        if (rpc) {
-                synclock_unlock (&priv->big_lock);
-                rpc_clnt_connection_cleanup (&rpc->conn);
-                synclock_lock (&priv->big_lock);
+        if (rpc)
                 rpc_clnt_unref (rpc);
-                (void)glusterd_nodesvc_set_rpc (server, NULL);
-        }
 
         return 0;
 }
@@ -4193,7 +4035,7 @@ glusterd_get_brickinfo (xlator_t *this, const char *brickname, int port,
         list_for_each_entry (volinfo, &priv->volumes, vol_list) {
                 list_for_each_entry (tmpbrkinfo, &volinfo->bricks,
                                      brick_list) {
-                        if (localhost && !glusterd_is_local_addr (tmpbrkinfo->hostname))
+                        if (localhost && !gf_is_local_addr (tmpbrkinfo->hostname))
                                 continue;
                         if (!strcmp(tmpbrkinfo->path, brickname) &&
                             (tmpbrkinfo->port == port)) {
@@ -4860,7 +4702,7 @@ glusterd_hostname_to_uuid (char *hostname, uuid_t uuid)
 
         ret = glusterd_friend_find_by_hostname (hostname, &peerinfo);
         if (ret) {
-                if (glusterd_is_local_addr (hostname)) {
+                if (gf_is_local_addr (hostname)) {
                         uuid_copy (uuid, MY_UUID);
                         ret = 0;
                 } else {
@@ -7477,54 +7319,6 @@ glusterd_copy_uuid_to_dict (uuid_t uuid, dict_t *dict, char *key)
         return 0;
 }
 
-gf_boolean_t
-glusterd_is_same_address (char *name1, char *name2)
-{
-        struct addrinfo         *addr1 = NULL;
-        struct addrinfo         *addr2 = NULL;
-        struct addrinfo         *p = NULL;
-        struct addrinfo         *q = NULL;
-        gf_boolean_t            ret = _gf_false;
-        int                     gai_err = 0;
-
-        gai_err = getaddrinfo(name1,NULL,NULL,&addr1);
-        if (gai_err != 0) {
-                gf_log (name1, GF_LOG_WARNING,
-                        "error in getaddrinfo: %s\n", gai_strerror(gai_err));
-                goto out;
-        }
-
-        gai_err = getaddrinfo(name2,NULL,NULL,&addr2);
-        if (gai_err != 0) {
-                gf_log (name2, GF_LOG_WARNING,
-                        "error in getaddrinfo: %s\n", gai_strerror(gai_err));
-                goto out;
-        }
-
-        for (p = addr1; p; p = p->ai_next) {
-                for (q = addr2; q; q = q->ai_next) {
-                        if (p->ai_addrlen != q->ai_addrlen) {
-                                continue;
-                        }
-                        if (memcmp(p->ai_addr,q->ai_addr,p->ai_addrlen)) {
-                                continue;
-                        }
-                        ret = _gf_true;
-                        goto out;
-                }
-        }
-
-out:
-        if (addr1) {
-                freeaddrinfo(addr1);
-        }
-        if (addr2) {
-                freeaddrinfo(addr2);
-        }
-        return ret;
-
-}
-
 int
 _update_volume_op_versions (dict_t *this, char *key, data_t *value, void *data)
 {
@@ -7596,4 +7390,17 @@ gd_update_volume_op_versions (glusterd_volinfo_t *volinfo)
         }
 
         return;
+}
+
+/* A task is committed/completed once the task-id for it is cleared */
+gf_boolean_t
+gd_is_remove_brick_committed (glusterd_volinfo_t *volinfo)
+{
+        GF_ASSERT (volinfo);
+
+        if ((GD_OP_REMOVE_BRICK == volinfo->rebal.op) &&
+            !uuid_is_null (volinfo->rebal.rebalance_id))
+                        return _gf_false;
+
+        return _gf_true;
 }

@@ -22,6 +22,18 @@
 #include <string.h>
 #include <stdlib.h>
 
+#ifdef GF_USE_SYSLOG
+#include <libintl.h>
+#include <syslog.h>
+#include <sys/stat.h>
+#include "gf-error-codes.h"
+
+#define GF_JSON_MSG_LENGTH      8192
+#define GF_SYSLOG_CEE_FORMAT    \
+        "@cee: {\"msg\": \"%s\", \"gf_code\": \"%u\", \"gf_message\": \"%s\"}"
+#define GF_LOG_CONTROL_FILE     "/var/lib/glusterd/logger.conf"
+#endif /* GF_USE_SYSLOG */
+
 #include "xlator.h"
 #include "logging.h"
 #include "defaults.h"
@@ -102,6 +114,207 @@ gf_log_fini (void)
 }
 
 
+#ifdef GF_USE_SYSLOG
+/**
+ * gf_get_error_message -function to get error message for given error code
+ * @error_code: error code defined by log book
+ *
+ * @return: success: string
+ *          failure: NULL
+ */
+const char *
+gf_get_error_message (int error_code) {
+        return _gf_get_message (error_code);
+}
+
+
+/**
+ * gf_openlog -function to open syslog specific to gluster based on
+ *             existent of file /var/lib/glusterd/logger.conf
+ * @ident:    optional identification string similar to openlog()
+ * @option:   optional value to option to openlog().  Passing -1 uses
+ *            'LOG_PID | LOG_NDELAY' as default
+ * @facility: optional facility code similar to openlog().  Passing -1
+ *            uses LOG_DAEMON as default
+ *
+ * @return: void
+ */
+void
+gf_openlog (const char *ident, int option, int facility)
+{
+        int _option = option;
+        int _facility = facility;
+
+        if (-1 == _option) {
+                _option = LOG_PID | LOG_NDELAY;
+        }
+        if (-1 == _facility) {
+                _facility = LOG_LOCAL1;
+        }
+
+        setlocale(LC_ALL, "");
+        bindtextdomain("gluster", "/usr/share/locale");
+        textdomain("gluster");
+
+        openlog(ident, _option, _facility);
+}
+
+
+/**
+ * _json_escape -function to convert string to json encoded string
+ * @str: input string
+ * @buf: buffer to store encoded string
+ * @len: length of @buf
+ *
+ * @return: success: last unprocessed character position by pointer in @str
+ *          failure: NULL
+ *
+ * Internal function. Heavily inspired by _ul_str_escape() function in
+ * libumberlog
+ *
+ * Sample output:
+ * [1] str = "devel error"
+ *     buf = "devel error"
+ * [2] str = "devel	error"
+ *     buf = "devel\terror"
+ * [3] str = "I/O error on "/tmp/foo" file"
+ *     buf = "I/O error on \"/tmp/foo\" file"
+ * [4] str = "I/O erroron /tmp/bar file"
+ *     buf = "I/O error\u001bon /tmp/bar file"
+ *
+ */
+char *
+_json_escape(const char *str, char *buf, size_t len)
+{
+        static const unsigned char json_exceptions[UCHAR_MAX + 1] =
+                {
+                        [0x01] = 1, [0x02] = 1, [0x03] = 1, [0x04] = 1,
+                        [0x05] = 1, [0x06] = 1, [0x07] = 1, [0x08] = 1,
+                        [0x09] = 1, [0x0a] = 1, [0x0b] = 1, [0x0c] = 1,
+                        [0x0d] = 1, [0x0e] = 1, [0x0f] = 1, [0x10] = 1,
+                        [0x11] = 1, [0x12] = 1, [0x13] = 1, [0x14] = 1,
+                        [0x15] = 1, [0x16] = 1, [0x17] = 1, [0x18] = 1,
+                        [0x19] = 1, [0x1a] = 1, [0x1b] = 1, [0x1c] = 1,
+                        [0x1d] = 1, [0x1e] = 1, [0x1f] = 1,
+                        ['\\'] = 1, ['"'] = 1
+                };
+        static const char  json_hex_chars[16] = "0123456789abcdef";
+        unsigned char     *p = NULL;
+        size_t             pos = 0;
+
+        if (!str || !buf || len <= 0) {
+                return NULL;
+        }
+
+        for (p = (unsigned char *)str;
+             *p && (pos + 1) < len;
+             p++)
+        {
+                if (json_exceptions[*p] == 0) {
+                        buf[pos++] = *p;
+                        continue;
+                }
+
+                if ((pos + 2) >= len) {
+                        break;
+                }
+
+                switch (*p)
+                {
+                case '\b':
+                        buf[pos++] = '\\';
+                        buf[pos++] = 'b';
+                        break;
+                case '\n':
+                        buf[pos++] = '\\';
+                        buf[pos++] = 'n';
+                        break;
+                case '\r':
+                        buf[pos++] = '\\';
+                        buf[pos++] = 'r';
+                        break;
+                case '\t':
+                        buf[pos++] = '\\';
+                        buf[pos++] = 't';
+                        break;
+                case '\\':
+                        buf[pos++] = '\\';
+                        buf[pos++] = '\\';
+                        break;
+                case '"':
+                        buf[pos++] = '\\';
+                        buf[pos++] = '"';
+                        break;
+                default:
+                        if ((pos + 6) >= len) {
+                                buf[pos] = '\0';
+                                return (char *)p;
+                        }
+                        buf[pos++] = '\\';
+                        buf[pos++] = 'u';
+                        buf[pos++] = '0';
+                        buf[pos++] = '0';
+                        buf[pos++] = json_hex_chars[(*p) >> 4];
+                        buf[pos++] = json_hex_chars[(*p) & 0xf];
+                        break;
+                }
+        }
+
+        buf[pos] = '\0';
+        return (char *)p;
+}
+
+
+/**
+ * gf_syslog -function to submit message to syslog specific to gluster
+ * @error_code:        error code defined by log book
+ * @facility_priority: facility_priority of syslog()
+ * @format:            optional format string to syslog()
+ *
+ * @return: void
+ */
+void
+gf_syslog (int error_code, int facility_priority, char *format, ...)
+{
+        char       *msg = NULL;
+        char        json_msg[GF_JSON_MSG_LENGTH];
+        char       *p = NULL;
+        const char *error_message = NULL;
+        char        json_error_message[GF_JSON_MSG_LENGTH];
+        va_list     ap;
+
+        error_message = gf_get_error_message (error_code);
+
+        va_start (ap, format);
+        if (format) {
+                vasprintf (&msg, format, ap);
+                p = _json_escape (msg, json_msg, GF_JSON_MSG_LENGTH);
+                if (error_message) {
+                        p = _json_escape (error_message, json_error_message,
+                                          GF_JSON_MSG_LENGTH);
+                        syslog (facility_priority, GF_SYSLOG_CEE_FORMAT,
+                                json_msg, error_code, json_error_message);
+                } else {
+                        /* ignore the error code because no error message for it
+                           and use normal syslog */
+                        syslog (facility_priority, "%s", msg);
+                }
+                free (msg);
+        } else {
+                if (error_message) {
+                        /* no user message: treat error_message as msg */
+                        syslog (facility_priority, GF_SYSLOG_CEE_FORMAT,
+                                json_error_message, error_code,
+                                json_error_message);
+                } else {
+                        /* cannot produce log as neither error_message nor
+                           msg available */
+                }
+        }
+        va_end (ap);
+}
+#endif /* GF_USE_SYSLOG */
+
 void
 gf_log_globals_init (void *data)
 {
@@ -113,7 +326,20 @@ gf_log_globals_init (void *data)
         ctx->log.gf_log_syslog    = 1;
         ctx->log.sys_log_level    = GF_LOG_CRITICAL;
 
-#ifdef GF_LINUX_HOST_OS
+#if defined(GF_USE_SYSLOG)
+        {
+                /* use default ident and option */
+                /* TODO: make FACILITY configurable than LOG_DAEMON */
+                struct stat buf;
+
+                if (stat (GF_LOG_CONTROL_FILE, &buf) == 0) {
+                        ctx->log.log_control_file_found = 1; /* use gf_log */
+                } else {
+                        ctx->log.log_control_file_found = 0;
+                        gf_openlog (NULL, -1, LOG_DAEMON);
+                }
+        }
+#elif defined(GF_LINUX_HOST_OS)
         /* For the 'syslog' output. one can grep 'GlusterFS' in syslog
            for serious logs */
         openlog ("GlusterFS", LOG_PID, LOG_DAEMON);
@@ -215,6 +441,12 @@ _gf_log_nomem (const char *domain, const char *file,
                 return -1;
         }
 
+        basename = strrchr (file, '/');
+        if (basename)
+                basename++;
+        else
+                basename = file;
+
 #if HAVE_BACKTRACE
         /* Print 'calling function' */
         do {
@@ -241,18 +473,31 @@ _gf_log_nomem (const char *domain, const char *file,
         } while (0);
 #endif /* HAVE_BACKTRACE */
 
+#if defined(GF_USE_SYSLOG)
+        if (!(ctx->log.log_control_file_found))
+        {
+                int priority;
+                /* treat GF_LOG_TRACE and GF_LOG_NONE as LOG_DEBUG and
+                   other level as is */
+                if (GF_LOG_TRACE == level || GF_LOG_NONE == level) {
+                        priority = LOG_DEBUG;
+                } else {
+                        priority = level - 1;
+                }
+                gf_syslog (GF_ERR_DEV, priority,
+                           "[%s:%d:%s] %s %s: no memory "
+                           "available for size (%"GF_PRI_SIZET")",
+                           basename, line, function, callstr, domain,
+                           size);
+                goto out;
+        }
+#endif /* GF_USE_SYSLOG */
         ret = gettimeofday (&tv, NULL);
         if (-1 == ret)
                 goto out;
         gf_time_fmt (timestr, sizeof timestr, tv.tv_sec, gf_timefmt_FT);
         snprintf (timestr + strlen (timestr), sizeof timestr - strlen (timestr),
                   ".%"GF_PRI_SUSECONDS, tv.tv_usec);
-
-        basename = strrchr (file, '/');
-        if (basename)
-                basename++;
-        else
-                basename = file;
 
         ret = sprintf (msg, "[%s] %s [%s:%d:%s] %s %s: no memory "
                        "available for size (%"GF_PRI_SIZET")",
@@ -331,6 +576,12 @@ _gf_log_callingfn (const char *domain, const char *file, const char *function,
                 return -1;
         }
 
+        basename = strrchr (file, '/');
+        if (basename)
+                basename++;
+        else
+                basename = file;
+
 #if HAVE_BACKTRACE
         /* Print 'calling function' */
         do {
@@ -357,6 +608,32 @@ _gf_log_callingfn (const char *domain, const char *file, const char *function,
         } while (0);
 #endif /* HAVE_BACKTRACE */
 
+#if defined(GF_USE_SYSLOG)
+        if (!(ctx->log.log_control_file_found))
+        {
+                int priority;
+                /* treat GF_LOG_TRACE and GF_LOG_NONE as LOG_DEBUG and
+                   other level as is */
+                if (GF_LOG_TRACE == level || GF_LOG_NONE == level) {
+                        priority = LOG_DEBUG;
+                } else {
+                        priority = level - 1;
+                }
+
+                va_start (ap, fmt);
+                vasprintf (&str2, fmt, ap);
+                va_end (ap);
+
+                gf_syslog (GF_ERR_DEV, priority,
+                           "[%s:%d:%s] %s %d-%s: %s",
+                           basename, line, function,
+                           callstr,
+                           ((this->graph) ? this->graph->id:0), domain,
+                           str2);
+
+                goto out;
+        }
+#endif /* GF_USE_SYSLOG */
         ret = gettimeofday (&tv, NULL);
         if (-1 == ret)
                 goto out;
@@ -364,12 +641,6 @@ _gf_log_callingfn (const char *domain, const char *file, const char *function,
         gf_time_fmt (timestr, sizeof timestr, tv.tv_sec, gf_timefmt_FT);
         snprintf (timestr + strlen (timestr), sizeof timestr - strlen (timestr),
                   ".%"GF_PRI_SUSECONDS, tv.tv_usec);
-
-        basename = strrchr (file, '/');
-        if (basename)
-                basename++;
-        else
-                basename = file;
 
         ret = gf_asprintf (&str1, "[%s] %s [%s:%d:%s] %s %d-%s: ",
                            timestr, level_strings[level],
@@ -468,6 +739,35 @@ _gf_log (const char *domain, const char *file, const char *function, int line,
                 return -1;
         }
 
+        basename = strrchr (file, '/');
+        if (basename)
+                basename++;
+        else
+                basename = file;
+
+#if defined(GF_USE_SYSLOG)
+        if (!(ctx->log.log_control_file_found))
+        {
+                int priority;
+                /* treat GF_LOG_TRACE and GF_LOG_NONE as LOG_DEBUG and
+                   other level as is */
+                if (GF_LOG_TRACE == level || GF_LOG_NONE == level) {
+                        priority = LOG_DEBUG;
+                } else {
+                        priority = level - 1;
+                }
+
+                va_start (ap, fmt);
+                vasprintf (&str2, fmt, ap);
+                va_end (ap);
+
+                gf_syslog (GF_ERR_DEV, priority,
+                           "[%s:%d:%s] %d-%s: %s",
+                           basename, line, function,
+                           ((this->graph) ? this->graph->id:0), domain, str2);
+                goto err;
+        }
+#endif /* GF_USE_SYSLOG */
 
         if (ctx->log.logrotate) {
                 ctx->log.logrotate = 0;
@@ -508,12 +808,6 @@ log:
         gf_time_fmt (timestr, sizeof timestr, tv.tv_sec, gf_timefmt_FT);
         snprintf (timestr + strlen (timestr), sizeof timestr - strlen (timestr),
                   ".%"GF_PRI_SUSECONDS, tv.tv_usec);
-
-        basename = strrchr (file, '/');
-        if (basename)
-                basename++;
-        else
-                basename = file;
 
         ret = gf_asprintf (&str1, "[%s] %s [%s:%d:%s] %d-%s: ",
                            timestr, level_strings[level],

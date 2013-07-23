@@ -253,7 +253,7 @@ __server_getspec (rpcsvc_request_t *req)
         *tmp = '\0';
 
         /* we trust the local admin */
-        if (glusterd_is_local_addr (addrstr)) {
+        if (gf_is_local_addr (addrstr)) {
 
                 ret = build_volfile_path (volume, filename,
                                           sizeof (filename),
@@ -582,11 +582,9 @@ glusterd_mgmt_hndsk_versions_ack (rpcsvc_request_t *req)
 }
 
 rpcsvc_actor_t gluster_handshake_actors[] = {
-        [GF_HNDSK_NULL]         = {"NULL", GF_HNDSK_NULL, NULL, NULL, 0},
-        [GF_HNDSK_GETSPEC]      = {"GETSPEC", GF_HNDSK_GETSPEC,
-                                   server_getspec, NULL, 0},
-        [GF_HNDSK_EVENT_NOTIFY] = {"EVENTNOTIFY", GF_HNDSK_EVENT_NOTIFY,
-                                   server_event_notify,  NULL, 0},
+        [GF_HNDSK_NULL]         = {"NULL",        GF_HNDSK_NULL,         NULL,                NULL, 0, DRC_NA},
+        [GF_HNDSK_GETSPEC]      = {"GETSPEC",     GF_HNDSK_GETSPEC,      server_getspec,      NULL, 0, DRC_NA},
+        [GF_HNDSK_EVENT_NOTIFY] = {"EVENTNOTIFY", GF_HNDSK_EVENT_NOTIFY, server_event_notify, NULL, 0, DRC_NA},
 };
 
 
@@ -677,6 +675,7 @@ glusterd_event_connected_inject (glusterd_peerctx_t *peerctx)
         ctx->hostname = gf_strdup (peerinfo->hostname);
         ctx->port = peerinfo->port;
         ctx->req = peerctx->args.req;
+        ctx->dict = peerctx->args.dict;
 
         event->peerinfo = peerinfo;
         event->ctx = ctx;

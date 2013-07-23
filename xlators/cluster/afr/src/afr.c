@@ -191,6 +191,8 @@ reconfigure (xlator_t *this, dict_t *options)
         /* Reset this so we re-discover in case the topology changed.  */
         GF_OPTION_RECONF ("readdir-failover", priv->readdir_failover, options,
                           bool, out);
+        GF_OPTION_RECONF ("ensure-durability", priv->ensure_durability, options,
+                          bool, out);
         priv->did_discovery = _gf_false;
 
         ret = 0;
@@ -335,6 +337,8 @@ init (xlator_t *this)
 
 	GF_OPTION_INIT ("post-op-delay-secs", priv->post_op_delay_secs, uint32, out);
         GF_OPTION_INIT ("readdir-failover", priv->readdir_failover, bool, out);
+        GF_OPTION_INIT ("ensure-durability", priv->ensure_durability, bool,
+                        out);
 
         priv->wait_count = 1;
 
@@ -376,14 +380,18 @@ init (xlator_t *this)
                                    AFR_XATTR_PREFIX,
                                    trav->xlator->name);
                 if (-1 == ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "asprintf failed to set pending key");
                         ret = -ENOMEM;
                         goto out;
                 }
 
                 trav = trav->next;
                 i++;
+        }
+
+        ret = gf_asprintf (&priv->sh_domain, "%s-self-heal", this->name);
+        if (-1 == ret) {
+                ret = -ENOMEM;
+                goto out;
         }
 
         priv->last_event = GF_CALLOC (child_count, sizeof (*priv->last_event),
@@ -765,6 +773,13 @@ struct volume_options options[] = {
         { .key = {"readdir-failover"},
           .type = GF_OPTION_TYPE_BOOL,
           .description = "readdir(p) will not failover if this option is off",
+          .default_value = "on",
+        },
+        { .key = {"ensure-durability"},
+          .type = GF_OPTION_TYPE_BOOL,
+          .description = "Afr performs fsyncs for transactions if this "
+                         "option is on to make sure the changelogs/data is "
+                         "written to the disk",
           .default_value = "on",
         },
         { .key  = {NULL} },

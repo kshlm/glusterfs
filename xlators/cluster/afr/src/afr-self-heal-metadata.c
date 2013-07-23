@@ -97,7 +97,7 @@ afr_sh_metadata_fail (call_frame_t *frame, xlator_t *this)
         local    = frame->local;
         sh       = &local->self_heal;
 
-        sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
+        afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
         afr_sh_metadata_finish (frame, this);
         return 0;
 }
@@ -461,7 +461,7 @@ afr_sh_metadata_fix (call_frame_t *frame, xlator_t *this,
         priv = this->private;
 
         if (op_ret < 0) {
-                sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
+                afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
                 afr_sh_set_error (sh, op_errno);
                 afr_sh_metadata_finish (frame, this);
                 goto out;
@@ -579,19 +579,22 @@ int
 afr_sh_metadata_lock (call_frame_t *frame, xlator_t *this)
 {
         afr_internal_lock_t *int_lock = NULL;
+        afr_inodelk_t       *inodelk  = NULL;
         afr_local_t         *local    = NULL;
 
         local    = frame->local;
         int_lock = &local->internal_lock;
 
+        int_lock->domain           = this->name;
+        inodelk = afr_get_inodelk (int_lock, int_lock->domain);
         int_lock->transaction_lk_type = AFR_SELFHEAL_LK;
         int_lock->selfheal_lk_type    = AFR_METADATA_SELF_HEAL_LK;
 
         afr_set_lock_number (frame, this);
 
-        int_lock->lk_flock.l_start = LLONG_MAX - 1;
-        int_lock->lk_flock.l_len   = 0;
-        int_lock->lk_flock.l_type  = F_WRLCK;
+        inodelk->flock.l_start = LLONG_MAX - 1;
+        inodelk->flock.l_len   = 0;
+        inodelk->flock.l_type  = F_WRLCK;
         int_lock->lock_cbk         = afr_sh_metadata_post_nonblocking_inodelk_cbk;
 
         afr_nonblocking_inodelk (frame, this);
@@ -618,10 +621,10 @@ afr_self_heal_metadata (call_frame_t *frame, xlator_t *this)
 
         local = frame->local;
         sh = &local->self_heal;
-        sh->afr_set_self_heal_status = afr_set_metadata_sh_status;
+        sh->sh_type_in_action = AFR_SELF_HEAL_METADATA;
 
         if (afr_can_start_metadata_self_heal (sh, priv)) {
-                sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_STARTED);
+                afr_set_self_heal_status (sh, AFR_SELF_HEAL_STARTED);
                 afr_sh_metadata_lock (frame, this);
         } else {
                 afr_sh_metadata_done (frame, this);

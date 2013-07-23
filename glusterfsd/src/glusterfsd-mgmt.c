@@ -1248,16 +1248,16 @@ rpc_clnt_prog_t clnt_handshake_prog = {
 };
 
 rpcsvc_actor_t glusterfs_actors[] = {
-        [GLUSTERD_BRICK_NULL]          = {"NULL", GLUSTERD_BRICK_NULL, glusterfs_handle_rpc_msg, NULL, 0},
-        [GLUSTERD_BRICK_TERMINATE]     = {"TERMINATE", GLUSTERD_BRICK_TERMINATE, glusterfs_handle_terminate, NULL, 0},
-        [GLUSTERD_BRICK_XLATOR_INFO]   = {"TRANSLATOR INFO", GLUSTERD_BRICK_XLATOR_INFO, glusterfs_handle_translator_info_get, NULL, 0},
-        [GLUSTERD_BRICK_XLATOR_OP]     = {"TRANSLATOR OP", GLUSTERD_BRICK_XLATOR_OP, glusterfs_handle_translator_op, NULL, 0},
-        [GLUSTERD_BRICK_STATUS]        = {"STATUS", GLUSTERD_BRICK_STATUS, glusterfs_handle_brick_status, NULL, 0},
-        [GLUSTERD_BRICK_XLATOR_DEFRAG] = {"TRANSLATOR DEFRAG", GLUSTERD_BRICK_XLATOR_DEFRAG, glusterfs_handle_defrag, NULL, 0},
-        [GLUSTERD_NODE_PROFILE]        = {"NFS PROFILE", GLUSTERD_NODE_PROFILE, glusterfs_handle_nfs_profile, NULL, 0},
-        [GLUSTERD_NODE_STATUS]         = {"NFS STATUS", GLUSTERD_NODE_STATUS, glusterfs_handle_node_status, NULL, 0},
+        [GLUSTERD_BRICK_NULL]          = {"NULL",              GLUSTERD_BRICK_NULL,          glusterfs_handle_rpc_msg,             NULL, 0, DRC_NA},
+        [GLUSTERD_BRICK_TERMINATE]     = {"TERMINATE",         GLUSTERD_BRICK_TERMINATE,     glusterfs_handle_terminate,           NULL, 0, DRC_NA},
+        [GLUSTERD_BRICK_XLATOR_INFO]   = {"TRANSLATOR INFO",   GLUSTERD_BRICK_XLATOR_INFO,   glusterfs_handle_translator_info_get, NULL, 0, DRC_NA},
+        [GLUSTERD_BRICK_XLATOR_OP]     = {"TRANSLATOR OP",     GLUSTERD_BRICK_XLATOR_OP,     glusterfs_handle_translator_op,       NULL, 0, DRC_NA},
+        [GLUSTERD_BRICK_STATUS]        = {"STATUS",            GLUSTERD_BRICK_STATUS,        glusterfs_handle_brick_status,        NULL, 0, DRC_NA},
+        [GLUSTERD_BRICK_XLATOR_DEFRAG] = {"TRANSLATOR DEFRAG", GLUSTERD_BRICK_XLATOR_DEFRAG, glusterfs_handle_defrag,              NULL, 0, DRC_NA},
+        [GLUSTERD_NODE_PROFILE]        = {"NFS PROFILE",       GLUSTERD_NODE_PROFILE,        glusterfs_handle_nfs_profile,         NULL, 0, DRC_NA},
+        [GLUSTERD_NODE_STATUS]         = {"NFS STATUS",        GLUSTERD_NODE_STATUS,         glusterfs_handle_node_status,         NULL, 0, DRC_NA},
 #ifdef HAVE_BD_XLATOR
-        [GLUSTERD_BRICK_BD_OP]         = {"BD OP", GLUSTERD_BRICK_BD_OP, glusterfs_handle_bd_op, NULL, 0}
+        [GLUSTERD_BRICK_BD_OP]         = {"BD OP",             GLUSTERD_BRICK_BD_OP,         glusterfs_handle_bd_op,               NULL, 0, DRC_NA}
 #endif
 };
 
@@ -1327,7 +1327,7 @@ out:
 
 
 /* XXX: move these into @ctx */
-static char oldvolfile[131072];
+static char *oldvolfile = NULL;
 static int oldvollen = 0;
 
 static int
@@ -1363,6 +1363,15 @@ xlator_equal_rec (xlator_t *xl1, xlator_t *xl2)
         }
 
         if (strcmp (xl1->name, xl2->name)) {
+                ret = -1;
+                goto out;
+        }
+
+	/* type could have changed even if xlator names match,
+	   e.g cluster/distrubte and cluster/nufa share the same
+	   xlator name
+	*/
+        if (strcmp (xl1->type, xl2->type)) {
                 ret = -1;
                 goto out;
         }
@@ -1513,6 +1522,7 @@ mgmt_getspec_cbk (struct rpc_req *req, struct iovec *iov, int count,
         int                      ret   = 0;
         ssize_t                  size = 0;
         FILE                    *tmpfp = NULL;
+        char                    *volfilebuf = NULL;
 
         frame = myframe;
         ctx = frame->this->ctx;
@@ -1570,6 +1580,15 @@ mgmt_getspec_cbk (struct rpc_req *req, struct iovec *iov, int count,
         if (ret == 0) {
                 gf_log ("glusterfsd-mgmt", GF_LOG_DEBUG,
                         "No need to re-load volfile, reconfigure done");
+                if (oldvolfile)
+                        volfilebuf = GF_REALLOC (oldvolfile, size);
+                else
+                        volfilebuf = GF_CALLOC (1, size, gf_common_mt_char);
+                if (!volfilebuf) {
+                        ret = -1;
+                        goto out;
+                }
+                oldvolfile = volfilebuf;
                 oldvollen = size;
                 memcpy (oldvolfile, rsp.spec, size);
                 goto out;
@@ -1586,6 +1605,15 @@ mgmt_getspec_cbk (struct rpc_req *req, struct iovec *iov, int count,
         if (ret)
                 goto out;
 
+        if (oldvolfile)
+                volfilebuf = GF_REALLOC (oldvolfile, size);
+        else
+                volfilebuf = GF_CALLOC (1, size, gf_common_mt_char);
+        if (!volfilebuf) {
+                ret = -1;
+                goto out;
+        }
+        oldvolfile = volfilebuf;
         oldvollen = size;
         memcpy (oldvolfile, rsp.spec, size);
         if (!is_mgmt_rpc_reconnect) {

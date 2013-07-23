@@ -102,7 +102,13 @@ enum gf_common_mem_types_ {
         gf_common_mt_buffer_t             = 86,
         gf_common_mt_circular_buffer_t    = 87,
         gf_common_mt_eh_t                 = 88,
-        gf_common_mt_zmq_private_t        = 89,
-        gf_common_mt_end                  = 90
+        gf_common_mt_store_handle_t       = 89,
+        gf_common_mt_store_iter_t         = 90,
+        gf_common_mt_drc_client_t         = 91,
+        gf_common_mt_drc_globals_t        = 92,
+        gf_common_mt_drc_rbtree_node_t    = 93,
+        gf_common_mt_iov_base_t           = 94,
+        gf_common_mt_zmq_private_t        = 95,
+        gf_common_mt_end                  = 96
 };
 #endif

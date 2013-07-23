@@ -445,6 +445,7 @@ int dht_iatt_merge (xlator_t                 *this, struct iatt *to, struct iatt
 xlator_t *dht_subvol_get_hashed (xlator_t *this, loc_t *loc);
 xlator_t *dht_subvol_get_cached (xlator_t *this, inode_t *inode);
 xlator_t *dht_subvol_next (xlator_t *this, xlator_t *prev);
+xlator_t *dht_subvol_next_available (xlator_t *this, xlator_t *prev);
 int       dht_subvol_cnt (xlator_t *this, xlator_t *subvol);
 
 int dht_hash_compute (xlator_t *this, int type, const char *name, uint32_t *hash_p);
@@ -469,7 +470,8 @@ dht_layout_sort_volname (dht_layout_t *layout);
 int dht_get_du_info (call_frame_t *frame, xlator_t *this, loc_t *loc);
 
 gf_boolean_t dht_is_subvol_filled (xlator_t *this, xlator_t *subvol);
-xlator_t *dht_free_disk_available_subvol (xlator_t *this, xlator_t *subvol);
+xlator_t *dht_free_disk_available_subvol (xlator_t *this, xlator_t *subvol,
+                                          dht_local_t *layout);
 int       dht_get_du_info_for_subvol (xlator_t *this, int subvol_idx);
 
 int dht_layout_preset (xlator_t *this, xlator_t *subvol, inode_t *inode);
@@ -764,9 +766,11 @@ dht_dir_has_layout (dict_t *xattr, char *name);
 gf_boolean_t
 dht_is_subvol_in_layout (dht_layout_t *layout, xlator_t *xlator);
 xlator_t *
-dht_subvol_with_free_space_inodes (xlator_t *this, xlator_t *subvol);
+dht_subvol_with_free_space_inodes (xlator_t *this, xlator_t *subvol,
+                                   dht_layout_t *layout);
 xlator_t *
-dht_subvol_maxspace_nonzeroinode (xlator_t *this, xlator_t *subvol);
+dht_subvol_maxspace_nonzeroinode (xlator_t *this, xlator_t *subvol,
+                                  dht_layout_t *layout);
 int
 dht_linkfile_attr_heal (call_frame_t *frame, xlator_t *this);
 

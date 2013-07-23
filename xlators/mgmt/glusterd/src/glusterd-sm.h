@@ -27,14 +27,7 @@
 #include "byte-order.h"
 //#include "glusterd.h"
 #include "rpcsvc.h"
-
-struct glusterd_store_handle_ {
-        char    *path;
-        int     fd;
-        FILE    *read;
-};
-
-typedef struct glusterd_store_handle_  glusterd_store_handle_t;
+#include "store.h"
 
 typedef enum gd_quorum_contribution_ {
         QUORUM_NONE,
@@ -105,7 +98,7 @@ struct glusterd_peerinfo_ {
         rpc_clnt_prog_t                 *mgmt;
         rpc_clnt_prog_t                 *peer;
         int                             connected;
-        glusterd_store_handle_t         *shandle;
+        gf_store_handle_t         *shandle;
         glusterd_sm_tr_log_t            sm_log;
         gf_boolean_t                    quorum_action;
         gd_quorum_contrib_t             quorum_contrib;
@@ -123,6 +116,7 @@ typedef enum glusterd_ev_gen_mode_ {
 typedef struct glusterd_peer_ctx_args_ {
         rpcsvc_request_t        *req;
         glusterd_ev_gen_mode_t  mode;
+        dict_t                  *dict;
 } glusterd_peerctx_args_t;
 
 typedef struct glusterd_peer_ctx_ {
@@ -189,6 +183,7 @@ typedef struct glusterd_probe_ctx_ {
         char                    *hostname;
         rpcsvc_request_t        *req;
         int                      port;
+        dict_t                  *dict;
 } glusterd_probe_ctx_t;
 int
 glusterd_friend_sm_new_event (glusterd_friend_sm_event_type_t event_type,

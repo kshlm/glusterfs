@@ -32,6 +32,7 @@
 #include <arpa/inet.h>
 #include <sys/poll.h>
 #include <pthread.h>
+#include <limits.h> /* For PATH_MAX */
 
 #include "list.h"
 #include "logging.h"
@@ -95,9 +96,13 @@
                                        strlen (GF_XATTR_LOCKINFO_KEY)) == 0)
 
 #define GF_XATTR_LINKINFO_KEY   "trusted.distribute.linkinfo"
-#define GFID_XATTR_KEY "trusted.gfid"
+#define GFID_XATTR_KEY          "trusted.gfid"
+#define VIRTUAL_GFID_XATTR_KEY_STR  "glusterfs.gfid.string"
+#define VIRTUAL_GFID_XATTR_KEY      "glusterfs.gfid"
+#define UUID_CANONICAL_FORM_LEN 36
 
 #define GLUSTERFS_INTERNAL_FOP_KEY  "glusterfs-internal-fop"
+#define GLUSTERFS_CREATE_MODE_KEY "glusterfs-create-mode"
 
 #define ZR_FILE_CONTENT_STR     "glusterfs.file."
 #define ZR_FILE_CONTENT_STRLEN 15
@@ -107,8 +112,10 @@
 #define GLUSTERFS_ENTRYLK_COUNT "glusterfs.entrylk-count"
 #define GLUSTERFS_POSIXLK_COUNT "glusterfs.posixlk-count"
 #define GLUSTERFS_PARENT_ENTRYLK "glusterfs.parent-entrylk"
+#define GLUSTERFS_INODELK_DOM_COUNT "glusterfs.inodelk-dom-count"
 #define QUOTA_SIZE_KEY "trusted.glusterfs.quota.size"
 #define GFID_TO_PATH_KEY "glusterfs.gfid2path"
+#define GF_XATTR_STIME_PATTERN "trusted.glusterfs.*.stime"
 
 /* Index xlator related */
 #define GF_XATTROP_INDEX_GFID "glusterfs.xattrop_index_gfid"
@@ -148,6 +155,8 @@
 #define GF_REBALANCE_TID_KEY     "rebalance-id"
 #define GF_REMOVE_BRICK_TID_KEY  "remove-brick-id"
 #define GF_REPLACE_BRICK_TID_KEY "replace-brick-id"
+
+#define UUID_CANONICAL_FORM_LEN  36
 
 /* NOTE: add members ONLY at the end (just before _MAXVALUE) */
 typedef enum {
@@ -314,10 +323,12 @@ struct _cmd_args {
         int              mac_compat;
 	int		 fopen_keep_cache;
 	int		 gid_timeout;
+        int              aux_gfid_mount;
 	struct list_head xlator_options;  /* list of xlator_option_t */
 
 	/* fuse options */
 	int              fuse_direct_io_mode;
+	char             *use_readdirp;
         int              volfile_check;
 	double           fuse_entry_timeout;
 	double           fuse_negative_timeout;
@@ -341,6 +352,7 @@ struct _cmd_args {
         int             brick_port;
         char           *brick_name;
         int             brick_port2;
+
 };
 typedef struct _cmd_args cmd_args_t;
 

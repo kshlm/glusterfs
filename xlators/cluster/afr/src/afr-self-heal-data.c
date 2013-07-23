@@ -156,6 +156,25 @@ afr_sh_data_close (call_frame_t *frame, xlator_t *this)
 }
 
 int
+afr_sh_dom_unlock (call_frame_t *frame, xlator_t *this)
+{
+        afr_local_t     *local = NULL;
+        afr_self_heal_t *sh    = NULL;
+        afr_private_t   *priv  = NULL;
+
+        local = frame->local;
+        sh    = &local->self_heal;
+        priv  = this->private;
+
+        if (sh->sh_dom_lock_held)
+                afr_sh_data_unlock (frame, this, priv->sh_domain,
+                                    afr_sh_data_close);
+        else
+                afr_sh_data_close (frame, this);
+        return 0;
+}
+
+int
 afr_sh_data_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                          int32_t op_ret, int32_t op_errno, struct iatt *statpre,
                          struct iatt *statpost, dict_t *xdata)
@@ -283,31 +302,45 @@ afr_sh_set_timestamps (call_frame_t *frame, xlator_t *this)
 
 //Fun fact, lock_cbk is being used for both lock & unlock
 int
-afr_sh_data_unlock (call_frame_t *frame, xlator_t *this,
+afr_sh_data_unlock (call_frame_t *frame, xlator_t *this, char *dom,
                     afr_lock_cbk_t lock_cbk)
 {
         afr_local_t         *local    = NULL;
         afr_internal_lock_t *int_lock = NULL;
         afr_self_heal_t     *sh       = NULL;
+        afr_private_t       *priv     = NULL;
+        int                 ret       = 0;
 
         local    = frame->local;
         int_lock = &local->internal_lock;
         sh       = &local->self_heal;
+        priv     = this->private;
 
-        GF_ASSERT (sh->data_lock_held);
-
-        sh->data_lock_held = _gf_false;
+        if (strcmp (dom, this->name) == 0) {
+                sh->data_lock_held = _gf_false;
+        } else if (strcmp (dom, priv->sh_domain) == 0) {
+                sh->sh_dom_lock_held = _gf_false;
+        } else {
+                ret = -1;
+                goto out;
+        }
         int_lock->lock_cbk = lock_cbk;
+        int_lock->domain = dom;
         afr_unlock (frame, this);
 
+out:
+        if (ret) {
+                int_lock->lock_op_ret = -1;
+                int_lock->lock_cbk (frame, this);
+        }
         return 0;
 }
 
 int
 afr_sh_data_finish (call_frame_t *frame, xlator_t *this)
 {
-        afr_local_t   *local = NULL;
-        afr_self_heal_t *sh = NULL;
+        afr_local_t     *local = NULL;
+        afr_self_heal_t *sh    = NULL;
 
         local = frame->local;
         sh = &local->self_heal;
@@ -316,9 +349,9 @@ afr_sh_data_finish (call_frame_t *frame, xlator_t *this)
                 "finishing data selfheal of %s", local->loc.path);
 
         if (sh->data_lock_held)
-                afr_sh_data_unlock (frame, this, afr_sh_data_close);
+                afr_sh_data_unlock (frame, this, this->name, afr_sh_dom_unlock);
         else
-                afr_sh_data_close (frame, this);
+                afr_sh_dom_unlock (frame, this);
 
         return 0;
 }
@@ -335,11 +368,8 @@ afr_sh_data_fail (call_frame_t *frame, xlator_t *this)
         gf_log (this->name, GF_LOG_DEBUG,
                 "finishing failed data selfheal of %s", local->loc.path);
 
-        sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
-        if (sh->data_lock_held)
-                afr_sh_data_unlock (frame, this, afr_sh_data_close);
-        else
-                afr_sh_data_close (frame, this);
+        afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
+        afr_sh_data_finish (frame, this);
         return 0;
 }
 
@@ -362,13 +392,13 @@ afr_sh_data_erase_pending_cbk (call_frame_t *frame, void *cookie,
                         "log failed on %s for subvol %s, reason: %s",
                         local->loc.path, priv->children[child_index]->name,
                         strerror (op_errno));
-                sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
+                afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
         }
 
         call_count = afr_frame_return (frame);
 
         if (call_count == 0) {
-                if (is_self_heal_failed (sh)) {
+                if (is_self_heal_failed (sh, AFR_CHECK_SPECIFIC)) {
                         if (sh->old_loop_frame)
                                 sh_loop_finish (sh->old_loop_frame, this);
                         sh->old_loop_frame = NULL;
@@ -380,7 +410,7 @@ afr_sh_data_erase_pending_cbk (call_frame_t *frame, void *cookie,
                         goto out;
                 }
                 GF_ASSERT (sh->old_loop_frame);
-                afr_sh_data_lock (frame, this, 0, 0, _gf_true,
+                afr_sh_data_lock (frame, this, 0, 0, _gf_true, this->name,
                                   afr_post_sh_big_lock_success,
                                   afr_post_sh_big_lock_failure);
         }
@@ -418,7 +448,7 @@ afr_sh_data_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         priv->children[child_index]->name, strerror (op_errno));
                 LOCK (&frame->lock);
                 {
-                        sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
+                        afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
                 }
                 UNLOCK (&frame->lock);
                 if (sh->old_loop_frame)
@@ -428,7 +458,7 @@ afr_sh_data_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         call_count = afr_frame_return (frame);
         if (call_count == 0) {
-                if (is_self_heal_failed (sh))
+                if (is_self_heal_failed (sh, AFR_CHECK_SPECIFIC))
                         afr_sh_data_fail (frame, this);
                 else
                         afr_sh_data_erase_pending (frame, this);
@@ -604,7 +634,7 @@ afr_sh_data_trim_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 local->loc.path,
                                 priv->children[child_index]->name,
                                 strerror (op_errno));
-                        sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
+                        afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
                 } else {
                         gf_log (this->name, GF_LOG_DEBUG,
                                 "ftruncate of %s on subvolume %s completed",
@@ -617,7 +647,7 @@ afr_sh_data_trim_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         call_count = afr_frame_return (frame);
 
         if (call_count == 0) {
-                if (is_self_heal_failed (sh))
+                if (is_self_heal_failed (sh, AFR_CHECK_SPECIFIC))
                         afr_sh_data_fail (frame, this);
                 else
                         afr_sh_data_sync_prepare (frame, this);
@@ -718,7 +748,7 @@ afr_sh_data_fix (call_frame_t *frame, xlator_t *this)
 
         if (sh->background && sh->unwind && !sh->unwound) {
                 sh->unwind (sh->orig_frame, this, sh->op_ret, sh->op_errno,
-                            is_self_heal_failed (sh));
+                            is_self_heal_failed (sh, AFR_CHECK_SPECIFIC));
                 sh->unwound = _gf_true;
         }
 
@@ -1174,6 +1204,22 @@ afr_sh_data_big_lock_success (call_frame_t *frame, xlator_t *this)
 }
 
 int
+afr_sh_dom_lock_success (call_frame_t *frame, xlator_t *this)
+{
+        afr_local_t   *local = NULL;
+        afr_self_heal_t *sh = NULL;
+
+        local = frame->local;
+        sh = &local->self_heal;
+
+        sh->sh_dom_lock_held = _gf_true;
+        afr_sh_data_lock (frame, this, 0, 0, _gf_true, this->name,
+                          afr_sh_data_big_lock_success,
+                          afr_sh_data_fail);
+        return 0;
+}
+
+int
 afr_sh_data_post_blocking_inodelk_cbk (call_frame_t *frame, xlator_t *this)
 {
         afr_internal_lock_t *int_lock = NULL;
@@ -1237,9 +1283,11 @@ afr_sh_data_post_nonblocking_inodelk_cbk (call_frame_t *frame, xlator_t *this)
 }
 
 int
-afr_sh_data_lock_rec (call_frame_t *frame, xlator_t *this, off_t start, off_t len)
+afr_sh_data_lock_rec (call_frame_t *frame, xlator_t *this, char *dom,
+                      off_t start, off_t len)
 {
         afr_internal_lock_t *int_lock = NULL;
+        afr_inodelk_t       *inodelk  = NULL;
         afr_local_t         *local    = NULL;
 
         local    = frame->local;
@@ -1250,10 +1298,13 @@ afr_sh_data_lock_rec (call_frame_t *frame, xlator_t *this, off_t start, off_t le
 
         afr_set_lock_number (frame, this);
 
-        int_lock->lk_flock.l_start = start;
-        int_lock->lk_flock.l_len   = len;
-        int_lock->lk_flock.l_type  = F_WRLCK;
         int_lock->lock_cbk         = afr_sh_data_post_nonblocking_inodelk_cbk;
+
+        int_lock->domain = dom;
+        inodelk = afr_get_inodelk (int_lock, int_lock->domain);
+        inodelk->flock.l_start = start;
+        inodelk->flock.l_len   = len;
+        inodelk->flock.l_type  = F_WRLCK;
 
         afr_nonblocking_inodelk (frame, this);
 
@@ -1298,7 +1349,7 @@ afr_post_sh_big_lock_failure (call_frame_t *frame, xlator_t *this)
 int
 afr_sh_data_lock (call_frame_t *frame, xlator_t *this,
                   off_t start, off_t len, gf_boolean_t block,
-                  afr_lock_cbk_t success_handler,
+                  char *dom, afr_lock_cbk_t success_handler,
                   afr_lock_cbk_t failure_handler)
 {
         afr_local_t *   local = NULL;
@@ -1310,7 +1361,7 @@ afr_sh_data_lock (call_frame_t *frame, xlator_t *this,
         sh->data_lock_success_handler = success_handler;
         sh->data_lock_failure_handler = failure_handler;
 	sh->data_lock_block = block;
-        return afr_sh_data_lock_rec (frame, this, start, len);
+        return afr_sh_data_lock_rec (frame, this, dom, start, len);
 }
 
 int
@@ -1322,7 +1373,6 @@ afr_sh_data_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         afr_private_t   *priv = NULL;
         int              call_count = 0;
         int              child_index = 0;
-	gf_boolean_t	 block = _gf_true;
 
         local = frame->local;
         sh = &local->self_heal;
@@ -1342,7 +1392,7 @@ afr_sh_data_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 local->loc.path,
                                 priv->children[child_index]->name,
                                 strerror (op_errno));
-                        sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
+                        afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
                 } else {
                         gf_log (this->name, GF_LOG_TRACE,
                                 "open of %s succeeded on child %s",
@@ -1355,7 +1405,7 @@ afr_sh_data_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         call_count = afr_frame_return (frame);
 
         if (call_count == 0) {
-                if (is_self_heal_failed (sh)) {
+                if (is_self_heal_failed (sh, AFR_CHECK_SPECIFIC)) {
                         afr_sh_data_fail (frame, this);
                         return 0;
                 }
@@ -1364,16 +1414,8 @@ afr_sh_data_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         "fd for %s opened, commencing sync",
                         local->loc.path);
 
-                /*
-                 * The read and write self-heal trigger codepaths do not provide
-                 * an unwind callback. We run a trylock in these codepaths
-                 * because we are sensitive to locking latency.
-                 */
-
-		block = sh->unwind ? _gf_true : _gf_false;
-                afr_sh_data_lock (frame, this, 0, 0, block,
-                                  afr_sh_data_big_lock_success,
-                                  afr_sh_data_fail);
+                afr_sh_data_lock (frame, this, 0, 0, _gf_true, priv->sh_domain,
+                                  afr_sh_dom_lock_success, afr_sh_data_fail);
         }
 
         return 0;
@@ -1478,21 +1520,31 @@ afr_can_start_data_self_heal (afr_self_heal_t *sh, afr_private_t *priv)
 int
 afr_self_heal_data (call_frame_t *frame, xlator_t *this)
 {
-        afr_local_t   *local = NULL;
-        afr_self_heal_t *sh = NULL;
-        afr_private_t *priv = this->private;
+        afr_local_t     *local = NULL;
+        afr_self_heal_t *sh    = NULL;
+        afr_private_t   *priv  = this->private;
+        int             ret    = -1;
 
         local = frame->local;
         sh = &local->self_heal;
 
-        sh->afr_set_self_heal_status = afr_set_data_sh_status;
+        sh->sh_type_in_action = AFR_SELF_HEAL_DATA;
 
         if (afr_can_start_data_self_heal (sh, priv)) {
-                sh->afr_set_self_heal_status (sh, AFR_SELF_HEAL_STARTED);
+                afr_set_self_heal_status (sh, AFR_SELF_HEAL_STARTED);
+                ret = afr_inodelk_init (&local->internal_lock.inodelk[1],
+                                        priv->sh_domain, priv->child_count);
+                if (ret < 0) {
+                        afr_set_self_heal_status (sh, AFR_SELF_HEAL_FAILED);
+                        afr_sh_data_done (frame, this);
+                        return 0;
+                }
+
                 if (IA_ISREG (sh->type)) {
                         afr_sh_data_open (frame, this);
                 } else {
                         afr_sh_data_lock (frame, this, 0, 0, _gf_true,
+                                          this->name,
                                           afr_sh_non_reg_lock_success,
                                           afr_sh_data_fail);
                 }
