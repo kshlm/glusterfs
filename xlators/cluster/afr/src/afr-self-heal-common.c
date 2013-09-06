@@ -18,6 +18,28 @@
 #include "afr-self-heal.h"
 #include "pump.h"
 
+#define ADD_FMT_STRING(msg, off, sh_str, status, print_log)                 \
+        do {                                                                \
+                if (AFR_SELF_HEAL_NOT_ATTEMPTED != status) {                \
+                        off += snprintf (msg + off, sizeof (msg) - off,     \
+                                         " "sh_str" self heal %s,",         \
+                                         get_sh_completion_status (status));\
+                        print_log = 1;                                      \
+                }                                                           \
+        } while (0)
+
+#define ADD_FMT_STRING_SYNC(msg, off, sh_str, status, print_log)            \
+        do {                                                                \
+                if (AFR_SELF_HEAL_SYNC_BEGIN == status ||                   \
+                    AFR_SELF_HEAL_FAILED == status)  {                      \
+                        off += snprintf (msg + off, sizeof (msg) - off,     \
+                                         " "sh_str" self heal %s,",         \
+                                         get_sh_completion_status (status));\
+                        print_log = 1;                                      \
+                }                                                           \
+        } while (0)
+
+
 void
 afr_sh_reset (call_frame_t *frame, xlator_t *this)
 {
@@ -141,9 +163,8 @@ afr_sh_print_pending_matrix (int32_t *pending_matrix[], xlator_t *this)
         GF_FREE (buf);
 }
 
-void
-afr_sh_print_split_brain_log (int32_t *pending_matrix[], xlator_t *this,
-                              const char *loc)
+char*
+afr_get_pending_matrix_str (int32_t *pending_matrix[], xlator_t *this)
 {
         afr_private_t *  priv = this->private;
         char            *buf  = NULL;
@@ -173,10 +194,8 @@ afr_sh_print_split_brain_log (int32_t *pending_matrix[], xlator_t *this,
                         + (child_count * child_count * pending_entry_strlen);
 
         buf = GF_CALLOC (1, 1 + strlen (msg) + string_length , gf_afr_mt_char);
-        if (!buf) {
-                buf = "";
+        if (!buf)
                 goto out;
-        }
 
         ptr = buf;
         ptr += sprintf (ptr, "%s", msg);
@@ -192,11 +211,27 @@ afr_sh_print_split_brain_log (int32_t *pending_matrix[], xlator_t *this,
         ptr += sprintf (ptr, "%s", matrix_end);
 
 out:
+        return buf;
+}
+
+void
+afr_sh_print_split_brain_log (int32_t *pending_matrix[], xlator_t *this,
+                              const char *loc)
+{
+        char *buf      = NULL;
+        char *free_ptr = NULL;
+
+        buf = afr_get_pending_matrix_str (pending_matrix, this);
+        if (buf)
+                free_ptr = buf;
+        else
+                buf = "";
+
+
         gf_log (this->name, GF_LOG_ERROR, "Unable to self-heal contents of '%s'"
                 " (possible split-brain). Please delete the file from all but "
                 "the preferred subvolume.%s", loc, buf);
-        if (buf)
-                GF_FREE (buf);
+        GF_FREE (free_ptr);
         return;
 }
 
@@ -466,6 +501,8 @@ afr_find_biggest_witness_among_fools (int32_t *witnesses,
 {
         int i               = 0;
         int biggest_witness = -1;
+        int biggest_witness_idx = -1;
+        int biggest_witness_cnt = -1;
 
         GF_ASSERT (witnesses);
         GF_ASSERT (characters);
@@ -475,10 +512,21 @@ afr_find_biggest_witness_among_fools (int32_t *witnesses,
                 if (characters[i].type != AFR_NODE_FOOL)
                         continue;
 
-                if (biggest_witness < witnesses[i])
+                if (biggest_witness < witnesses[i]) {
                         biggest_witness = witnesses[i];
+			biggest_witness_idx = i;
+			biggest_witness_cnt = 1;
+			continue;
+		}
+
+		if (biggest_witness == witnesses[i])
+			biggest_witness_cnt++;
         }
-        return biggest_witness;
+
+	if (biggest_witness_cnt != 1)
+		return -1;
+
+        return biggest_witness_idx;
 }
 
 int
@@ -506,16 +554,95 @@ afr_mark_fool_as_source_by_witness (int32_t *sources, int32_t *witnesses,
         return nsources;
 }
 
+
+int
+afr_mark_fool_as_source_by_idx (int32_t *sources, int child_count, int idx)
+{
+	if (idx >= 0 && idx < child_count) {
+		sources[idx] = 1;
+		return 1;
+	}
+	return 0;
+}
+
+
+static int
+afr_find_largest_file_size (struct iatt *bufs, int32_t *success_children,
+			    int child_count)
+{
+	int idx = -1;
+	int i = -1;
+	int child = -1;
+	uint64_t max_size = 0;
+        uint64_t min_size = 0;
+        int      num_children = 0;
+
+	for (i = 0; i < child_count; i++) {
+		if (success_children[i] == -1)
+			break;
+
+		child = success_children[i];
+		if (bufs[child].ia_size > max_size) {
+			max_size = bufs[child].ia_size;
+			idx = child;
+		}
+
+                if ((num_children == 0) || (bufs[child].ia_size < min_size)) {
+                        min_size = bufs[child].ia_size;
+                }
+
+                num_children++;
+	}
+
+        /* If sizes are same for all of them, finding sources will have to
+         * happen with pending changelog. So return -1
+         */
+        if ((num_children > 1) && (min_size == max_size))
+                return -1;
+	return idx;
+}
+
+
+static int
+afr_find_newest_file (struct iatt *bufs, int32_t *success_children,
+		      int child_count)
+{
+	int idx = -1;
+	int i = -1;
+	int child = -1;
+	uint64_t max_ctime = 0;
+
+	for (i = 0; i < child_count; i++) {
+		if (success_children[i] == -1)
+			break;
+
+		child = success_children[i];
+		if (bufs[child].ia_ctime > max_ctime) {
+			max_ctime = bufs[child].ia_ctime;
+			idx = child;
+		}
+	}
+
+	return idx;
+}
+
+
 static int
 afr_mark_biggest_of_fools_as_source (int32_t *sources, int32_t **pending_matrix,
                                      afr_node_character *characters,
-                                     int child_count)
+				     int32_t *success_children,
+                                     int child_count, struct iatt *bufs)
 {
         int32_t       biggest_witness = 0;
         int           nsources        = 0;
         int32_t       *witnesses      = NULL;
 
         GF_ASSERT (child_count > 0);
+
+	biggest_witness = afr_find_largest_file_size (bufs, success_children,
+						      child_count);
+	if (biggest_witness != -1)
+		goto found;
 
         witnesses = GF_CALLOC (child_count, sizeof (*witnesses),
                                gf_afr_mt_int32_t);
@@ -529,9 +656,15 @@ afr_mark_biggest_of_fools_as_source (int32_t *sources, int32_t **pending_matrix,
         biggest_witness = afr_find_biggest_witness_among_fools (witnesses,
                                                                 characters,
                                                                 child_count);
-        nsources = afr_mark_fool_as_source_by_witness (sources, witnesses,
-                                                       characters, child_count,
-                                                       biggest_witness);
+	if (biggest_witness != -1)
+		goto found;
+
+	biggest_witness = afr_find_newest_file (bufs, success_children,
+						child_count);
+
+found:
+	nsources = afr_mark_fool_as_source_by_idx (sources, child_count,
+						   biggest_witness);
 out:
         GF_FREE (witnesses);
         return nsources;
@@ -875,7 +1008,8 @@ afr_mark_sources (xlator_t *this, int32_t *sources, int32_t **pending_matrix,
                 nsources = afr_mark_biggest_of_fools_as_source (sources,
                                                                 pending_matrix,
                                                                 characters,
-                                                                child_count);
+								success_children,
+                                                                child_count, bufs);
         }
 
 out:
@@ -2087,6 +2221,8 @@ afr_self_heal_local_init (afr_local_t *l, xlator_t *this)
         shc->forced_merge = sh->forced_merge;
         shc->background = sh->background;
         shc->type = sh->type;
+        shc->data_sh_info = "";
+        shc->metadata_sh_info =  "";
 
         uuid_copy (shc->sh_gfid_req, sh->sh_gfid_req);
         if (l->loc.path) {
@@ -2154,6 +2290,8 @@ afr_self_heal_completion_cbk (call_frame_t *bgsh_frame, xlator_t *this)
                                     sizeof(sh_type_str));
         if (is_self_heal_failed (sh, AFR_CHECK_ALL) && !priv->shd.iamshd) {
                 loglevel = GF_LOG_ERROR;
+        } else if (!is_self_heal_failed (sh, AFR_CHECK_ALL)) {
+                loglevel = GF_LOG_INFO;
         } else {
                 loglevel = GF_LOG_DEBUG;
         }
@@ -2604,7 +2742,8 @@ get_sh_completion_status (afr_self_heal_status status)
 
         char *not_attempted       = " is not attempted";
         char *failed              = " failed";
-        char *successfull_complt  = " is successfully completed";
+        char *started             = " is started";
+        char *sync_begin          = " is successfully completed";
         char *result              = " has unknown status";
 
         switch (status)
@@ -2616,7 +2755,10 @@ get_sh_completion_status (afr_self_heal_status status)
                         result = failed;
                         break;
                 case AFR_SELF_HEAL_STARTED:
-                        result = successfull_complt;
+                        result = started;
+                        break;
+                case AFR_SELF_HEAL_SYNC_BEGIN:
+                        result = sync_begin;
                         break;
         }
 
@@ -2628,35 +2770,43 @@ void
 afr_log_self_heal_completion_status (afr_local_t *local, gf_loglevel_t loglvl)
 {
 
-        char *gfid_or_missing_entry_sh = NULL;
-        char *metadata_sh              = NULL;
-        char *data_sh                  = NULL;
-        char *entry_sh                 = NULL;
-
+        char sh_log[4096]              = {0};
         afr_self_heal_t *sh            = &local->self_heal;
         afr_sh_status_for_all_type   all_status = sh->afr_all_sh_status;
         xlator_t      *this            = NULL;
+        size_t        off              = 0;
+        int           data_sh          = 0;
+        int           metadata_sh      = 0;
+        int           print_log        = 0;
 
         this = THIS;
 
-        gfid_or_missing_entry_sh = get_sh_completion_status
-                                   (all_status.gfid_or_missing_entry_self_heal);
+        ADD_FMT_STRING (sh_log, off, "gfid or missing entry",
+                        all_status.gfid_or_missing_entry_self_heal, print_log);
+        ADD_FMT_STRING_SYNC (sh_log, off, "metadata",
+                             all_status.metadata_self_heal, print_log);
+        if (sh->background) {
+                ADD_FMT_STRING_SYNC (sh_log, off, "backgroung data",
+                                all_status.data_self_heal, print_log);
+        } else {
+                ADD_FMT_STRING_SYNC (sh_log, off, "foreground data",
+                                all_status.data_self_heal, print_log);
+        }
+        ADD_FMT_STRING_SYNC (sh_log, off, "entry", all_status.entry_self_heal,
+                             print_log);
 
-        metadata_sh = get_sh_completion_status (all_status.metadata_self_heal);
+        if (AFR_SELF_HEAL_SYNC_BEGIN == all_status.data_self_heal &&
+	    strcmp (sh->data_sh_info, "") && sh->data_sh_info )
+                data_sh = 1;
+        if (AFR_SELF_HEAL_SYNC_BEGIN == all_status.metadata_self_heal &&
+	    strcmp (sh->metadata_sh_info, "") && sh->metadata_sh_info)
+                metadata_sh = 1;
 
+        if (!print_log)
+                return;
 
-        data_sh = get_sh_completion_status (all_status.data_self_heal);
-
-        entry_sh = get_sh_completion_status (all_status.entry_self_heal);
-
-
-        gf_log (this->name, loglvl, "%s "
-                "gfid or missing entry self heal %s,"
-                " medatadata self heal %s,"
-                " data self heal %s,"
-                " entry self heal %s on  %s",
-                (sh->background ? "background" : "foreground"),
-                gfid_or_missing_entry_sh, metadata_sh, data_sh, entry_sh,
+        gf_log (this->name, loglvl, "%s %s %s on %s", sh_log,
+                ((data_sh == 1) ? sh->data_sh_info : ""),
+                ((metadata_sh == 1) ? sh->metadata_sh_info : ""),
                 local->loc.path);
-
 }

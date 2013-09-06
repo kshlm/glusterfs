@@ -368,6 +368,16 @@ glfs_resolve_at (struct glfs *fs, xlator_t *subvol, inode_t *at,
 			char *lpath = NULL;
 			loc_t sym_loc = {0,};
 
+			if (follow > GLFS_SYMLINK_MAX_FOLLOW) {
+				errno = ELOOP;
+				ret = -1;
+				if (inode) {
+					inode_unref (inode);
+					inode = NULL;
+				}
+				break;
+			}
+
 			ret = glfs_resolve_symlink (fs, subvol, inode, &lpath);
 			inode_unref (inode);
 			inode = NULL;
@@ -383,7 +393,7 @@ glfs_resolve_at (struct glfs *fs, xlator_t *subvol, inode_t *at,
 					       /* always recurisvely follow while
 						  following symlink
 					       */
-					       1, reval);
+					       follow + 1, reval);
 			if (ret == 0)
 				inode = inode_ref (sym_loc.inode);
 			loc_wipe (&sym_loc);
@@ -582,6 +592,15 @@ glfs_migrate_fd_safe (struct glfs *fs, xlator_t *newsubvol, fd_t *oldfd)
 	}
 
 	loc.inode = inode_ref (newinode);
+
+        ret = inode_path (oldfd->inode, NULL, (char **)&loc.path);
+        if (ret < 0) {
+                gf_log (fs->volname, GF_LOG_INFO, "inode_path failed");
+                goto out;
+        }
+
+        uuid_copy (loc.gfid, oldinode->gfid);
+
 
 	if (IA_ISDIR (oldinode->ia_type))
 		ret = syncop_opendir (newsubvol, &loc, newfd);
@@ -796,6 +815,9 @@ glfs_subvol_done (struct glfs *fs, xlator_t *subvol)
 {
 	int ref = 0;
 	xlator_t *active_subvol = NULL;
+
+	if (!subvol)
+		return;
 
 	glfs_lock (fs);
 	{

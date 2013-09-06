@@ -915,7 +915,9 @@ glusterd_op_stage_start_volume (dict_t *dict, char **op_errstr)
                         continue;
 
                 ret = gf_lstat_dir (brickinfo->path, NULL);
-                if (ret) {
+                if (ret && (flags & GF_CLI_FLAG_OP_FORCE)) {
+                        continue;
+                } else if (ret) {
                         snprintf (msg, sizeof (msg), "Failed to find "
                                           "brick directory %s for volume %s. "
                                           "Reason : %s", brickinfo->path,
@@ -1652,6 +1654,8 @@ glusterd_op_create_volume (dict_t *dict, char **op_errstr)
                 i++;
         }
 
+        gd_update_volume_op_versions (volinfo);
+
         ret = glusterd_store_volinfo (volinfo, GLUSTERD_VOLINFO_VER_AC_INCREMENT);
         if (ret) {
                 glusterd_store_delete_volume (volinfo);
@@ -1669,7 +1673,6 @@ glusterd_op_create_volume (dict_t *dict, char **op_errstr)
         list_add_tail (&volinfo->vol_list, &priv->volumes);
         vol_added = _gf_true;
 
-        gd_update_volume_op_versions (volinfo);
 out:
         GF_FREE(free_ptr);
         if (!vol_added && volinfo)
@@ -1703,7 +1706,10 @@ glusterd_op_start_volume (dict_t *dict, char **op_errstr)
 
         list_for_each_entry (brickinfo, &volinfo->bricks, brick_list) {
                 ret = glusterd_brick_start (volinfo, brickinfo, _gf_true);
-                if (ret)
+                /* If 'force' try to start all bricks regardless of success or
+                 * failure
+                 */
+                if (!(flags & GF_CLI_FLAG_OP_FORCE) && ret)
                         goto out;
         }
 

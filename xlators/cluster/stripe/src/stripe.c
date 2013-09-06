@@ -5199,10 +5199,10 @@ stripe_vgetxattr_cbk (call_frame_t *frame, void *cookie,
 
                         xattr->pos = cky;
                         xattr->xattr_value = gf_memdup (xattr_val,
-                                                        xattr->xattr_value,
                                                         xattr->xattr_len);
 
-                        local->xattr_total_len += xattr->xattr_len + 1;
+                        if (xattr->xattr_value != NULL)
+                                local->xattr_total_len += xattr->xattr_len + 1;
                 }
         }
  out:
@@ -5583,10 +5583,10 @@ struct volume_options options[] = {
         },
 	{ .key = {"coalesce"},
 	  .type = GF_OPTION_TYPE_BOOL,
-	  .default_value = "false",
-	  .description = "Enable coalesce mode to flatten striped files as "
-			 "stored on the server (i.e., eliminate holes caused "
-			 "by the traditional format)."
+	  .default_value = "true",
+	  .description = "Enable/Disable coalesce mode to flatten striped "
+			 "files as stored on the server (i.e., eliminate holes "
+			 "caused by the traditional format)."
 	},
         { .key  = {NULL} },
 };

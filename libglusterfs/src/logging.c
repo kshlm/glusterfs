@@ -31,7 +31,7 @@
 #define GF_JSON_MSG_LENGTH      8192
 #define GF_SYSLOG_CEE_FORMAT    \
         "@cee: {\"msg\": \"%s\", \"gf_code\": \"%u\", \"gf_message\": \"%s\"}"
-#define GF_LOG_CONTROL_FILE     "/var/lib/glusterd/logger.conf"
+#define GF_LOG_CONTROL_FILE     "/etc/glusterfs/logger.conf"
 #endif /* GF_USE_SYSLOG */
 
 #include "xlator.h"
@@ -130,7 +130,7 @@ gf_get_error_message (int error_code) {
 
 /**
  * gf_openlog -function to open syslog specific to gluster based on
- *             existent of file /var/lib/glusterd/logger.conf
+ *             existence of file /etc/glusterfs/logger.conf
  * @ident:    optional identification string similar to openlog()
  * @option:   optional value to option to openlog().  Passing -1 uses
  *            'LOG_PID | LOG_NDELAY' as default
@@ -278,7 +278,7 @@ gf_syslog (int error_code, int facility_priority, char *format, ...)
 {
         char       *msg = NULL;
         char        json_msg[GF_JSON_MSG_LENGTH];
-        char       *p = NULL;
+        GF_UNUSED char       *p = NULL;
         const char *error_message = NULL;
         char        json_error_message[GF_JSON_MSG_LENGTH];
         va_list     ap;
@@ -326,6 +326,23 @@ gf_log_globals_init (void *data)
         ctx->log.gf_log_syslog    = 1;
         ctx->log.sys_log_level    = GF_LOG_CRITICAL;
 
+#ifndef GF_USE_SYSLOG
+#ifdef GF_LINUX_HOST_OS
+        /* For the 'syslog' output. one can grep 'GlusterFS' in syslog
+           for serious logs */
+        openlog ("GlusterFS", LOG_PID, LOG_DAEMON);
+#endif
+#endif
+}
+
+int
+gf_log_init (void *data, const char *file, const char *ident)
+{
+        glusterfs_ctx_t *ctx = NULL;
+        int     fd = -1;
+
+        ctx = data;
+
 #if defined(GF_USE_SYSLOG)
         {
                 /* use default ident and option */
@@ -333,26 +350,22 @@ gf_log_globals_init (void *data)
                 struct stat buf;
 
                 if (stat (GF_LOG_CONTROL_FILE, &buf) == 0) {
-                        ctx->log.log_control_file_found = 1; /* use gf_log */
+                        /* use syslog logging */
+                        ctx->log.log_control_file_found = 1;
+                        if (ident) {
+                                /* we need to keep this value as */
+                                /* syslog uses it on every logging */
+                                ctx->log.ident = gf_strdup (ident);
+                                gf_openlog (ctx->log.ident, -1, LOG_DAEMON);
+                        } else {
+                                gf_openlog (NULL, -1, LOG_DAEMON);
+                        }
                 } else {
+                        /* use old style logging */
                         ctx->log.log_control_file_found = 0;
-                        gf_openlog (NULL, -1, LOG_DAEMON);
                 }
         }
-#elif defined(GF_LINUX_HOST_OS)
-        /* For the 'syslog' output. one can grep 'GlusterFS' in syslog
-           for serious logs */
-        openlog ("GlusterFS", LOG_PID, LOG_DAEMON);
 #endif
-}
-
-int
-gf_log_init (void *data, const char *file)
-{
-        glusterfs_ctx_t *ctx = NULL;
-        int     fd = -1;
-
-        ctx = data;
 
         if (!file){
                 fprintf (stderr, "ERROR: no filename specified\n");
@@ -361,7 +374,7 @@ gf_log_init (void *data, const char *file)
 
         if (strcmp (file, "-") == 0) {
                 ctx->log.gf_log_logfile = stderr;
-
+                ctx->log.logfile = stderr;
                 return 0;
         }
 
@@ -474,7 +487,7 @@ _gf_log_nomem (const char *domain, const char *file,
 #endif /* HAVE_BACKTRACE */
 
 #if defined(GF_USE_SYSLOG)
-        if (!(ctx->log.log_control_file_found))
+        if (ctx->log.log_control_file_found)
         {
                 int priority;
                 /* treat GF_LOG_TRACE and GF_LOG_NONE as LOG_DEBUG and
@@ -609,7 +622,7 @@ _gf_log_callingfn (const char *domain, const char *file, const char *function,
 #endif /* HAVE_BACKTRACE */
 
 #if defined(GF_USE_SYSLOG)
-        if (!(ctx->log.log_control_file_found))
+        if (ctx->log.log_control_file_found)
         {
                 int priority;
                 /* treat GF_LOG_TRACE and GF_LOG_NONE as LOG_DEBUG and
@@ -746,7 +759,7 @@ _gf_log (const char *domain, const char *file, const char *function, int line,
                 basename = file;
 
 #if defined(GF_USE_SYSLOG)
-        if (!(ctx->log.log_control_file_found))
+        if (ctx->log.log_control_file_found)
         {
                 int priority;
                 /* treat GF_LOG_TRACE and GF_LOG_NONE as LOG_DEBUG and

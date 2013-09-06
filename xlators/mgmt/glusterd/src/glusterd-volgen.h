@@ -23,6 +23,8 @@
 #define VKEY_DIAG_LAT_MEASUREMENT "diagnostics.latency-measurement"
 #define VKEY_FEATURES_LIMIT_USAGE "features.limit-usage"
 #define VKEY_MARKER_XTIME         GEOREP".indexing"
+#define VKEY_MARKER_XTIME_FORCE   GEOREP".ignore-pid-check"
+#define VKEY_CHANGELOG            "changelog.changelog"
 #define VKEY_FEATURES_QUOTA       "features.quota"
 
 #define AUTH_ALLOW_MAP_KEY "auth.allow"
@@ -134,6 +136,8 @@ glusterd_check_voloption_flags (char *key, int32_t flags);
 gf_boolean_t
 glusterd_is_valid_volfpath (char *volname, char *brick);
 int generate_brick_volfiles (glusterd_volinfo_t *volinfo);
+int generate_client_volfiles (glusterd_volinfo_t *volinfo,
+                              glusterd_client_type_t client_type);
 int glusterd_get_volopt_content (dict_t *dict, gf_boolean_t xml_out);
 char*
 glusterd_get_trans_type_rb (gf_transport_type ttype);

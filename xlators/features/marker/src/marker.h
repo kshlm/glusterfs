@@ -28,8 +28,9 @@
 #define TIMESTAMP_FILE      "timestamp-file"
 
 enum {
-        GF_QUOTA=1,
-        GF_XTIME=2
+        GF_QUOTA             = 1,
+        GF_XTIME             = 2,
+        GF_XTIME_GSYNC_FORCE = 4,
 };
 
 /*initialize the local variable*/
@@ -110,6 +111,7 @@ struct marker_local{
         inode_contribution_t *contri;
 
         int xflag;
+        dict_t *xdata;
 };
 typedef struct marker_local marker_local_t;
 

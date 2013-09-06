@@ -183,6 +183,7 @@ struct dht_local {
         xlator_t        *link_subvol;
 
         struct dht_rebalance_ rebalance;
+        xlator_t        *first_up_subvol;
 
 };
 typedef struct dht_local dht_local_t;
@@ -227,6 +228,7 @@ struct gf_defrag_info_ {
         uint64_t                     total_data;
         uint64_t                     num_files_lookedup;
         uint64_t                     total_failures;
+        uint64_t                     skipped;
         gf_lock_t                    lock;
         int                          cmd;
         pthread_t                    th;

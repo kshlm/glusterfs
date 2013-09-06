@@ -136,7 +136,7 @@ out:
 	if (ret && glfd) {
 		glfs_fd_destroy (glfd);
 		glfd = NULL;
-	} else {
+	} else if (glfd) {
 		fd_bind (glfd->fd);
 		glfs_fd_bind (glfd);
 	}
@@ -158,6 +158,11 @@ glfs_close (struct glfs_fd *glfd)
 	__glfs_entry_fd (glfd);
 
 	subvol = glfs_active_subvol (glfd->fs);
+        if (!subvol) {
+                ret = -1;
+                errno = EIO;
+                goto out;
+        }
 
 	fd = glfs_resolve_fd (glfd->fs, subvol, glfd);
 	if (!fd) {
@@ -388,8 +393,12 @@ retry:
 		goto out;
 	}
 
-	ret = syncop_create (subvol, &loc, flags, mode, glfd->fd,
-			     xattr_req, &iatt);
+	if (ret == 0) {
+		ret = syncop_open (subvol, &loc, flags, glfd->fd);
+	} else {
+		ret = syncop_create (subvol, &loc, flags, mode, glfd->fd,
+				     xattr_req, &iatt);
+	}
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 
@@ -404,7 +413,7 @@ out:
 	if (ret && glfd) {
 		glfs_fd_destroy (glfd);
 		glfd = NULL;
-	} else {
+	} else if (glfd) {
 		fd_bind (glfd->fd);
 		glfs_fd_bind (glfd);
 	}
@@ -1203,6 +1212,7 @@ glfs_readlink (struct glfs *fs, const char *path, char *buf, size_t bufsiz)
 	loc_t            loc = {0, };
 	struct iatt      iatt = {0, };
 	int              reval = 0;
+	char            *linkval = NULL;
 
 	__glfs_entry_fs (fs);
 
@@ -1226,7 +1236,11 @@ retry:
 		goto out;
 	}
 
-	ret = syncop_readlink (subvol, &loc, &buf, bufsiz);
+	ret = syncop_readlink (subvol, &loc, &linkval, bufsiz);
+	if (ret > 0) {
+		memcpy (buf, linkval, ret);
+		GF_FREE (linkval);
+	}
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 out:
@@ -1607,6 +1621,15 @@ retrynew:
 		errno = EISDIR;
 		goto out;
 	}
+
+        /* Filling the inode of the hard link to be same as that of the
+           original file
+        */
+	if (newloc.inode) {
+		inode_unref (newloc.inode);
+		newloc.inode = NULL;
+	}
+        newloc.inode = inode_ref (oldloc.inode);
 
 	ret = syncop_link (subvol, &oldloc, &newloc);
 

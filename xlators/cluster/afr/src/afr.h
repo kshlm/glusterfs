@@ -87,6 +87,7 @@ typedef struct afr_inode_ctx_ {
         int32_t  *fresh_children;//increasing order of latency
         afr_spb_state_t mdata_spb;
         afr_spb_state_t data_spb;
+        uint32_t        open_fd_count;
 } afr_inode_ctx_t;
 
 typedef enum {
@@ -179,6 +180,7 @@ typedef enum {
         AFR_SELF_HEAL_NOT_ATTEMPTED,
         AFR_SELF_HEAL_STARTED,
         AFR_SELF_HEAL_FAILED,
+        AFR_SELF_HEAL_SYNC_BEGIN,
 } afr_self_heal_status;
 
 typedef struct {
@@ -291,6 +293,9 @@ struct afr_self_heal_ {
         unsigned char *write_needed;
         uint8_t *checksum;
         afr_post_remove_call_t post_remove_call;
+
+        char    *data_sh_info;
+        char    *metadata_sh_info;
 
         loc_t parent_loc;
         call_frame_t *orig_frame;
@@ -444,6 +449,8 @@ typedef struct _afr_local {
         unsigned int call_count;
         unsigned int success_count;
         unsigned int enoent_count;
+        uint32_t     open_fd_count;
+        gf_boolean_t update_open_fd_count;
 
 
         unsigned int unhealable;
@@ -491,6 +498,11 @@ typedef struct _afr_local {
 	   O_DSYNC?
 	*/
 	gf_boolean_t      stable_write;
+
+	/* This write appended to the file. Nnot necessarily O_APPEND,
+	   just means the offset of write was at the end of file.
+	*/
+	gf_boolean_t      append_write;
 
         /*
           This struct contains the arguments for the "continuation"
@@ -1169,5 +1181,11 @@ afr_delayed_changelog_wake_resume (xlator_t *this, fd_t *fd, call_stub_t *stub);
 
 int
 afr_inodelk_init (afr_inodelk_t *lk, char *dom, size_t child_count);
+
+void
+afr_handle_open_fd_count (call_frame_t *frame, xlator_t *this);
+
+afr_inode_ctx_t*
+afr_inode_ctx_get (inode_t *inode, xlator_t *this);
 
 #endif /* __AFR_H__ */

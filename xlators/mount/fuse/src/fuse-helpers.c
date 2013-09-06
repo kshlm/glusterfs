@@ -14,9 +14,6 @@
 #include <sys/sysctl.h>
 #endif
 
-#ifndef GF_REQUEST_MAXGROUPS
-#define GF_REQUEST_MAXGROUPS    16
-#endif /* GF_REQUEST_MAXGROUPS */
 
 static void
 fuse_resolve_wipe (fuse_resolve_t *resolve)
@@ -138,6 +135,7 @@ get_fuse_state (xlator_t *this, fuse_in_header_t *finh)
 }
 
 
+#define FUSE_MAX_AUX_GROUPS 32 /* We can get only up to 32 aux groups from /proc */
 void
 frame_fill_groups (call_frame_t *frame)
 {
@@ -160,6 +158,9 @@ frame_fill_groups (call_frame_t *frame)
         if (!fp)
                 goto out;
 
+	if (call_stack_alloc_groups (frame->root, FUSE_MAX_AUX_GROUPS) != 0)
+		goto out;
+
         while ((ptr = fgets (line, sizeof line, fp))) {
                 if (strncmp (ptr, "Groups:", 7) != 0)
                         continue;
@@ -176,7 +177,7 @@ frame_fill_groups (call_frame_t *frame)
                         if (!endptr || *endptr)
                                 break;
                         frame->root->groups[idx++] = id;
-                        if (idx == GF_MAX_AUX_GROUPS)
+                        if (idx == FUSE_MAX_AUX_GROUPS)
                                 break;
                 }
 
@@ -192,6 +193,7 @@ out:
         prcred_t    *prcred = (prcred_t *) scratch;
         FILE        *fp = NULL;
         int          ret = 0;
+	int          ngrps;
 
         ret = snprintf (filename, sizeof filename,
                         "/proc/%d/cred", frame->root->pid);
@@ -200,8 +202,11 @@ out:
                 fp = fopen (filename, "r");
                 if (fp != NULL) {
                         if (fgets (scratch, sizeof scratch, fp) != NULL) {
-                                frame->root->ngrps = MIN(prcred->pr_ngroups,
-                                                         GF_REQUEST_MAXGROUPS);
+                                ngrps = MIN(prcred->pr_ngroups,
+					    GF_MAX_AUX_GROUPS);
+				if (call_stack_alloc_groups (frame->root,
+							     ngrps) != 0)
+					return;
                         }
                         fclose (fp);
                  }
@@ -226,7 +231,9 @@ out:
 
         if (sysctl(name, namelen, &kp, &kplen, NULL, 0) != 0)
                 return;
-        ngroups = MIN(kp.kp_eproc.e_ucred.cr_ngroups, GF_REQUEST_MAXGROUPS);
+        ngroups = MIN(kp.kp_eproc.e_ucred.cr_ngroups, GF_MAX_AUX_GROUPS);
+	if (call_stack_alloc_groups (frame->root, ngroups) != 0)
+		return;
         for (i = 0; i < ngroups; i++)
                 frame->root->groups[i] = kp.kp_eproc.e_ucred.cr_groups[i];
         frame->root->ngrps = ngroups;
@@ -257,6 +264,8 @@ static void get_groups(fuse_private_t *priv, call_frame_t *frame)
 
 	gl = gid_cache_lookup(&priv->gid_cache, frame->root->pid);
 	if (gl) {
+		if (call_stack_alloc_groups (frame->root, gl->gl_count) != 0)
+			return;
 		frame->root->ngrps = gl->gl_count;
 		for (i = 0; i < gl->gl_count; i++)
 			frame->root->groups[i] = gl->gl_list[i];
@@ -317,31 +326,12 @@ get_call_frame_for_req (fuse_state_t *state)
         return frame;
 }
 
-inode_t *
-fuse_ino_to_inode_gfid_mount (uint64_t ino, xlator_t *fuse)
-{
-        inode_t  **ptr           = NULL, *inode = NULL;
-        xlator_t  *active_subvol = NULL;
-
-        if (ino == 1) {
-                active_subvol = fuse_active_subvol (fuse);
-                if (active_subvol)
-                        inode = active_subvol->itable->root;
-        } else {
-                ptr = (void *)ino;
-
-                if (ptr != NULL)
-                        inode = inode_ref (*ptr);
-        }
-
-        return inode;
-}
 
 inode_t *
-fuse_ino_to_inode_normal_mount (uint64_t ino, xlator_t *fuse)
+fuse_ino_to_inode (uint64_t ino, xlator_t *fuse)
 {
+        inode_t  *inode = NULL;
         xlator_t *active_subvol = NULL;
-        inode_t  *inode         = NULL;
 
         if (ino == 1) {
                 active_subvol = fuse_active_subvol (fuse);
@@ -355,96 +345,15 @@ fuse_ino_to_inode_normal_mount (uint64_t ino, xlator_t *fuse)
         return inode;
 }
 
-inode_t *
-fuse_ino_to_inode (uint64_t ino, xlator_t *fuse)
+uint64_t
+inode_to_fuse_nodeid (inode_t *inode)
 {
-        inode_t        *inode         = NULL;
-        fuse_private_t *priv          = NULL;
-
-        priv = fuse->private;
-
-        if (priv->aux_gfid_mount) {
-                inode = fuse_ino_to_inode_gfid_mount (ino, fuse);
-        } else {
-                inode = fuse_ino_to_inode_normal_mount (ino, fuse);
-        }
-
-        return inode;
-}
-
-inline uint64_t
-inode_to_fuse_nodeid_gfid_mount (xlator_t *this, inode_t *inode,
-                                 gf_lookup_namespace_t ns)
-{
-        inode_t          **ptr    = NULL;
-        gf_fuse_nodeid_t  *nodeid = NULL;
-        fuse_private_t    *priv   = NULL;
-        uint64_t           value  = 0;
-        int32_t            ret    = 0;
-
-        priv = this->private;
-
-        LOCK (&inode->lock);
-        {
-                __inode_ctx_get (inode, this, &value);
-                nodeid = (void *)value;
-
-                if (nodeid == NULL) {
-                        nodeid = mem_get0 (priv->fuse_nodeid_pool);
-                        if (nodeid == NULL)
-                                goto unlock;
-
-                        ret = __inode_ctx_set (inode, this, (uint64_t *)nodeid);
-                        if (ret < 0)
-                                goto unlock;
-
-                        nodeid->inode_path_ns = nodeid->inode_gfid_ns = inode;
-                }
-        }
-unlock:
-        UNLOCK (&inode->lock);
-
-        if (ret < 0) {
-                mem_put (nodeid);
-                nodeid = NULL;
-        }
-
-        if (nodeid != NULL) {
-                if (ns == GF_FUSE_GFID_NAMESPACE)
-                        ptr = &nodeid->inode_gfid_ns;
-                else
-                        ptr = &nodeid->inode_path_ns;
-        }
-
-        return (uint64_t) ptr;
-}
-
-inline uint64_t
-inode_to_fuse_nodeid_normal_mount (inode_t *inode)
-{
+        if (!inode)
+		return 0;
 	if (__is_root_gfid (inode->gfid))
                 return 1;
 
         return (unsigned long) inode;
-}
-
-uint64_t
-inode_to_fuse_nodeid (xlator_t *this, inode_t *inode, gf_lookup_namespace_t ns)
-{
-        fuse_private_t *priv = NULL;
-        uint64_t        ino  = 0;
-
-        priv = this->private;
-
-        if (!inode)
-		return 0;
-
-        if (priv->aux_gfid_mount)
-                ino = inode_to_fuse_nodeid_gfid_mount (this, inode, ns);
-        else
-                ino = inode_to_fuse_nodeid_normal_mount (inode);
-
-        return ino;
 }
 
 
@@ -680,8 +589,7 @@ fuse_ignore_xattr_set (fuse_private_t *priv, char *key)
               || (fnmatch ("*.glusterfs.volume-mark",
                            key, FNM_PERIOD) == 0)
               || (fnmatch ("*.glusterfs.volume-mark.*",
-                           key, FNM_PERIOD) == 0)
-              || (fnmatch ("glusterfs.gfid.newfile", key, FNM_PERIOD) == 0)))
+                           key, FNM_PERIOD) == 0)))
                 ret = -1;
 
  out:

@@ -29,6 +29,8 @@ AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_FILES([Makefile
                 libglusterfs/Makefile
                 libglusterfs/src/Makefile
+                geo-replication/src/peer_gsec_create
+                geo-replication/src/peer_add_secret_pub
                 glusterfsd/Makefile
                 glusterfsd/src/Makefile
                 rpc/Makefile
@@ -67,6 +69,8 @@ AC_CONFIG_FILES([Makefile
                 xlators/performance/write-behind/src/Makefile
                 xlators/performance/read-ahead/Makefile
                 xlators/performance/read-ahead/src/Makefile
+                xlators/performance/readdir-ahead/Makefile
+                xlators/performance/readdir-ahead/src/Makefile
                 xlators/performance/io-threads/Makefile
                 xlators/performance/io-threads/src/Makefile
                 xlators/performance/io-cache/Makefile
@@ -119,12 +123,16 @@ AC_CONFIG_FILES([Makefile
                 xlators/features/index/src/Makefile
                 xlators/features/protect/Makefile
                 xlators/features/protect/src/Makefile
+                xlators/features/gfid-access/Makefile
+                xlators/features/gfid-access/src/Makefile
                 xlators/playground/Makefile
                 xlators/playground/template/Makefile
                 xlators/playground/template/src/Makefile
                 xlators/encryption/Makefile
                 xlators/encryption/rot-13/Makefile
                 xlators/encryption/rot-13/src/Makefile
+		xlators/features/qemu-block/Makefile
+		xlators/features/qemu-block/src/Makefile
                 xlators/system/Makefile
                 xlators/system/posix-acl/Makefile
                 xlators/system/posix-acl/src/Makefile
@@ -151,6 +159,7 @@ AC_CONFIG_FILES([Makefile
                 extras/ocf/glusterd
                 extras/ocf/volume
                 extras/LinuxRPM/Makefile
+                extras/geo-rep/Makefile
                 contrib/fuse-util/Makefile
                 contrib/uuid/uuid_types.h
                 glusterfs-api.pc
@@ -350,6 +359,33 @@ fi
 AC_SUBST(FUSERMOUNT_SUBDIR)
 #end FUSERMOUNT section
 
+# QEMU_BLOCK section
+
+AC_ARG_ENABLE([qemu-block],
+                AC_HELP_STRING([--enable-qemu-block],
+                        [Build QEMU Block formats translator]))
+
+if test "x$enable_qemu_block" != "xno"; then
+  PKG_CHECK_MODULES([GLIB], [glib-2.0],
+                    [HAVE_GLIB_2="yes"],
+  		    [HAVE_GLIB_2="no"])
+fi
+
+if test "x$enable_qemu_block" = "xyes" -a "x$HAVE_GLIB_2" = "xno"; then
+   echo "QEMU Block formats translator requires libglib-2.0, but missing."
+   exit 1
+fi
+
+BUILD_QEMU_BLOCK=no
+if test "x${enable_qemu_block}" != "xno" -a "x${HAVE_GLIB_2}" = "xyes"; then
+  BUILD_QEMU_BLOCK=yes
+  AC_DEFINE(HAVE_QEMU_BLOCK, 1, [define if libglib-2.0 library found and QEMU
+                  	     Block translator enabled])
+fi
+
+AM_CONDITIONAL([ENABLE_QEMU_BLOCK], [test x$BUILD_QEMU_BLOCK = xyes])
+
+# end QEMU_BLOCK section
 
 # EPOLL section
 AC_ARG_ENABLE([epoll],
@@ -479,14 +515,24 @@ if test "x${DTRACE}" = "xyes" -a "x${SDT_H_FOUND}" = "xyes"; then
 fi
 # end of systemtap/dtrace
 
-#check if libxml is present if so enable HAVE_LIB_XML
-echo -n "checking if libxml2 is present... "
+# xml-output
+AC_ARG_ENABLE([xml-output],
+              AC_HELP_STRING([--disable-xml-output],
+                             [Disable the xml output]))
+BUILD_XML_OUTPUT="yes"
+if test "x$enable_xml_output" != "xno"; then
+    #check if libxml is present if so enable HAVE_LIB_XML
+    AM_PATH_XML2([2.6.19])
 
-AM_PATH_XML2([2.6.19])
-
-if test "x${no_xml}" = "x"; then
-    AC_DEFINE([HAVE_LIB_XML], [1], [Define to 1 if using libxml2.])
+    if test "x${no_xml}" = "x"; then
+        AC_DEFINE([HAVE_LIB_XML], [1], [Define to 1 if using libxml2.])
+    else
+        BUILD_XML_OUTPUT="no"
+    fi
+else
+    BUILD_XML_OUTPUT="no"
 fi
+# end of xml-output
 
 dnl FreeBSD > 5 has execinfo as a Ported library for giving a workaround
 dnl solution to GCC backtrace functionality
@@ -587,6 +633,18 @@ AC_MSG_CHECKING([whether $CC accepts -Werror=format-security])
 AC_COMPILE_IFELSE([AC_LANG_PROGRAM()], [cc_werror_format_security=yes], [cc_werror_format_security=no])
 echo $cc_werror_format_security
 if test "x$cc_werror_format_security" = "xno"; then
+    CFLAGS="$saved_CFLAGS"
+else
+    CFLAGS="$saved_CFLAGS $CFLAGS"
+fi
+
+# check for gcc -Werror=implicit-function-declaration
+saved_CFLAGS=$CFLAGS
+CFLAGS="-Werror=implicit-function-declaration"
+AC_MSG_CHECKING([whether $CC accepts -Werror=implicit-function-declaration])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM()], [cc_werror_implicit=yes], [cc_werror_implicit=no])
+echo $cc_werror_implicit
+if test "x$cc_werror_implicit" = "xno"; then
     CFLAGS="$saved_CFLAGS"
 else
     CFLAGS="$saved_CFLAGS $CFLAGS"
@@ -807,5 +865,8 @@ echo "systemtap            : $BUILD_SYSTEMTAP"
 echo "Block Device backend : $BUILD_BD_XLATOR"
 echo "glupy                : $BUILD_GLUPY"
 echo "Use syslog           : $USE_SYSLOG"
+echo "XML output           : $BUILD_XML_OUTPUT"
+echo "QEMU Block formats   : $BUILD_QEMU_BLOCK"
 echo "zmq                  : $BUILD_ZMQ"
+
 echo

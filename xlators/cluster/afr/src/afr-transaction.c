@@ -586,6 +586,59 @@ afr_txn_nothing_failed (call_frame_t *frame, xlator_t *this)
         return _gf_true;
 }
 
+static void
+afr_dir_fop_handle_all_fop_failures (call_frame_t *frame)
+{
+        xlator_t        *this = NULL;
+        afr_local_t     *local = NULL;
+        afr_private_t   *priv = NULL;
+
+        this = frame->this;
+        local = frame->local;
+        priv = this->private;
+
+        if ((local->transaction.type != AFR_ENTRY_TRANSACTION) &&
+            (local->transaction.type != AFR_ENTRY_RENAME_TRANSACTION))
+                return;
+
+        if (local->op_ret >= 0)
+                goto out;
+
+        __mark_all_success (local->pending, priv->child_count,
+                            local->transaction.type);
+out:
+        return;
+}
+
+static void
+afr_data_handle_quota_errors (call_frame_t *frame, xlator_t *this)
+{
+        int     i = 0;
+        afr_private_t *priv = NULL;
+        afr_local_t   *local = NULL;
+        gf_boolean_t  all_quota_failures = _gf_false;
+
+        local = frame->local;
+        priv  = this->private;
+        if (local->transaction.type != AFR_DATA_TRANSACTION)
+                return;
+        /*
+         * Idea is to not leave the file in FOOL-FOOL scenario in case on
+         * all the bricks data transaction failed with EDQUOT to avoid
+         * increasing un-necessary load of self-heals in the system.
+         */
+        all_quota_failures = _gf_true;
+        for (i = 0; i < priv->child_count; i++) {
+                if (local->transaction.pre_op[i] &&
+                    (local->child_errno[i] != EDQUOT)) {
+                        all_quota_failures = _gf_false;
+                        break;
+                }
+        }
+        if (all_quota_failures)
+                __mark_all_success (local->pending, priv->child_count,
+                                    local->transaction.type);
+}
 
 int
 afr_changelog_post_op_now (call_frame_t *frame, xlator_t *this)
@@ -607,6 +660,9 @@ afr_changelog_post_op_now (call_frame_t *frame, xlator_t *this)
         __mark_non_participant_children (local->pending, priv->child_count,
                                          local->transaction.pre_op,
                                          local->transaction.type);
+
+        afr_data_handle_quota_errors (frame, this);
+        afr_dir_fop_handle_all_fop_failures (frame);
 
         if (local->fd)
                 afr_transaction_rm_stale_children (frame, this,
@@ -1308,18 +1364,64 @@ afr_set_delayed_post_op (call_frame_t *frame, xlator_t *this)
                 local->delayed_post_op = _gf_true;
 }
 
+gf_boolean_t
+afr_are_multiple_fds_opened (inode_t *inode, xlator_t *this)
+{
+        afr_inode_ctx_t *ictx = NULL;
+
+        if (!inode) {
+                /* If false is returned, it may keep on taking eager-lock
+                 * which may lead to starvation, so return true to avoid that.
+                 */
+                gf_log_callingfn (this->name, GF_LOG_ERROR, "Invalid inode");
+                return _gf_true;
+        }
+        /* Lets say mount1 has eager-lock(full-lock) and after the eager-lock
+         * is taken mount2 opened the same file, it won't be able to
+         * perform any data operations until mount1 releases eager-lock.
+         * To avoid such scenario do not enable eager-lock for this transaction
+         * if open-fd-count is > 1
+         */
+
+        ictx = afr_inode_ctx_get (inode, this);
+        if (!ictx)
+                return _gf_true;
+
+        if (ictx->open_fd_count > 1)
+                return _gf_true;
+
+        return _gf_false;
+}
+
+gf_boolean_t
+afr_any_fops_failed (afr_local_t *local, afr_private_t *priv)
+{
+        if (local->success_count != priv->child_count)
+                return _gf_true;
+        return _gf_false;
+}
 
 gf_boolean_t
 is_afr_delayed_changelog_post_op_needed (call_frame_t *frame, xlator_t *this)
 {
         afr_local_t      *local = NULL;
         gf_boolean_t      res = _gf_false;
+        afr_private_t    *priv  = NULL;
+
+        priv  = this->private;
 
         local = frame->local;
         if (!local)
                 goto out;
 
         if (!local->delayed_post_op)
+                goto out;
+
+        //Mark pending changelog ASAP
+        if (afr_any_fops_failed (local, priv))
+                goto out;
+
+        if (local->fd && afr_are_multiple_fds_opened (local->fd->inode, this))
                 goto out;
 
         res = _gf_true;
@@ -1478,6 +1580,8 @@ afr_changelog_fsync (call_frame_t *frame, xlator_t *this)
         int i = 0;
         int call_count = 0;
         afr_private_t *priv = NULL;
+ 	dict_t *xdata = NULL;
+ 	GF_UNUSED int ret = -1;
 
         local = frame->local;
         priv = this->private;
@@ -1493,6 +1597,10 @@ afr_changelog_fsync (call_frame_t *frame, xlator_t *this)
 
         local->call_count = call_count;
 
+	xdata = dict_new();
+	if (xdata)
+		ret = dict_set_int32 (xdata, "batch-fsync", 1);
+
         for (i = 0; i < priv->child_count; i++) {
                 if (!local->transaction.pre_op[i])
                         continue;
@@ -1500,10 +1608,13 @@ afr_changelog_fsync (call_frame_t *frame, xlator_t *this)
                 STACK_WIND_COOKIE (frame, afr_changelog_fsync_cbk,
                                 (void *) (long) i, priv->children[i],
                                 priv->children[i]->fops->fsync, local->fd,
-                                1, NULL);
+                                1, xdata);
                 if (!--call_count)
                         break;
         }
+
+	if (xdata)
+		dict_unref (xdata);
 
         return 0;
 }
@@ -1582,9 +1693,9 @@ afr_changelog_post_op_safe (call_frame_t *frame, xlator_t *this)
 }
 
 
-        void
+void
 afr_delayed_changelog_post_op (xlator_t *this, call_frame_t *frame, fd_t *fd,
-                call_stub_t *stub)
+                               call_stub_t *stub)
 {
 	afr_fd_ctx_t      *fd_ctx = NULL;
 	call_frame_t      *prev_frame = NULL;
@@ -1629,7 +1740,7 @@ out:
 }
 
 
-        void
+void
 afr_changelog_post_op (call_frame_t *frame, xlator_t *this)
 {
         afr_local_t  *local = NULL;
@@ -1651,14 +1762,14 @@ afr_changelog_post_op (call_frame_t *frame, xlator_t *this)
    The @stub gets saved in @local and gets resumed in
    afr_local_cleanup()
    */
-        void
+void
 afr_delayed_changelog_wake_resume (xlator_t *this, fd_t *fd, call_stub_t *stub)
 {
         afr_delayed_changelog_post_op (this, NULL, fd, stub);
 }
 
 
-        void
+void
 afr_delayed_changelog_wake_up (xlator_t *this, fd_t *fd)
 {
         afr_delayed_changelog_post_op (this, NULL, fd, NULL);
@@ -1708,8 +1819,9 @@ afr_transaction_resume (call_frame_t *frame, xlator_t *this)
  * afr_transaction_fop_failed - inform that an fop failed
  */
 
-        void
-afr_transaction_fop_failed (call_frame_t *frame, xlator_t *this, int child_index)
+void
+afr_transaction_fop_failed (call_frame_t *frame, xlator_t *this,
+                            int child_index)
 {
         afr_local_t *   local = NULL;
         afr_private_t * priv  = NULL;
@@ -1744,8 +1856,7 @@ afr_locals_overlap (afr_local_t *local1, afr_local_t *local2)
         return ((end1 >= start2) && (end2 >= start1));
 }
 
-
-        void
+void
 afr_transaction_eager_lock_init (afr_local_t *local, xlator_t *this)
 {
         afr_private_t *priv = NULL;
@@ -1767,6 +1878,8 @@ afr_transaction_eager_lock_init (afr_local_t *local, xlator_t *this)
         if (!fdctx)
                 return;
 
+        if (afr_are_multiple_fds_opened (local->fd->inode, this))
+                return;
         /*
          * Once full file lock is acquired in eager-lock phase, overlapping
          * writes do not compete for inode-locks, instead are transferred to the

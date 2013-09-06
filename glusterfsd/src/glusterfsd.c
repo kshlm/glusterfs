@@ -67,6 +67,7 @@
 #include <fnmatch.h>
 #include "rpc-clnt.h"
 #include "syncop.h"
+#include "client_t.h"
 
 #include "daemon.h"
 
@@ -108,7 +109,7 @@ static struct argp_option gf_options[] = {
 
         {"log-level", ARGP_LOG_LEVEL_KEY, "LOGLEVEL", 0,
          "Logging severity.  Valid options are DEBUG, INFO, WARNING, ERROR, "
-         "CRITICAL and NONE [default: INFO]"},
+         "CRITICAL, TRACE and NONE [default: INFO]"},
         {"log-file", ARGP_LOG_FILE_KEY, "LOGFILE", 0,
          "File to use for logging [default: "
          DEFAULT_LOG_FILE_DIRECTORY "/" PACKAGE_NAME ".log" "]"},
@@ -354,7 +355,7 @@ set_fuse_mount_options (glusterfs_ctx_t *ctx, dict_t *options)
         }
 
         if (cmd_args->aux_gfid_mount) {
-                ret = dict_set_static_ptr (options, "auxiliary-gfid-mount",
+                ret = dict_set_static_ptr (options, "virtual-gfid-access",
                                            "on");
                 if (ret < 0) {
                         gf_log ("glusterfsd", GF_LOG_ERROR,
@@ -1143,7 +1144,6 @@ set_log_file_path (cmd_args_t *cmd_args)
         int   j = 0;
         int   ret = 0;
         int   port = 0;
-        char *tmp_ptr = NULL;
         char  tmp_str[1024] = {0,};
 
         if (cmd_args->mount_point) {
@@ -1180,17 +1180,15 @@ set_log_file_path (cmd_args_t *cmd_args)
         }
 
         if (cmd_args->volfile_server) {
-                port = 1;
-                tmp_ptr = "default";
+                port = GF_DEFAULT_BASE_PORT;
 
                 if (cmd_args->volfile_server_port)
                         port = cmd_args->volfile_server_port;
-                if (cmd_args->volfile_id)
-                        tmp_ptr = cmd_args->volfile_id;
 
                 ret = gf_asprintf (&cmd_args->log_file,
                                    DEFAULT_LOG_FILE_DIRECTORY "/%s-%s-%d.log",
-                                   cmd_args->volfile_server, tmp_ptr, port);
+                                   cmd_args->volfile_server,
+                                   cmd_args->volfile_id, port);
         }
 done:
         return ret;
@@ -1279,6 +1277,8 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
 
         pthread_mutex_init (&(ctx->lock), NULL);
 
+        ctx->clienttable = gf_clienttable_alloc();
+
         cmd_args = &ctx->cmd_args;
 
         /* parsing command line arguments */
@@ -1334,10 +1334,13 @@ out:
 }
 
 static int
-logging_init (glusterfs_ctx_t *ctx)
+logging_init (glusterfs_ctx_t *ctx, const char *progpath)
 {
         cmd_args_t *cmd_args = NULL;
         int         ret = 0;
+        char        ident[1024] = {0,};
+        char       *progname = NULL;
+        char       *ptr = NULL;
 
         cmd_args = &ctx->cmd_args;
 
@@ -1349,7 +1352,22 @@ logging_init (glusterfs_ctx_t *ctx)
                 }
         }
 
-        if (gf_log_init (ctx, cmd_args->log_file) == -1) {
+#ifdef GF_USE_SYSLOG
+        progname  = gf_strdup (progpath);
+        snprintf (ident, 1024, "%s_%s", basename(progname),
+                  basename(cmd_args->log_file));
+        GF_FREE (progname);
+        /* remove .log suffix */
+        if (NULL != (ptr = strrchr(ident, '.'))) {
+                if (strcmp(ptr, ".log") == 0) {
+                        /* note: ptr points to location in ident only */
+                        ptr[0] = '\0';
+                }
+        }
+        ptr = ident;
+#endif
+
+        if (gf_log_init (ctx, cmd_args->log_file, ptr) == -1) {
                 fprintf (stderr, "ERROR: failed to open logfile %s\n",
                          cmd_args->log_file);
                 return -1;
@@ -1911,7 +1929,7 @@ main (int argc, char *argv[])
         if (ret)
                 goto out;
 
-        ret = logging_init (ctx);
+        ret = logging_init (ctx, argv[0]);
         if (ret)
                 goto out;
 
@@ -1939,7 +1957,7 @@ main (int argc, char *argv[])
         if (ret)
                 goto out;
 
-	ctx->env = syncenv_new (0);
+	ctx->env = syncenv_new (0, 0, 0);
         if (!ctx->env) {
                 gf_log ("", GF_LOG_ERROR,
                         "Could not create new sync-environment");

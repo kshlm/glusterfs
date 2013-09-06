@@ -37,7 +37,7 @@
 
 #define _GLUSTERD_CALLED_ "_GLUSTERD_CALLED_"
 #define _GSYNCD_DISPATCHED_ "_GSYNCD_DISPATCHED_"
-#define GSYNCD_CONF "geo-replication/gsyncd.conf"
+#define GSYNCD_CONF_TEMPLATE "geo-replication/gsyncd_template.conf"
 #define GSYNCD_PY "gsyncd.py"
 #define RSYNC "rsync"
 
@@ -127,11 +127,11 @@ invoke_gsyncd (int argc, char **argv)
                         gluster_workdir_len = len - 1;
 
                 if (gluster_workdir_len) {
-                        if (gluster_workdir_len + 1 + strlen (GSYNCD_CONF) + 1 >
+                        if (gluster_workdir_len + 1 + strlen (GSYNCD_CONF_TEMPLATE) + 1 >
                             PATH_MAX)
                                 goto error;
                         config_file[gluster_workdir_len] = '/';
-                        strcat (config_file, GSYNCD_CONF);
+                        strcat (config_file, GSYNCD_CONF_TEMPLATE);
                 } else
                         goto error;
 
@@ -285,6 +285,46 @@ invoke_rsync (int argc, char **argv)
         return 1;
 }
 
+static int
+invoke_gluster (int argc, char **argv)
+{
+        int i = 0;
+        int j = 0;
+        int optsover = 0;
+        char *ov = NULL;
+
+        for (i = 1; i < argc; i++) {
+                ov = strtail (argv[i], "--");
+                if (ov && !optsover) {
+                        if (*ov == '\0')
+                                optsover = 1;
+                        continue;
+                }
+                switch (++j) {
+                case 1:
+                        if (strcmp (argv[i], "volume") != 0)
+                                goto error;
+                        break;
+                case 2:
+                        if (strcmp (argv[i], "info") != 0)
+                                goto error;
+                        break;
+                case 3:
+                        break;
+                default:
+                        goto error;
+                }
+        }
+
+        argv[0] = "gluster";
+        execvp (SBIN_DIR"/gluster", argv);
+        fprintf (stderr, "exec of gluster failed\n");
+        return 127;
+
+ error:
+        fprintf (stderr, "disallowed gluster invocation\n");
+        return 1;
+}
 
 struct invocable {
         char *name;
@@ -292,8 +332,9 @@ struct invocable {
 };
 
 struct invocable invocables[] = {
-        { "rsync",  invoke_rsync  },
-        { "gsyncd", invoke_gsyncd },
+        { "rsync",   invoke_rsync  },
+        { "gsyncd",  invoke_gsyncd },
+        { "gluster", invoke_gluster },
         { NULL, NULL}
 };
 

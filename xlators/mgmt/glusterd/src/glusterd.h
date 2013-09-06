@@ -47,6 +47,10 @@
 #define GLUSTERD_QUORUM_TYPE_KEY        "cluster.server-quorum-type"
 #define GLUSTERD_QUORUM_RATIO_KEY       "cluster.server-quorum-ratio"
 #define GLUSTERD_GLOBAL_OPT_VERSION     "global-option-version"
+#define GLUSTERD_COMMON_PEM_PUB_FILE    "/geo-replication/common_secret.pem.pub"
+#define GLUSTERD_CREATE_HOOK_SCRIPT     "/hooks/1/gsync-create/post/" \
+                                        "S56glusterd-geo-rep-create-post.sh"
+
 
 #define GLUSTERD_SERVER_QUORUM "server"
 
@@ -95,6 +99,9 @@ typedef enum glusterd_op_ {
         GD_OP_CLEARLOCKS_VOLUME,
         GD_OP_DEFRAG_BRICK_VOLUME,
         GD_OP_BD_OP,
+        GD_OP_COPY_FILE,
+        GD_OP_SYS_EXEC,
+        GD_OP_GSYNC_CREATE,
         GD_OP_MAX,
 } glusterd_op_t;
 
@@ -233,6 +240,7 @@ struct glusterd_rebalance_ {
         uint64_t                rebalance_files;
         uint64_t                rebalance_data;
         uint64_t                lookedup_files;
+        uint64_t                skipped_files;
         glusterd_defrag_info_t  *defrag;
         gf_cli_defrag_type      defrag_cmd;
         uint64_t                rebalance_failures;
@@ -602,6 +610,12 @@ int
 glusterd_handle_reset_volume (rpcsvc_request_t *req);
 
 int
+glusterd_handle_copy_file (rpcsvc_request_t *req);
+
+int
+glusterd_handle_sys_exec (rpcsvc_request_t *req);
+
+int
 glusterd_handle_gsync_set (rpcsvc_request_t *req);
 
 int
@@ -685,6 +699,12 @@ int glusterd_op_stage_heal_volume (dict_t *dict, char **op_errstr);
 int glusterd_op_heal_volume (dict_t *dict, char **op_errstr);
 int glusterd_op_stage_gsync_set (dict_t *dict, char **op_errstr);
 int glusterd_op_gsync_set (dict_t *dict, char **op_errstr, dict_t *rsp_dict);
+int glusterd_op_stage_copy_file (dict_t *dict, char **op_errstr);
+int glusterd_op_copy_file (dict_t *dict, char **op_errstr);
+int glusterd_op_stage_sys_exec (dict_t *dict, char **op_errstr);
+int glusterd_op_sys_exec (dict_t *dict, char **op_errstr, dict_t *rsp_dict);
+int glusterd_op_stage_gsync_create (dict_t *dict, char **op_errstr);
+int glusterd_op_gsync_create (dict_t *dict, char **op_errstr, dict_t *rsp_dict);
 int glusterd_op_quota (dict_t *dict, char **op_errstr, dict_t *rsp_dict);
 int glusterd_op_stage_quota (dict_t *dict, char **op_errstr);
 int glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
@@ -726,7 +746,7 @@ int glusterd_op_statedump_volume_args_get (dict_t *dict, char **volname,
                                            char **options, int *option_cnt);
 
 int glusterd_op_gsync_args_get (dict_t *dict, char **op_errstr,
-                                char **master, char **slave);
+                                char **master, char **slave, char **host_uuid);
 /* Synctask part */
 int32_t glusterd_op_begin_synctask (rpcsvc_request_t *req, glusterd_op_t op,
                                     void *dict);

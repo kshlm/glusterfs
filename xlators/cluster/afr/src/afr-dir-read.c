@@ -253,7 +253,7 @@ unlock:
                         goto out;
 
                 if (!afr_is_opendir_done (this, local->fd->inode) &&
-                    up_children_count > 1) {
+                    up_children_count > 1 && priv->entry_self_heal) {
 
                         /*
                          * This is the first opendir on this inode. We need
@@ -383,14 +383,36 @@ afr_forget_entries (fd_t *fd)
         }
 }
 
+static void
+afr_readdir_filter_trash_dir (gf_dirent_t *entries, fd_t *fd)
+{
+        gf_dirent_t *   entry       = NULL;
+        gf_dirent_t *   tmp         = NULL;
+
+        list_for_each_entry_safe (entry, tmp, &entries->list, list) {
+                if (__is_root_gfid (fd->inode->gfid) &&
+                    !strcmp (entry->d_name, GF_REPLICATE_TRASH_DIR)) {
+                        list_del_init (&entry->list);
+                        GF_FREE (entry);
+                }
+        }
+}
 
 int32_t
 afr_readdir_cbk (call_frame_t *frame, void *cookie,
                  xlator_t *this, int32_t op_ret, int32_t op_errno,
                  gf_dirent_t *entries, dict_t *xdata)
 {
-        AFR_STACK_UNWIND (readdir, frame, op_ret, op_errno, entries, NULL);
+        afr_local_t     *local = NULL;
 
+        if (op_ret == -1)
+                goto out;
+
+        local = frame->local;
+        afr_readdir_filter_trash_dir (entries, local->fd);
+
+out:
+        AFR_STACK_UNWIND (readdir, frame, op_ret, op_errno, entries, NULL);
         return 0;
 }
 
@@ -400,8 +422,16 @@ afr_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno, gf_dirent_t *entries,
                   dict_t *xdata)
 {
-        AFR_STACK_UNWIND (readdirp, frame, op_ret, op_errno, entries, NULL);
+        afr_local_t     *local = NULL;
 
+        if (op_ret == -1)
+                goto out;
+
+        local = frame->local;
+        afr_readdir_filter_trash_dir (entries, local->fd);
+
+out:
+        AFR_STACK_UNWIND (readdirp, frame, op_ret, op_errno, entries, NULL);
         return 0;
 }
 

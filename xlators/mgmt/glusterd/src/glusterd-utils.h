@@ -367,7 +367,13 @@ int
 glusterd_restart_gsyncds (glusterd_conf_t *conf);
 int
 glusterd_start_gsync (glusterd_volinfo_t *master_vol, char *slave,
-                      char *glusterd_uuid_str, char **op_errstr);
+                      char *path_list, char *conf_path,
+                      char *glusterd_uuid_str,
+                      char **op_errstr);
+int
+glusterd_get_local_brickpaths (glusterd_volinfo_t *volinfo,
+                               char **pathlist);
+
 int32_t
 glusterd_recreate_bricks (glusterd_conf_t *conf);
 int32_t
@@ -471,6 +477,8 @@ int
 glusterd_volume_heal_use_rsp_dict (dict_t *aggr, dict_t *rsp_dict);
 int
 glusterd_use_rsp_dict (dict_t *aggr, dict_t *rsp_dict);
+int
+glusterd_sys_exec_output_rsp_dict (dict_t *aggr, dict_t *rsp_dict);
 int32_t
 glusterd_handle_node_rsp (dict_t *req_ctx, void *pending_entry,
                           glusterd_op_t op, dict_t *rsp_dict, dict_t *op_ctx,
@@ -486,6 +494,11 @@ int
 glusterd_profile_volume_brick_rsp (void *pending_entry,
                                    dict_t *rsp_dict, dict_t *op_ctx,
                                    char **op_errstr, gd_node_type type);
+
+gf_boolean_t
+glusterd_are_vol_all_peers_up (glusterd_volinfo_t *volinfo,
+                               struct list_head *peers,
+                               char **down_peerstr);
 
 /* Should be used only when an operation is in progress, as that is the only
  * time a lock_owner is set
@@ -531,4 +544,25 @@ gd_peer_uuid_str (glusterd_peerinfo_t *peerinfo);
 
 gf_boolean_t
 gd_is_remove_brick_committed (glusterd_volinfo_t *volinfo);
+
+gf_boolean_t
+glusterd_are_vol_all_peers_up (glusterd_volinfo_t *volinfo,
+                               struct list_head *peers,
+                               char **down_peerstr);
+
+int
+glusterd_get_slave_details_confpath (glusterd_volinfo_t *volinfo, dict_t *dict,
+                                     char **slave_ip, char **slave_vol,
+                                     char **conf_path, char **op_errstr);
+
+int
+glusterd_check_restart_gsync_session (glusterd_volinfo_t *volinfo, char *slave,
+                                      dict_t *resp_dict, char *path_list,
+                                      char *conf_path, gf_boolean_t is_force);
+
+int
+glusterd_check_gsync_running_local (char *master, char *slave,
+                                    char *conf_path,
+                                    gf_boolean_t *is_run);
+
 #endif
