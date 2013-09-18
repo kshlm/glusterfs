@@ -464,7 +464,7 @@ cli_cmd_volume_delete_cbk (struct cli_state *state, struct cli_cmd_word *word,
         }
 
         ret = cli_sync_volume_cmd (GLUSTER_CLI_DELETE_VOLUME, dict, &rsp_dict,
-                                   &errstr);
+                                   &errstr, 0);
 
         if (global_state->mode & GLUSTER_MODE_XML) {
                 ret = cli_xml_output_generic_volume ("volDelete", rsp_dict, ret,
@@ -541,7 +541,7 @@ cli_cmd_volume_start_cbk (struct cli_state *state, struct cli_cmd_word *word,
         }
 
         ret = cli_sync_volume_cmd (GLUSTER_CLI_START_VOLUME, dict, &rsp_dict,
-                                   &errstr);
+                                   &errstr, 0);
 
         if (global_state->mode & GLUSTER_MODE_XML) {
                 ret = cli_xml_output_generic_volume ("volStart", rsp_dict, ret,
@@ -664,7 +664,7 @@ cli_cmd_volume_stop_cbk (struct cli_state *state, struct cli_cmd_word *word,
         }
 
         ret = cli_sync_volume_cmd (GLUSTER_CLI_STOP_VOLUME, dict, &rsp_dict,
-                                   &errstr);
+                                   &errstr, 0);
 
         if (global_state->mode & GLUSTER_MODE_XML) {
                 ret = cli_xml_output_generic_volume ("volStop", rsp_dict, ret,

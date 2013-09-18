@@ -106,16 +106,14 @@ out:
 
 int
 cli_sync_cmd_submit (void *req, struct syncargs *args, rpc_clnt_prog_t *prog,
-                     int procnum, fop_cbk_fn_t cbkfn, xdrproc_t xdrproc)
+                     int procnum, fop_cbk_fn_t cbkfn, xdrproc_t xdrproc,
+                     int timeout)
 {
         int        ret = -1;
         gf_timer_t *timer = NULL;
-        struct timeval timeout = {0,};
+        struct timeval time = {0,};
 
         __yawn (args);
-        timeout.tv_sec = (GLUSTER_CLI_PROFILE_VOLUME == procnum) ?
-                         CLI_TEN_MINUTES_TIMEOUT : CLI_DEFAULT_CMD_TIMEOUT;
-
         ret = _cli_sync_cmd_submit (req, args, prog, procnum, cbkfn, xdrproc);
 
         if (ret ) {
@@ -123,11 +121,15 @@ cli_sync_cmd_submit (void *req, struct syncargs *args, rpc_clnt_prog_t *prog,
                 goto out;
         }
 
-        timer = gf_timer_call_after (THIS->ctx, timeout, cli_sync_cmd_timedout,
-                                     args);
+        if (-1 != timeout) {
+                time.tv_sec = timeout ? timeout : CLI_DEFAULT_CMD_TIMEOUT;
+                timer = gf_timer_call_after (THIS->ctx, time,
+                                             cli_sync_cmd_timedout, args);
+        }
 
         __yield (args);
-        gf_timer_call_cancel (THIS->ctx, timer);
+        if (timer)
+                gf_timer_call_cancel (THIS->ctx, timer);
 out:
         return args->op_ret;
 }
@@ -184,7 +186,7 @@ out:
 
 int
 cli_sync_volume_cmd (int procnum, dict_t *req_dict, dict_t **rsp_dict,
-                     char **op_errstr)
+                     char **op_errstr, int timeout)
 {
         int                     ret = -1;
         struct syncargs         args = {0,};
@@ -199,7 +201,8 @@ cli_sync_volume_cmd (int procnum, dict_t *req_dict, dict_t **rsp_dict,
                 goto out;
 
         cli_sync_cmd_submit (&req, &args, cli_rpc_prog, procnum,
-                             cli_sync_volume_cmd_cbk, (xdrproc_t)xdr_gf_cli_req);
+                             cli_sync_volume_cmd_cbk, (xdrproc_t)xdr_gf_cli_req,
+                             timeout);
 
         if (op_errstr)
                 *op_errstr = args.errstr;

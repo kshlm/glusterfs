@@ -31,6 +31,8 @@
  *  cbkfn   - callback funtion to process the RPC response from glusterd, and
  *            set the results (op_{ret,errno,errstr}, rsp_dict etc.), in 'args'
  *  xdrproc - xdrproc to be used to serialize 'req'
+ *  timeout - timeout for the command in seconds, use 0 for default timeout of
+ *            2 minutes (120 seconds) or -1 to disable timeout.
  *
  * The return value will be 'op_ret' returned by glusterd or -1 if failure
  * occurs before performing the actual command.
@@ -45,7 +47,8 @@
 
 int
 cli_sync_cmd_submit (void *req, struct syncargs *args, rpc_clnt_prog_t *prog,
-                     int procnum, fop_cbk_fn_t cbkfn, xdrproc_t xdrproc);
+                     int procnum, fop_cbk_fn_t cbkfn, xdrproc_t xdrproc,
+                     int timeout);
 
 /* This function is a wrapper over the cli_sync_cmd_submit() function, to be
  * used only for performing volume commands.
@@ -59,11 +62,14 @@ cli_sync_cmd_submit (void *req, struct syncargs *args, rpc_clnt_prog_t *prog,
  *  op_errstr - location to store the pointer to the error string returned by
  *              glusterd. This needs to be GF_FREE()d by the caller, can be
  *              NULL
+ *  timeout   - timeout for the command in seconds, use 0 for default timeout of
+ *              2 minutes (120 seconds) or -1 to disable timeout.
+ *
  * The return value will be 'op_ret' returned by glusterd or -1 if the command
  * fails before being sent to glusterd. 'errno' will be set to the op_errno
  * returned by glusterd.
  */
 int
 cli_sync_volume_cmd (int procnum, dict_t *req_dict, dict_t **rsp_dict,
-                     char **op_errstr);
+                     char **op_errstr, int timeout);
 #endif /* __CLI_SYNC_CMD_H_ */
