@@ -43,6 +43,7 @@
 #include "timer.h"
 #include "posix-mem-types.h"
 #include "posix-handle.h"
+#include "call-stub.h"
 
 #ifdef HAVE_LIBAIO
 #include <libaio.h>
@@ -124,6 +125,30 @@ struct posix_private {
         io_context_t    ctxp;
         pthread_t       aiothread;
 #endif
+
+        /* node-uuid in pathinfo xattr */
+        gf_boolean_t  node_uuid_pathinfo;
+
+	pthread_t         fsyncer;
+	struct list_head  fsyncs;
+	pthread_mutex_t   fsync_mutex;
+	pthread_cond_t    fsync_cond;
+	int               fsync_queue_count;
+
+	enum {
+		BATCH_NONE = 0,
+		BATCH_SYNCFS,
+		BATCH_SYNCFS_SINGLE_FSYNC,
+		BATCH_REVERSE_FSYNC,
+		BATCH_SYNCFS_REVERSE_FSYNC
+	}               batch_fsync_mode;
+
+	uint32_t        batch_fsync_delay_usec;
+
+        /* seconds to sleep between health checks */
+        uint32_t        health_check_interval;
+        pthread_t       health_check;
+        gf_boolean_t    health_check_active;
 };
 
 typedef struct {
@@ -163,7 +188,7 @@ int posix_get_file_contents (xlator_t *this, uuid_t pargfid,
 int posix_set_file_contents (xlator_t *this, const char *path, char *key,
                              data_t *value, int flags);
 int posix_acl_xattr_set (xlator_t *this, const char *path, dict_t *xattr_req);
-int posix_gfid_heal (xlator_t *this, const char *path, dict_t *xattr_req);
+int posix_gfid_heal (xlator_t *this, const char *path, loc_t *loc, dict_t *xattr_req);
 int posix_entry_create_xattr_set (xlator_t *this, const char *path,
                                   dict_t *dict);
 
@@ -175,4 +200,7 @@ gf_boolean_t posix_special_xattr (char **pattern, char *key);
 void
 __posix_fd_set_odirect (fd_t *fd, struct posix_fd *pfd, int opflags,
 			off_t offset, size_t size);
+void posix_spawn_health_check_thread (xlator_t *this);
+
+void *posix_fsyncer (void *);
 #endif /* _POSIX_H */

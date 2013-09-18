@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2010-2013 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -24,6 +15,7 @@
 
 #include "server.h"
 #include "server-helpers.h"
+#include "client_t.h"
 
 
 int
@@ -460,12 +452,10 @@ server_resolve_fd (call_frame_t *frame)
 {
         server_state_t       *state = NULL;
         server_resolve_t     *resolve = NULL;
-        server_connection_t  *conn = NULL;
         uint64_t              fd_no = -1;
 
         state = CALL_STATE (frame);
         resolve = state->resolve_now;
-        conn  = SERVER_CONNECTION (frame);
 
         fd_no = resolve->fd_no;
 
@@ -474,7 +464,7 @@ server_resolve_fd (call_frame_t *frame)
                 return 0;
         }
 
-        state->fd = gf_fd_fdptr_get (conn->fdtable, fd_no);
+        state->fd = gf_fd_fdptr_get (state->client->server_ctx.fdtable, fd_no);
 
         if (!state->fd) {
                 gf_log ("", GF_LOG_INFO, "fd not found in context");

@@ -35,7 +35,9 @@
  * handles for now. This will change if and when we need v4. */
 #define GF_NFSFH_IDENT0         ':'
 #define GF_NFSFH_IDENT1         'O'
-#define GF_NFSFH_IDENT_SIZE     (sizeof(char) * 2)
+#define GF_NFSFH_IDENT2         'G'
+#define GF_NFSFH_IDENT3         'L'
+#define GF_NFSFH_IDENT_SIZE     (sizeof(char) * 4)
 #define GF_NFSFH_STATIC_SIZE    (GF_NFSFH_IDENT_SIZE + (2*sizeof (uuid_t)))
 
 #define nfs3_fh_exportid_to_index(exprtid)      ((uint16_t)exprtid[15])
@@ -45,9 +47,9 @@
 struct nfs3_fh {
 
         /* Used to ensure that a bunch of bytes are actually a GlusterFS NFS
-         * file handle. Should contain ":O"
+         * file handle. Should contain ":OGL"
          */
-        char                    ident[2];
+        char                    ident[4];
 
         /* UUID that identifies an export. The value stored in exportid
          * depends on the usage of gluster nfs. If the DVM is enabled using
@@ -63,6 +65,11 @@ struct nfs3_fh {
 
         /* File/dir gfid. */
         uuid_t                  gfid;
+        /* This structure must be exactly NFS3_FHSIZE (64) bytes long.
+           Having the structure shorter results in buffer overflows
+           during XDR decoding.
+        */
+        unsigned char padding[NFS3_FHSIZE - GF_NFSFH_STATIC_SIZE];
 } __attribute__((__packed__));
 
 #define GF_NFS3FH_STATIC_INITIALIZER    {{0},}

@@ -1394,6 +1394,11 @@ posix_acl_link (call_frame_t *frame, xlator_t *this, loc_t *old, loc_t *new, dic
                 goto red;
         }
 
+        if (!sticky_permits (frame, new->parent, new->inode)) {
+                op_errno = EACCES;
+                goto red;
+        }
+
         STACK_WIND (frame, posix_acl_link_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->link,
                     old, new, xdata);
@@ -1517,12 +1522,16 @@ posix_acl_readdirp (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
                     off_t offset, dict_t *dict)
 {
         int ret = 0;
+	dict_t *alloc_dict = NULL;
 
         if (acl_permits (frame, fd->inode, POSIX_ACL_READ))
                 goto green;
         else
                 goto red;
 green:
+	if (!dict)
+		dict = alloc_dict = dict_new ();
+
         if (dict) {
                 ret = dict_set_int8 (dict, POSIX_ACL_ACCESS_XATTR, 0);
                 if (ret)
@@ -1541,6 +1550,8 @@ green:
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->readdirp,
                     fd, size, offset, dict);
 
+	if (alloc_dict)
+		dict_unref (alloc_dict);
         return 0;
 red:
         STACK_UNWIND_STRICT (readdirp, frame, -1, EACCES, NULL, NULL);

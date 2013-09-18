@@ -56,6 +56,8 @@ enum gf_fop_procnum {
         GFS3_OP_RELEASE,
         GFS3_OP_RELEASEDIR,
         GFS3_OP_FREMOVEXATTR,
+	GFS3_OP_FALLOCATE,
+	GFS3_OP_DISCARD,
         GFS3_OP_MAXVALUE,
 } ;
 
@@ -155,6 +157,9 @@ enum gluster_cli_procnum {
         GLUSTER_CLI_CLRLOCKS_VOLUME,
         GLUSTER_CLI_UUID_RESET,
         GLUSTER_CLI_BD_OP,
+        GLUSTER_CLI_UUID_GET,
+        GLUSTER_CLI_COPY_FILE,
+        GLUSTER_CLI_SYS_EXEC,
         GLUSTER_CLI_MAXVALUE,
 };
 

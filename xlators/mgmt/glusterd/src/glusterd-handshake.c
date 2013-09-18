@@ -108,8 +108,97 @@ out:
         return ret;
 }
 
+/* Get and store op-versions of the clients sending the getspec request
+ * Clients of versions <= 3.3, don't send op-versions, their op-versions are
+ * defaulted to 1
+ */
+static int
+_get_client_op_versions (gf_getspec_req *args, peer_info_t *peerinfo)
+{
+        int    ret                   = 0;
+        int    client_max_op_version = 1;
+        int    client_min_op_version = 1;
+        dict_t *dict                 = NULL;
+
+        GF_ASSERT (args);
+        GF_ASSERT (peerinfo);
+
+        if (args->xdata.xdata_len) {
+                dict = dict_new ();
+                if (!dict) {
+                        ret = -1;
+                        goto out;
+                }
+
+                ret = dict_unserialize (args->xdata.xdata_val,
+                                        args->xdata.xdata_len, &dict);
+                if (ret) {
+                        gf_log ("glusterd", GF_LOG_ERROR,
+                                "Failed to unserialize request dictionary");
+                        goto out;
+                }
+
+                ret = dict_get_int32 (dict, "min-op-version",
+                                      &client_min_op_version);
+                if (ret) {
+                        gf_log ("glusterd", GF_LOG_ERROR,
+                                "Failed to get client-min-op-version");
+                        goto out;
+                }
+
+                ret = dict_get_int32 (dict, "max-op-version",
+                                      &client_max_op_version);
+                if (ret) {
+                        gf_log ("glusterd", GF_LOG_ERROR,
+                                "Failed to get client-max-op-version");
+                        goto out;
+                }
+        }
+
+        peerinfo->max_op_version = client_max_op_version;
+        peerinfo->min_op_version = client_min_op_version;
+
+out:
+        return ret;
+}
+
+/* Checks if the client supports the volume, ie. client can understand all the
+ * options in the volfile
+ */
+static gf_boolean_t
+_client_supports_volume (peer_info_t *peerinfo, int32_t *op_errno)
+{
+        gf_boolean_t       ret       = _gf_true;
+        glusterd_volinfo_t *volinfo  = NULL;
+
+        GF_ASSERT (peerinfo);
+        GF_ASSERT (op_errno);
+
+
+        /* Only check when the volfile being requested is a volume. Not finding
+         * a volinfo implies that the volfile requested for is not of a gluster
+         * volume. A non volume volfile is requested by the local gluster
+         * services like shd and nfs-server. These need not be checked as they
+         * will be running at the same op-version as glusterd and will be able
+         * to support all the features
+         */
+        if ((glusterd_volinfo_find (peerinfo->volname, &volinfo) == 0) &&
+            ((peerinfo->min_op_version > volinfo->client_op_version) ||
+             (peerinfo->max_op_version < volinfo->client_op_version))) {
+                ret = _gf_false;
+                *op_errno = ENOTSUP;
+                gf_log ("glusterd", GF_LOG_INFO,
+                        "Client %s (%d -> %d) doesn't support required "
+                        "op-version (%d). Rejecting volfile request.",
+                        peerinfo->identifier, peerinfo->min_op_version,
+                        peerinfo->max_op_version, volinfo->client_op_version);
+        }
+
+        return ret;
+}
+
 int
-server_getspec (rpcsvc_request_t *req)
+__server_getspec (rpcsvc_request_t *req)
 {
         int32_t               ret                    = -1;
         int32_t               op_errno               = 0;
@@ -124,17 +213,7 @@ server_getspec (rpcsvc_request_t *req)
         gf_getspec_req        args                   = {0,};
         gf_getspec_rsp        rsp                    = {0,};
         char                  addrstr[RPCSVC_PEER_STRLEN] = {0};
-        dict_t               *dict                   = NULL;
-        xlator_t             *this                   = NULL;
-        glusterd_conf_t      *conf                   = NULL;
-        int                   client_min_op_version  = 1;       // OP-VERSIONs start at 1
-        int                   client_max_op_version  = 1;
-
-        this = THIS;
-        GF_ASSERT (this);
-
-        conf = this->private;
-        GF_ASSERT (conf);
+        peer_info_t          *peerinfo               = NULL;
 
         ret = xdr_to_generic (req->msg[0], &args,
                               (xdrproc_t)xdr_gf_getspec_req);
@@ -144,76 +223,25 @@ server_getspec (rpcsvc_request_t *req)
                 goto fail;
         }
 
-        if (!args.xdata.xdata_len) {
-                // For clients <= 3.3.0, only allow if op_version = 1
-                if (1 != conf->op_version) {
-                        ret = -1;
-                        op_errno = ENOTSUP;
-                        gf_log (this->name, GF_LOG_INFO,
-                                "Client %s doesn't support required op-version. "
-                                "Rejecting getspec request.",
-                                req->trans->peerinfo.identifier);
-                        goto fail;
-                }
-        } else {
-                // For clients > 3.3, only allow if they can support
-                // clusters' op_version
-                dict = dict_new ();
-                if (!dict) {
-                        ret = -1;
-                        goto fail;
-                }
-
-                ret = dict_unserialize (args.xdata.xdata_val,
-                                        args.xdata.xdata_len, &dict);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Failed to unserialize request dictionary");
-                        goto fail;
-                }
-
-                ret = dict_get_int32 (dict, "min-op-version",
-                                      &client_min_op_version);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Failed to get client-min-op-version");
-                        goto fail;
-                }
-
-                ret = dict_get_int32 (dict, "max-op-version",
-                                      &client_max_op_version);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Failed to get client-max-op-version");
-                        goto fail;
-                }
-
-                if ((client_min_op_version > conf->op_version) ||
-                    (client_max_op_version < conf->op_version)) {
-                        ret = -1;
-                        op_errno = ENOTSUP;
-                        //TODO: Add client identifier
-                        gf_log (this->name, GF_LOG_INFO,
-                                "Client %s doesn't support required op-version. "
-                                "Rejecting getspec request.",
-                                req->trans->peerinfo.identifier);
-                        goto fail;
-                }
-
-        }
-
-        // Store the op-versions supported by the client
-        req->trans->peerinfo.max_op_version = client_max_op_version;
-        req->trans->peerinfo.min_op_version = client_min_op_version;
+        peerinfo = &req->trans->peerinfo;
 
         volume = args.key;
-
-        // Store the name of volume  being mounted
+        /* Need to strip leading '/' from volnames. This was introduced to
+         * support nfs style mount parameters for native gluster mount
+         */
         if (volume[0] == '/')
-                strncpy (req->trans->peerinfo.volname, &volume[1],
-                         strlen(&volume[1]));
+                strncpy (peerinfo->volname, &volume[1], strlen(&volume[1]));
         else
-                strncpy (req->trans->peerinfo.volname, volume, strlen(volume));
+                strncpy (peerinfo->volname, volume, strlen(volume));
+
+        ret = _get_client_op_versions (&args, peerinfo);
+        if (ret)
+                goto fail;
+
+        if (!_client_supports_volume (peerinfo, &op_errno)) {
+                ret = -1;
+                goto fail;
+        }
 
         trans = req->trans;
         ret = rpcsvc_transport_peername (trans, (char *)&addrstr,
@@ -225,7 +253,7 @@ server_getspec (rpcsvc_request_t *req)
         *tmp = '\0';
 
         /* we trust the local admin */
-        if (glusterd_is_local_addr (addrstr)) {
+        if (gf_is_local_addr (addrstr)) {
 
                 ret = build_volfile_path (volume, filename,
                                           sizeof (filename),
@@ -289,8 +317,14 @@ fail:
         return 0;
 }
 
+int
+server_getspec (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req, __server_getspec);
+}
+
 int32_t
-server_event_notify (rpcsvc_request_t *req)
+__server_event_notify (rpcsvc_request_t *req)
 {
         int32_t                 ret             = -1;
         int32_t                 op_errno        =  0;
@@ -350,6 +384,12 @@ fail:
         return 0;
 }
 
+int32_t
+server_event_notify (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req, __server_event_notify);
+}
+
 int
 gd_validate_cluster_op_version (xlator_t *this, int cluster_op_version,
                                 char *peerid)
@@ -368,12 +408,16 @@ gd_validate_cluster_op_version (xlator_t *this, int cluster_op_version,
                 goto out;
         }
 
-        if (cluster_op_version < conf->op_version) {
+        /* The peer can only reduce its op-version when it doesn't have any
+         * volumes. Reducing op-version when it already contains volumes can
+         * lead to inconsistencies in the cluster
+         */
+        if ((cluster_op_version < conf->op_version) &&
+            !list_empty (&conf->volumes)) {
                 gf_log (this->name, GF_LOG_ERROR,
-                        "operating version %d is less than the currently "
-                        "running version (%d) on the machine (as per peer "
-                        "request from %s)", cluster_op_version,
-                        conf->op_version, peerid);
+                        "cannot reduce operating version to %d from current "
+                        "version %d as volumes exist (as per peer request from "
+                        "%s)", cluster_op_version, conf->op_version, peerid);
                 goto out;
         }
 
@@ -383,7 +427,7 @@ out:
 }
 
 int
-glusterd_mgmt_hndsk_versions (rpcsvc_request_t *req)
+__glusterd_mgmt_hndsk_versions (rpcsvc_request_t *req)
 {
         dict_t            *dict            = NULL;
         xlator_t          *this            = NULL;
@@ -459,7 +503,14 @@ out:
 }
 
 int
-glusterd_mgmt_hndsk_versions_ack (rpcsvc_request_t *req)
+glusterd_mgmt_hndsk_versions (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req,
+                                            __glusterd_mgmt_hndsk_versions);
+}
+
+int
+__glusterd_mgmt_hndsk_versions_ack (rpcsvc_request_t *req)
 {
         dict_t            *clnt_dict       = NULL;
         xlator_t          *this            = NULL;
@@ -527,13 +578,17 @@ out:
         return ret;
 }
 
+int
+glusterd_mgmt_hndsk_versions_ack (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req,
+                                            __glusterd_mgmt_hndsk_versions_ack);
+}
 
 rpcsvc_actor_t gluster_handshake_actors[] = {
-        [GF_HNDSK_NULL]         = {"NULL", GF_HNDSK_NULL, NULL, NULL, 0},
-        [GF_HNDSK_GETSPEC]      = {"GETSPEC", GF_HNDSK_GETSPEC,
-                                   server_getspec, NULL, 0},
-        [GF_HNDSK_EVENT_NOTIFY] = {"EVENTNOTIFY", GF_HNDSK_EVENT_NOTIFY,
-                                   server_event_notify,  NULL, 0},
+        [GF_HNDSK_NULL]         = {"NULL",        GF_HNDSK_NULL,         NULL,                NULL, 0, DRC_NA},
+        [GF_HNDSK_GETSPEC]      = {"GETSPEC",     GF_HNDSK_GETSPEC,      server_getspec,      NULL, 0, DRC_NA},
+        [GF_HNDSK_EVENT_NOTIFY] = {"EVENTNOTIFY", GF_HNDSK_EVENT_NOTIFY, server_event_notify, NULL, 0, DRC_NA},
 };
 
 
@@ -624,6 +679,7 @@ glusterd_event_connected_inject (glusterd_peerctx_t *peerctx)
         ctx->hostname = gf_strdup (peerinfo->hostname);
         ctx->port = peerinfo->port;
         ctx->req = peerctx->args.req;
+        ctx->dict = peerctx->args.dict;
 
         event->peerinfo = peerinfo;
         event->ctx = ctx;
@@ -681,16 +737,6 @@ gd_validate_peer_op_version (xlator_t *this, glusterd_peerinfo_t *peerinfo,
                 goto out;
         }
 
-        /* If peer is already operating at a higher op_version reject it.
-         * Cluster cannot be moved to higher op_version to accomodate a peer.
-         */
-        if (peer_op_version > conf->op_version) {
-                ret = gf_asprintf (errstr, "Peer %s is already at a higher "
-                                   "op-version", peerinfo->hostname);
-                ret = -1;
-                goto out;
-        }
-
         ret = 0;
 out:
         gf_log (this->name , GF_LOG_DEBUG, "Peer %s %s", peerinfo->hostname,
@@ -699,7 +745,7 @@ out:
 }
 
 int
-glusterd_mgmt_hndsk_version_ack_cbk (struct rpc_req *req, struct iovec *iov,
+__glusterd_mgmt_hndsk_version_ack_cbk (struct rpc_req *req, struct iovec *iov,
                                      int count, void *myframe)
 {
         int                  ret      = -1;
@@ -778,7 +824,15 @@ out:
 }
 
 int
-glusterd_mgmt_hndsk_version_cbk (struct rpc_req *req, struct iovec *iov,
+glusterd_mgmt_hndsk_version_ack_cbk (struct rpc_req *req, struct iovec *iov,
+                                     int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_mgmt_hndsk_version_ack_cbk);
+}
+
+int
+__glusterd_mgmt_hndsk_version_cbk (struct rpc_req *req, struct iovec *iov,
                                  int count, void *myframe)
 {
         int                  ret       = -1;
@@ -880,6 +934,14 @@ out:
                 dict_unref (rsp_dict);
 
         return 0;
+}
+
+int
+glusterd_mgmt_hndsk_version_cbk (struct rpc_req *req, struct iovec *iov,
+                                     int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_mgmt_hndsk_version_cbk);
 }
 
 int
@@ -985,7 +1047,7 @@ out:
 }
 
 int
-glusterd_peer_dump_version_cbk (struct rpc_req *req, struct iovec *iov,
+__glusterd_peer_dump_version_cbk (struct rpc_req *req, struct iovec *iov,
                                 int count, void *myframe)
 {
         int                  ret      = -1;
@@ -1090,6 +1152,14 @@ out:
         return 0;
 }
 
+
+int
+glusterd_peer_dump_version_cbk (struct rpc_req *req, struct iovec *iov,
+                                int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_peer_dump_version_cbk);
+}
 
 int
 glusterd_peer_dump_version (xlator_t *this, struct rpc_clnt *rpc,

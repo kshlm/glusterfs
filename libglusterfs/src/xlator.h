@@ -417,6 +417,22 @@ typedef int32_t (*fop_fsetattr_cbk_t) (call_frame_t *frame,
                                        struct iatt *preop_stbuf,
                                        struct iatt *postop_stbuf, dict_t *xdata);
 
+typedef int32_t (*fop_fallocate_cbk_t) (call_frame_t *frame,
+                                        void *cookie,
+                                        xlator_t *this,
+                                        int32_t op_ret,
+                                        int32_t op_errno,
+                                        struct iatt *preop_stbuf,
+                                        struct iatt *postop_stbuf, dict_t *xdata);
+
+typedef int32_t (*fop_discard_cbk_t) (call_frame_t *frame,
+                                      void *cookie,
+                                      xlator_t *this,
+                                      int32_t op_ret,
+                                      int32_t op_errno,
+                                      struct iatt *preop_stbuf,
+                                      struct iatt *postop_stbuf, dict_t *xdata);
+
 typedef int32_t (*fop_lookup_t) (call_frame_t *frame,
                                  xlator_t *this,
                                  loc_t *loc,
@@ -634,6 +650,20 @@ typedef int32_t (*fop_fsetattr_t) (call_frame_t *frame,
                                    struct iatt *stbuf,
                                    int32_t valid, dict_t *xdata);
 
+typedef int32_t (*fop_fallocate_t) (call_frame_t *frame,
+                                    xlator_t *this,
+                                    fd_t *fd,
+				    int32_t keep_size,
+				    off_t offset,
+				    size_t len,
+                                    dict_t *xdata);
+
+typedef int32_t (*fop_discard_t) (call_frame_t *frame,
+                                  xlator_t *this,
+                                  fd_t *fd,
+				  off_t offset,
+				  size_t len,
+                                  dict_t *xdata);
 
 struct xlator_fops {
         fop_lookup_t         lookup;
@@ -678,6 +708,8 @@ struct xlator_fops {
         fop_setattr_t        setattr;
         fop_fsetattr_t       fsetattr;
         fop_getspec_t        getspec;
+	fop_fallocate_t	     fallocate;
+	fop_discard_t	     discard;
 
         /* these entries are used for a typechecking hack in STACK_WIND _only_ */
         fop_lookup_cbk_t         lookup_cbk;
@@ -722,6 +754,8 @@ struct xlator_fops {
         fop_setattr_cbk_t        setattr_cbk;
         fop_fsetattr_cbk_t       fsetattr_cbk;
         fop_getspec_cbk_t        getspec_cbk;
+	fop_fallocate_cbk_t	 fallocate_cbk;
+	fop_discard_cbk_t	 discard_cbk;
 };
 
 typedef int32_t (*cbk_forget_t) (xlator_t *this,
@@ -827,6 +861,14 @@ struct _xlator {
         gf_boolean_t        is_autoloaded;
 };
 
+typedef struct {
+        int32_t                 (*init) (xlator_t *this);
+        void                    (*fini) (xlator_t *this);
+        int32_t                 (*reconfigure) (xlator_t *this,
+                                                dict_t *options);
+        event_notify_fn_t       notify;
+} class_methods_t;
+
 #define xlator_has_parent(xl) (xl->parents != NULL)
 
 #define XLATOR_NOTIFY(_xl, params ...)          \
@@ -878,6 +920,9 @@ int loc_copy (loc_t *dst, loc_t *src);
 #define loc_dup(src, dst) loc_copy(dst, src)
 void loc_wipe (loc_t *loc);
 int loc_path (loc_t *loc, const char *bname);
+void loc_gfid (loc_t *loc, uuid_t gfid);
+char* loc_gfid_utoa (loc_t *loc);
+gf_boolean_t loc_is_root (loc_t *loc);
 int xlator_mem_acct_init (xlator_t *xl, int num_types);
 int is_gf_log_command (xlator_t *trans, const char *name, char *value);
 int glusterd_check_log_level (const char *value);

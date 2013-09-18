@@ -505,7 +505,36 @@ out:
         return next;
 }
 
+/* This func wraps around, if prev is actually the last subvol.
+ */
+xlator_t *
+dht_subvol_next_available (xlator_t *this, xlator_t *prev)
+{
+        dht_conf_t *conf = NULL;
+        int         i = 0;
+        xlator_t   *next = NULL;
 
+        conf = this->private;
+        if (!conf)
+                goto out;
+
+        for (i = 0; i < conf->subvolume_cnt; i++) {
+                if (conf->subvolumes[i] == prev) {
+                        /* if prev is last in conf->subvolumes, then wrap
+                         * around.
+                         */
+                        if ((i + 1) < conf->subvolume_cnt) {
+                                next = conf->subvolumes[i + 1];
+                        } else {
+                                next = conf->subvolumes[0];
+                        }
+                        break;
+                }
+        }
+
+out:
+        return next;
+}
 int
 dht_subvol_cnt (xlator_t *this, xlator_t *subvol)
 {
@@ -709,13 +738,18 @@ dht_migration_complete_check_task (void *data)
         if (!local->loc.inode && !local->fd)
                 goto out;
 
-        /* getxattr on cached_subvol for 'linkto' value */
-        if (!local->loc.inode)
+        /* getxattr on cached_subvol for 'linkto' value. Do path based getxattr
+         * as root:root. If a fd is already open, access check wont be done*/
+
+        if (!local->loc.inode) {
                 ret = syncop_fgetxattr (src_node, local->fd, &dict,
                                         conf->link_xattr_name);
-        else
+        } else {
+                SYNCTASK_SETID (0, 0);
                 ret = syncop_getxattr (src_node, &local->loc, &dict,
                                        conf->link_xattr_name);
+                SYNCTASK_SETID (frame->root->uid, frame->root->gid);
+        }
 
         if (!ret)
                 dst_node = dht_linkfile_subvol (this, NULL, NULL, dict);
@@ -801,14 +835,13 @@ dht_migration_complete_check_task (void *data)
         local->cached_subvol = dst_node;
         ret = 0;
 
-        /* once we detect the migration complete, the fd-ctx is no more
-           required.. delete the ctx, and do one extra 'fd_unref' for open fd */
-        ret = fd_ctx_del (local->fd, this, NULL);
-        if (!ret) {
-                fd_unref (local->fd);
-                ret = 0;
+        if (!local->fd)
                 goto out;
-        }
+        /* once we detect the migration complete, the fd-ctx is no more
+           required.. delete the ctx */
+        ret = fd_ctx_del (local->fd, this, NULL);
+        if (!ret)
+                goto out;
 
         /* perform open as root:root. There is window between linkfile
          * creation(root:root) and setattr with the correct uid/gid
@@ -892,13 +925,17 @@ dht_rebalance_inprogress_task (void *data)
         if (!local->loc.inode && !local->fd)
                 goto out;
 
-        /* getxattr on cached_subvol for 'linkto' value */
-        if (local->loc.inode)
+        /* getxattr on cached_subvol for 'linkto' value. Do path based getxattr
+         * as root:root. If a fd is already open, access check wont be done*/
+        if (local->loc.inode) {
+                SYNCTASK_SETID (0, 0);
                 ret = syncop_getxattr (src_node, &local->loc, &dict,
                                        conf->link_xattr_name);
-        else
+                SYNCTASK_SETID (frame->root->uid, frame->root->gid);
+        } else {
                 ret = syncop_fgetxattr (src_node, local->fd, &dict,
                                         conf->link_xattr_name);
+        }
 
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR,

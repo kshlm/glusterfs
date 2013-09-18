@@ -23,6 +23,8 @@
 #define VKEY_DIAG_LAT_MEASUREMENT "diagnostics.latency-measurement"
 #define VKEY_FEATURES_LIMIT_USAGE "features.limit-usage"
 #define VKEY_MARKER_XTIME         GEOREP".indexing"
+#define VKEY_MARKER_XTIME_FORCE   GEOREP".ignore-pid-check"
+#define VKEY_CHANGELOG            "changelog.changelog"
 #define VKEY_FEATURES_QUOTA       "features.quota"
 
 #define AUTH_ALLOW_MAP_KEY "auth.allow"
@@ -60,7 +62,9 @@ typedef enum {
 
 typedef enum gd_volopt_flags_ {
         OPT_FLAG_NONE,
-        OPT_FLAG_FORCE = 1,
+        OPT_FLAG_FORCE = 0x01,      // option needs force to be reset
+        OPT_FLAG_XLATOR_OPT = 0x02, // option enables/disables xlators
+        OPT_FLAG_CLIENT_OPT = 0x04, // option affects clients
 } gd_volopt_flags_t;
 
 typedef enum {
@@ -99,6 +103,10 @@ struct volopt_map_entry {
         uint32_t op_version;
         char *description;
         vme_option_validation validate_fn;
+        /* If client_option is true, the option affects clients.
+         * this is used to calculate client-op-version of volumes
+         */
+        //gf_boolean_t client_option;
 };
 
 int glusterd_create_rb_volfiles (glusterd_volinfo_t *volinfo,
@@ -128,6 +136,8 @@ glusterd_check_voloption_flags (char *key, int32_t flags);
 gf_boolean_t
 glusterd_is_valid_volfpath (char *volname, char *brick);
 int generate_brick_volfiles (glusterd_volinfo_t *volinfo);
+int generate_client_volfiles (glusterd_volinfo_t *volinfo,
+                              glusterd_client_type_t client_type);
 int glusterd_get_volopt_content (dict_t *dict, gf_boolean_t xml_out);
 char*
 glusterd_get_trans_type_rb (gf_transport_type ttype);
@@ -136,4 +146,14 @@ glusterd_check_nfs_volfile_identical (gf_boolean_t *identical);
 
 uint32_t
 glusterd_get_op_version_for_key (char *key);
+
+gf_boolean_t
+gd_is_client_option (char *key);
+
+gf_boolean_t
+gd_is_xlator_option (char *key);
+
+gf_boolean_t
+gd_is_boolean_option (char *key);
+
 #endif

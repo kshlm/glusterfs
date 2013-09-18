@@ -42,12 +42,27 @@ glusterd_brick_op_cbk (struct rpc_req *req, struct iovec *iov,
                           int count, void *myframe);
 int
 glusterd_defrag_start_validate (glusterd_volinfo_t *volinfo, char *op_errstr,
-                                size_t len)
+                                size_t len, glusterd_op_t op)
 {
-        int     ret = -1;
+        int      ret = -1;
+        xlator_t *this = NULL;
+
+        this = THIS;
+        GF_ASSERT (this);
+
+        /* Check only if operation is not remove-brick */
+        if ((GD_OP_REMOVE_BRICK != op) &&
+            !gd_is_remove_brick_committed (volinfo)) {
+                gf_log (this->name, GF_LOG_DEBUG, "A remove-brick task on "
+                        "volume %s is not yet committed", volinfo->volname);
+                snprintf (op_errstr, len, "A remove-brick task on volume %s is"
+                          " not yet committed. Either commit or stop the "
+                          "remove-brick task.", volinfo->volname);
+                goto out;
+        }
 
         if (glusterd_is_defrag_on (volinfo)) {
-                gf_log ("glusterd", GF_LOG_DEBUG,
+                gf_log (this->name, GF_LOG_DEBUG,
                         "rebalance on volume %s already started",
                         volinfo->volname);
                 snprintf (op_errstr, len, "Rebalance on %s is already started",
@@ -57,7 +72,7 @@ glusterd_defrag_start_validate (glusterd_volinfo_t *volinfo, char *op_errstr,
 
         if (glusterd_is_rb_started (volinfo) ||
             glusterd_is_rb_paused (volinfo)) {
-                gf_log ("glusterd", GF_LOG_DEBUG,
+                gf_log (this->name, GF_LOG_DEBUG,
                         "Rebalance failed as replace brick is in progress on volume %s",
                         volinfo->volname);
                 snprintf (op_errstr, len, "Rebalance failed as replace brick is in progress on "
@@ -66,13 +81,14 @@ glusterd_defrag_start_validate (glusterd_volinfo_t *volinfo, char *op_errstr,
         }
         ret = 0;
 out:
-        gf_log ("glusterd", GF_LOG_DEBUG, "Returning %d", ret);
+        gf_log (this->name, GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
 
+
 int32_t
-glusterd_defrag_notify (struct rpc_clnt *rpc, void *mydata,
-                        rpc_clnt_event_t event, void *data)
+__glusterd_defrag_notify (struct rpc_clnt *rpc, void *mydata,
+                          rpc_clnt_event_t event, void *data)
 {
         glusterd_volinfo_t      *volinfo = NULL;
         glusterd_defrag_info_t  *defrag  = NULL;
@@ -160,6 +176,14 @@ glusterd_defrag_notify (struct rpc_clnt *rpc, void *mydata,
         return ret;
 }
 
+int32_t
+glusterd_defrag_notify (struct rpc_clnt *rpc, void *mydata,
+                        rpc_clnt_event_t event, void *data)
+{
+        return glusterd_big_locked_notify (rpc, mydata, event,
+                                           data, __glusterd_defrag_notify);
+}
+
 int
 glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
                               size_t len, int cmd, defrag_cbk_fn_t cbk,
@@ -174,15 +198,14 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
         char                   pidfile[PATH_MAX] = {0,};
         char                   logfile[PATH_MAX] = {0,};
         dict_t                 *options = NULL;
-#ifdef DEBUG
         char                   valgrind_logfile[PATH_MAX] = {0,};
-#endif
+
         priv    = THIS->private;
 
         GF_ASSERT (volinfo);
         GF_ASSERT (op_errstr);
 
-        ret = glusterd_defrag_start_validate (volinfo, op_errstr, len);
+        ret = glusterd_defrag_start_validate (volinfo, op_errstr, len, op);
         if (ret)
                 goto out;
         if (!volinfo->rebal.defrag)
@@ -218,7 +241,7 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
         snprintf (logfile, PATH_MAX, "%s/%s-rebalance.log",
                     DEFAULT_LOG_FILE_DIRECTORY, volinfo->volname);
         runinit (&runner);
-#ifdef DEBUG
+
         if (priv->valgrind) {
                 snprintf (valgrind_logfile, PATH_MAX,
                           "%s/valgrind-%s-rebalance.log",
@@ -226,10 +249,10 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
                           volinfo->volname);
 
                 runner_add_args (&runner, "valgrind", "--leak-check=full",
-                                 "--trace-children=yes", NULL);
+                                 "--trace-children=yes", "--track-origins=yes",
+                                 NULL);
                 runner_argprintf (&runner, "--log-file=%s", valgrind_logfile);
         }
-#endif
 
         runner_add_args (&runner, SBIN_DIR"/glusterfs",
                          "-s", "localhost", "--volfile-id", volinfo->volname,
@@ -241,6 +264,7 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
                          "*replicate*.metadata-self-heal=off",
                          "--xlator-option", "*replicate*.entry-self-heal=off",
                          "--xlator-option", "*replicate*.readdir-failover=off",
+                         "--xlator-option", "*dht.readdir-optimize=on",
                          NULL);
         runner_add_arg (&runner, "--xlator-option");
         runner_argprintf ( &runner, "*dht.rebalance-cmd=%d",cmd);
@@ -268,14 +292,16 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
          * default timeout of 30mins used for unreliable network connections is
          * too long for unix domain socket connections.
          */
-        ret = rpc_clnt_transport_unix_options_build (&options, sockfile, 600);
+        ret = rpc_transport_unix_options_build (&options, sockfile, 600);
         if (ret) {
                 gf_log (THIS->name, GF_LOG_ERROR, "Unix options build failed");
                 goto out;
         }
 
+        synclock_unlock (&priv->big_lock);
         ret = glusterd_rpc_create (&defrag->rpc, options,
                                    glusterd_defrag_notify, volinfo);
+        synclock_lock (&priv->big_lock);
         if (ret) {
                 gf_log (THIS->name, GF_LOG_ERROR, "RPC create failed");
                 goto out;
@@ -320,14 +346,16 @@ glusterd_rebalance_rpc_create (glusterd_volinfo_t *volinfo,
          * default timeout of 30mins used for unreliable network connections is
          * too long for unix domain socket connections.
          */
-        ret = rpc_clnt_transport_unix_options_build (&options, sockfile, 600);
+        ret = rpc_transport_unix_options_build (&options, sockfile, 600);
         if (ret) {
                 gf_log (THIS->name, GF_LOG_ERROR, "Unix options build failed");
                 goto out;
         }
 
+        synclock_unlock (&priv->big_lock);
         ret = glusterd_rpc_create (&defrag->rpc, options,
                                    glusterd_defrag_notify, volinfo);
+        synclock_lock (&priv->big_lock);
         if (ret) {
                 gf_log (THIS->name, GF_LOG_ERROR, "RPC create failed");
                 goto out;
@@ -376,7 +404,7 @@ out:
 }
 
 int
-glusterd_handle_defrag_volume (rpcsvc_request_t *req)
+__glusterd_handle_defrag_volume (rpcsvc_request_t *req)
 {
         int32_t                 ret       = -1;
         gf_cli_req              cli_req   = {{0,}};
@@ -461,6 +489,12 @@ out:
         return 0;
 }
 
+int
+glusterd_handle_defrag_volume (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req, __glusterd_handle_defrag_volume);
+}
+
 
 int
 glusterd_op_stage_rebalance (dict_t *dict, char **op_errstr)
@@ -525,8 +559,9 @@ glusterd_op_stage_rebalance (dict_t *dict, char **op_errstr)
                                 ret = 0;
                         }
                 }
-                ret = glusterd_defrag_start_validate (volinfo,
-                                msg, sizeof (msg));
+                ret = glusterd_defrag_start_validate (volinfo, msg,
+                                                      sizeof (msg),
+                                                      GD_OP_REBALANCE);
                 if (ret) {
                         gf_log (this->name, GF_LOG_DEBUG,
                                         "start validate failed");
@@ -629,15 +664,18 @@ glusterd_op_rebalance (dict_t *dict, char **op_errstr, dict_t *rsp_dict)
                         ret = 0;
                 } else {
                         uuid_parse (task_id_str, volinfo->rebal.rebalance_id) ;
+                        volinfo->rebal.op = GD_OP_REBALANCE;
                 }
                 ret = glusterd_handle_defrag_start (volinfo, msg, sizeof (msg),
                                                     cmd, NULL, GD_OP_REBALANCE);
                  break;
         case GF_DEFRAG_CMD_STOP:
-                /* Clear task-id only on explicitly stopping the
-                 * rebalance process.
+                /* Clear task-id only on explicitly stopping rebalance.
+                 * Also clear the stored operation, so it doesn't cause trouble
+                 * with future rebalance/remove-brick starts
                  */
                 uuid_clear (volinfo->rebal.rebalance_id);
+                volinfo->rebal.op = GD_OP_NONE;
 
                 /* Fall back to the old volume file in case of decommission*/
                 list_for_each_entry_safe (brickinfo, tmp, &volinfo->bricks,

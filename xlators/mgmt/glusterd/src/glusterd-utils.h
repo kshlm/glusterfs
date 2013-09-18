@@ -117,6 +117,9 @@ glusterd_peer_hostname_new (char *hostname, glusterd_peer_hostname_t **name);
 int32_t
 glusterd_volinfo_find (char *volname, glusterd_volinfo_t **volinfo);
 
+int
+glusterd_volinfo_find_by_volume_id (uuid_t volume_id, glusterd_volinfo_t **volinfo);
+
 int32_t
 glusterd_service_stop(const char *service, char *pidfile, int sig,
                       gf_boolean_t force_kill);
@@ -148,14 +151,11 @@ glusterd_volume_brickinfo_get_by_brick (char *brick,
                                         glusterd_volinfo_t *volinfo,
                                         glusterd_brickinfo_t **brickinfo);
 
-gf_boolean_t
-glusterd_is_local_addr (char *hostname);
-
 int32_t
 glusterd_build_volume_dict (dict_t **vols);
 
 int32_t
-glusterd_compare_friend_data (dict_t  *vols, int32_t *status);
+glusterd_compare_friend_data (dict_t  *vols, int32_t *status, char *hostname);
 
 int
 glusterd_volume_compute_cksum (glusterd_volinfo_t  *volinfo);
@@ -317,8 +317,13 @@ glusterd_rb_check_bricks (glusterd_volinfo_t *volinfo,
                           glusterd_brickinfo_t *dst_brick);
 
 int
-glusterd_brick_create_path (char *host, char *path, uuid_t uuid,
-                            char **op_errstr);
+glusterd_check_and_set_brick_xattr (char *host, char *path, uuid_t uuid,
+                                    char **op_errstr);
+
+int
+glusterd_validate_and_create_brickpath (glusterd_brickinfo_t *brickinfo,
+                                        uuid_t volume_id, char **op_errstr,
+                                        gf_boolean_t is_force);
 int
 glusterd_sm_tr_log_transition_add (glusterd_sm_tr_log_t *log,
                                            int old_state, int new_state,
@@ -357,10 +362,18 @@ glusterd_delete_brick (glusterd_volinfo_t* volinfo,
 int32_t
 glusterd_delete_all_bricks (glusterd_volinfo_t* volinfo);
 int
+glusterd_spawn_daemons (void *opaque);
+int
 glusterd_restart_gsyncds (glusterd_conf_t *conf);
 int
 glusterd_start_gsync (glusterd_volinfo_t *master_vol, char *slave,
-                      char *glusterd_uuid_str, char **op_errstr);
+                      char *path_list, char *conf_path,
+                      char *glusterd_uuid_str,
+                      char **op_errstr);
+int
+glusterd_get_local_brickpaths (glusterd_volinfo_t *volinfo,
+                               char **pathlist);
+
 int32_t
 glusterd_recreate_bricks (glusterd_conf_t *conf);
 int32_t
@@ -464,6 +477,8 @@ int
 glusterd_volume_heal_use_rsp_dict (dict_t *aggr, dict_t *rsp_dict);
 int
 glusterd_use_rsp_dict (dict_t *aggr, dict_t *rsp_dict);
+int
+glusterd_sys_exec_output_rsp_dict (dict_t *aggr, dict_t *rsp_dict);
 int32_t
 glusterd_handle_node_rsp (dict_t *req_ctx, void *pending_entry,
                           glusterd_op_t op, dict_t *rsp_dict, dict_t *op_ctx,
@@ -479,6 +494,11 @@ int
 glusterd_profile_volume_brick_rsp (void *pending_entry,
                                    dict_t *rsp_dict, dict_t *op_ctx,
                                    char **op_errstr, gd_node_type type);
+
+gf_boolean_t
+glusterd_are_vol_all_peers_up (glusterd_volinfo_t *volinfo,
+                               struct list_head *peers,
+                               char **down_peerstr);
 
 /* Should be used only when an operation is in progress, as that is the only
  * time a lock_owner is set
@@ -515,4 +535,34 @@ glusterd_copy_uuid_to_dict (uuid_t uuid, dict_t *dict, char *key);
 
 gf_boolean_t
 glusterd_is_same_address (char *name1, char *name2);
+
+void
+gd_update_volume_op_versions (glusterd_volinfo_t *volinfo);
+
+char*
+gd_peer_uuid_str (glusterd_peerinfo_t *peerinfo);
+
+gf_boolean_t
+gd_is_remove_brick_committed (glusterd_volinfo_t *volinfo);
+
+gf_boolean_t
+glusterd_are_vol_all_peers_up (glusterd_volinfo_t *volinfo,
+                               struct list_head *peers,
+                               char **down_peerstr);
+
+int
+glusterd_get_slave_details_confpath (glusterd_volinfo_t *volinfo, dict_t *dict,
+                                     char **slave_ip, char **slave_vol,
+                                     char **conf_path, char **op_errstr);
+
+int
+glusterd_check_restart_gsync_session (glusterd_volinfo_t *volinfo, char *slave,
+                                      dict_t *resp_dict, char *path_list,
+                                      char *conf_path, gf_boolean_t is_force);
+
+int
+glusterd_check_gsync_running_local (char *master, char *slave,
+                                    char *conf_path,
+                                    gf_boolean_t *is_run);
+
 #endif

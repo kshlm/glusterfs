@@ -133,12 +133,17 @@ afr_writev_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      struct iatt *postbuf, dict_t *xdata)
 {
         afr_local_t *   local = NULL;
+        afr_private_t  *priv  = NULL;
         call_frame_t    *fop_frame = NULL;
         int child_index = (long) cookie;
         int call_count  = -1;
         int read_child  = 0;
+        int      ret = 0;
+        uint32_t open_fd_count = 0;
+        uint32_t write_is_append = 0;
 
         local = frame->local;
+        priv  = this->private;
 
         read_child = afr_inode_get_read_ctx (this, local->fd->inode, NULL);
 
@@ -152,8 +157,10 @@ afr_writev_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 		local->replies[child_index].op_ret = op_ret;
 		local->replies[child_index].op_errno = op_errno;
 
-                if (afr_fop_failed (op_ret, op_errno))
+                if (afr_fop_failed (op_ret, op_errno)) {
                         afr_transaction_fop_failed (frame, this, child_index);
+                        local->child_errno[child_index] = op_errno;
+                }
 
 		/* stage the best case return value for unwind */
                 if ((local->success_count == 0) || (op_ret > local->op_ret)) {
@@ -162,6 +169,24 @@ afr_writev_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 		}
 
 		if (op_ret != -1) {
+                        if (xdata) {
+                                ret = dict_get_uint32 (xdata,
+                                                       GLUSTERFS_OPEN_FD_COUNT,
+                                                       &open_fd_count);
+                                if ((ret == 0) &&
+                                    (open_fd_count > local->open_fd_count)) {
+                                        local->open_fd_count = open_fd_count;
+                                        local->update_open_fd_count = _gf_true;
+                                }
+
+				write_is_append = 0;
+                                ret = dict_get_uint32 (xdata,
+                                                       GLUSTERFS_WRITE_IS_APPEND,
+                                                       &write_is_append);
+                                if (ret || !write_is_append)
+					local->append_write = _gf_false;
+                        }
+
 			if ((local->success_count == 0) ||
 			    (child_index == read_child)) {
 				local->cont.writev.prebuf  = *prebuf;
@@ -176,10 +201,23 @@ afr_writev_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         if (call_count == 0) {
 
-		if (!local->stable_write)
-			afr_fd_report_unstable_write (this, local->fd);
+                if (local->update_open_fd_count)
+                        afr_handle_open_fd_count (frame, this);
+
+                if (!local->stable_write && !local->append_write)
+			/* An appended write removes the necessity to
+			   fsync() the file. This is because self-heal
+			   has the logic to check for larger file when
+			   the xattrs are not reliably pointing at
+			   a stale file.
+			*/
+                        afr_fd_report_unstable_write (this, local->fd);
 
                 afr_writev_handle_short_writes (frame, this);
+                if (afr_any_fops_failed (local, priv)) {
+                        //Don't unwind until post-op is complete
+                        local->transaction.resume (frame, this);
+                } else {
                 /*
                  * Generally inode-write fops do transaction.unwind then
                  * transaction.resume, but writev needs to make sure that
@@ -191,10 +229,11 @@ afr_writev_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                  * completed.
                  */
 
-                fop_frame = afr_transaction_detach_fop_frame (frame);
-                afr_writev_copy_outvars (frame, fop_frame);
-                local->transaction.resume (frame, this);
-                afr_writev_unwind (fop_frame, this);
+                        fop_frame = afr_transaction_detach_fop_frame (frame);
+                        afr_writev_copy_outvars (frame, fop_frame);
+                        local->transaction.resume (frame, this);
+                        afr_writev_unwind (fop_frame, this);
+                }
         }
         return 0;
 }
@@ -206,6 +245,8 @@ afr_writev_wind (call_frame_t *frame, xlator_t *this)
         afr_private_t *priv = NULL;
         int i = 0;
         int call_count = -1;
+        dict_t *xdata = NULL;
+        GF_UNUSED int     ret = 0;
 
         local = frame->local;
         priv = this->private;
@@ -229,6 +270,19 @@ afr_writev_wind (call_frame_t *frame, xlator_t *this)
 		return 0;
 	}
 
+        xdata = dict_new ();
+        if (xdata) {
+                ret = dict_set_uint32 (xdata, GLUSTERFS_OPEN_FD_COUNT,
+                                       sizeof (uint32_t));
+		ret = dict_set_uint32 (xdata, GLUSTERFS_WRITE_IS_APPEND,
+				       0);
+		/* Set append_write to be true speculatively. If on any
+		   server it turns not be true, we unset it in the
+		   callback.
+		*/
+		local->append_write = _gf_true;
+        }
+
         for (i = 0; i < priv->child_count; i++) {
                 if (local->transaction.pre_op[i]) {
                         STACK_WIND_COOKIE (frame, afr_writev_wind_cbk,
@@ -241,12 +295,15 @@ afr_writev_wind (call_frame_t *frame, xlator_t *this)
                                            local->cont.writev.offset,
                                            local->cont.writev.flags,
                                            local->cont.writev.iobref,
-                                           NULL);
+                                           xdata);
 
                         if (!--call_count)
                                 break;
                 }
         }
+
+        if (xdata)
+                dict_unref (xdata);
 
         return 0;
 }
@@ -530,14 +587,11 @@ afr_truncate_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                        struct iatt *postbuf, dict_t *xdata)
 {
         afr_local_t *   local = NULL;
-        afr_private_t * priv  = NULL;
         int child_index = (long) cookie;
         int read_child  = 0;
         int call_count  = -1;
-        int need_unwind = 0;
 
         local = frame->local;
-        priv  = this->private;
 
         read_child = afr_inode_get_read_ctx (this, local->loc.inode, NULL);
 
@@ -547,10 +601,15 @@ afr_truncate_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         local->read_child_returned = _gf_true;
                 }
 
-                if (afr_fop_failed (op_ret, op_errno) && op_errno != EFBIG)
+                if (afr_fop_failed (op_ret, op_errno) && op_errno != EFBIG) {
                         afr_transaction_fop_failed (frame, this, child_index);
+                        local->child_errno[child_index] = op_errno;
+                }
 
                 if (op_ret != -1) {
+			if (prebuf->ia_size != postbuf->ia_size)
+				local->stable_write = _gf_false;
+
                         if (local->success_count == 0) {
                                 local->op_ret = op_ret;
                                 local->cont.truncate.prebuf  = *prebuf;
@@ -563,22 +622,17 @@ afr_truncate_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         }
 
                         local->success_count++;
-
-                        if ((local->success_count >= priv->wait_count)
-                            && local->read_child_returned) {
-                                need_unwind = 1;
-                        }
                 }
                 local->op_errno = op_errno;
         }
         UNLOCK (&frame->lock);
 
-        if (need_unwind)
-                local->transaction.unwind (frame, this);
-
         call_count = afr_frame_return (frame);
 
         if (call_count == 0) {
+		if (local->stable_write && afr_txn_nothing_failed (frame, this))
+			local->transaction.unwind (frame, this);
+
                 local->transaction.resume (frame, this);
         }
 
@@ -606,6 +660,7 @@ afr_truncate_wind (call_frame_t *frame, xlator_t *this)
         }
 
         local->call_count = call_count;
+	local->stable_write = _gf_true;
 
         for (i = 0; i < priv->child_count; i++) {
                 if (local->transaction.pre_op[i]) {
@@ -740,14 +795,11 @@ afr_ftruncate_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         struct iatt *postbuf, dict_t *xdata)
 {
         afr_local_t *   local = NULL;
-        afr_private_t * priv  = NULL;
         int child_index = (long) cookie;
         int call_count  = -1;
-        int need_unwind = 0;
         int read_child  = 0;
 
         local = frame->local;
-        priv  = this->private;
 
         read_child = afr_inode_get_read_ctx (this, local->fd->inode, NULL);
 
@@ -757,10 +809,15 @@ afr_ftruncate_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         local->read_child_returned = _gf_true;
                 }
 
-                if (afr_fop_failed (op_ret, op_errno))
+                if (afr_fop_failed (op_ret, op_errno)) {
                         afr_transaction_fop_failed (frame, this, child_index);
+                        local->child_errno[child_index] = op_errno;
+                }
 
                 if (op_ret != -1) {
+			if (prebuf->ia_size != postbuf->ia_size)
+				local->stable_write = _gf_false;
+
                         if (local->success_count == 0) {
                                 local->op_ret = op_ret;
                                 local->cont.ftruncate.prebuf  = *prebuf;
@@ -773,22 +830,17 @@ afr_ftruncate_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         }
 
                         local->success_count++;
-
-                        if ((local->success_count >= priv->wait_count)
-                            && local->read_child_returned) {
-                                need_unwind = 1;
-                        }
                 }
                 local->op_errno = op_errno;
         }
         UNLOCK (&frame->lock);
 
-        if (need_unwind)
-                local->transaction.unwind (frame, this);
-
         call_count = afr_frame_return (frame);
 
         if (call_count == 0) {
+		if (local->stable_write && afr_txn_nothing_failed (frame, this))
+			local->transaction.unwind (frame, this);
+
                 local->transaction.resume (frame, this);
         }
 
@@ -816,6 +868,7 @@ afr_ftruncate_wind (call_frame_t *frame, xlator_t *this)
         }
 
         local->call_count = call_count;
+	local->stable_write = _gf_true;
 
         for (i = 0; i < priv->child_count; i++) {
                 if (local->transaction.pre_op[i]) {

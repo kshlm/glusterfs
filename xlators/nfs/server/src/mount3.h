@@ -53,6 +53,9 @@ mnt1svc_init (xlator_t *nfsx);
 extern int
 mount_init_state (xlator_t *nfsx);
 
+void
+mount_rewrite_rmtab (struct mount3_state *ms, char *new_rmtab);
+
 /* Data structure used to store the list of mounts points currently
  * in use by NFS clients.
  */
@@ -68,6 +71,13 @@ struct mountentry {
 #define MNT3_EXPTYPE_VOLUME     1
 #define MNT3_EXPTYPE_DIR        2
 
+/* Structure to hold export-dir AUTH parameter */
+struct host_auth_spec {
+        char                    *host_addr;    /* Allowed IP or host name */
+        int                     routeprefix;   /* Routing prefix */
+        struct host_auth_spec   *next;         /* Pointer to next AUTH struct */
+};
+
 struct mnt3_export {
         struct list_head        explist;
 
@@ -75,6 +85,11 @@ struct mnt3_export {
          * is exported or the subdirectory in the volume.
          */
         char                    *expname;
+        /*
+         * IP address, hostname or subnets who are allowed to connect to expname
+         * subvolume or subdirectory
+         */
+        struct host_auth_spec*  hostspec;
         xlator_t                *vol;
         int                     exptype;
 

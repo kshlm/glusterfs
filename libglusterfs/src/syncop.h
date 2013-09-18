@@ -41,6 +41,7 @@ typedef enum {
         SYNCTASK_SUSPEND,
         SYNCTASK_WAIT,
         SYNCTASK_DONE,
+	SYNCTASK_ZOMBIE,
 } synctask_state_t;
 
 /* for one sequential execution of @syncfn */
@@ -57,7 +58,6 @@ struct synctask {
         void               *stack;
         int                 woken;
         int                 slept;
-	int                 waitfor;
         int                 ret;
 
         uid_t               uid;
@@ -91,6 +91,9 @@ struct syncenv {
         struct list_head    waitq;
         int                 waitcount;
 
+	int                 procmin;
+	int                 procmax;
+
         pthread_mutex_t     mutex;
         pthread_cond_t      cond;
 
@@ -107,6 +110,16 @@ struct synclock {
 };
 typedef struct synclock synclock_t;
 
+
+struct syncbarrier {
+	pthread_mutex_t     guard; /* guard the remaining members, pair @cond */
+	pthread_cond_t      cond;  /* waiting non-synctasks */
+	struct list_head    waitq; /* waiting synctasks */
+	int                 count; /* count the number of wakes */
+};
+typedef struct syncbarrier syncbarrier_t;
+
+
 struct syncargs {
         int                 op_ret;
         int                 op_errno;
@@ -120,6 +133,7 @@ struct syncargs {
         struct iobref      *iobref;
         char               *buffer;
         dict_t             *xdata;
+	struct gf_flock     flock;
 
         /* some more _cbk needs */
         uuid_t              uuid;
@@ -127,23 +141,23 @@ struct syncargs {
         dict_t             *dict;
         pthread_mutex_t     lock_dict;
 
+	syncbarrier_t       barrier;
+
         /* do not touch */
         struct synctask    *task;
         pthread_mutex_t     mutex;
         pthread_cond_t      cond;
-        int                 wakecnt;
+	int                 done;
 };
 
 
 #define __yawn(args) do {                                       \
-	args->task = synctask_get ();			        \
-        if (args->task) {                                       \
-		synctask_yawn (args->task);			\
-	} else {						\
-                pthread_mutex_init (&args->mutex, NULL);        \
-                pthread_cond_init (&args->cond, NULL);          \
-                args->wakecnt = 0;				\
-        }                                                       \
+        args->task = synctask_get ();                           \
+        if (args->task)                                         \
+            break;                                              \
+        pthread_mutex_init (&args->mutex, NULL);                \
+        pthread_cond_init (&args->cond, NULL);                  \
+        args->done = 0;                                         \
         } while (0)
 
 
@@ -153,7 +167,7 @@ struct syncargs {
         } else {                                                \
                 pthread_mutex_lock (&args->mutex);              \
                 {                                               \
-                        args->wakecnt++;			\
+                        args->done = 1;				\
                         pthread_cond_signal (&args->cond);      \
                 }                                               \
                 pthread_mutex_unlock (&args->mutex);            \
@@ -161,13 +175,13 @@ struct syncargs {
         } while (0)
 
 
-#define __waitfor(args, cnt) do {					\
+#define __yield(args) do {						\
 	if (args->task) {				                \
-		synctask_waitfor (args->task, cnt);			\
+		synctask_yield (args->task);				\
 	} else {							\
 		pthread_mutex_lock (&args->mutex);			\
 		{							\
-			while (args->wakecnt < cnt)			\
+			while (!args->done)				\
 				pthread_cond_wait (&args->cond,		\
 						   &args->mutex);	\
 		}							\
@@ -176,9 +190,6 @@ struct syncargs {
 		pthread_cond_destroy (&args->cond);			\
 	}								\
 	} while (0)
-
-
-#define __yield(args) __waitfor(args, 1)
 
 
 #define SYNCOP(subvol, stb, cbk, op, params ...) do {                   \
@@ -190,7 +201,7 @@ struct syncargs {
                 if (task)                                               \
                         frame = task->opframe;                          \
                 else                                                    \
-                        frame = create_frame (THIS, THIS->ctx->pool);   \
+                        frame = syncop_create_frame (THIS);		\
                                                                         \
                 if (task) {                                             \
                         frame->root->uid = task->uid;                   \
@@ -201,8 +212,6 @@ struct syncargs {
                                                                         \
                 STACK_WIND_COOKIE (frame, cbk, (void *)stb, subvol,     \
                                    op, params);                         \
-                if (task)                                               \
-                        task->state = SYNCTASK_SUSPEND;                 \
                                                                         \
                 __yield (stb);                                          \
                 if (task)                                               \
@@ -214,29 +223,69 @@ struct syncargs {
 
 #define SYNCENV_DEFAULT_STACKSIZE (2 * 1024 * 1024)
 
-struct syncenv * syncenv_new ();
+struct syncenv * syncenv_new (size_t stacksize, int procmin, int procmax);
 void syncenv_destroy (struct syncenv *);
 void syncenv_scale (struct syncenv *env);
 
 int synctask_new (struct syncenv *, synctask_fn_t, synctask_cbk_t, call_frame_t* frame, void *);
+struct synctask *synctask_create (struct syncenv *, synctask_fn_t,
+				  synctask_cbk_t, call_frame_t *, void *);
+int synctask_join (struct synctask *task);
 void synctask_wake (struct synctask *task);
 void synctask_yield (struct synctask *task);
-void synctask_yawn (struct synctask *task);
 void synctask_waitfor (struct synctask *task, int count);
 
-#define synctask_barrier_init(args) __yawn (args)
-#define synctask_barrier_wait(args, n) __waitfor (args, n)
-#define synctask_barrier_wake(args) __wake (args)
+#define synctask_barrier_init(args) syncbarrier_init (&args->barrier)
+#define synctask_barrier_wait(args, n) syncbarrier_wait (&args->barrier, n)
+#define synctask_barrier_wake(args) syncbarrier_wake (&args->barrier)
 
 int synctask_setid (struct synctask *task, uid_t uid, gid_t gid);
 #define SYNCTASK_SETID(uid, gid) synctask_setid (synctask_get(), uid, gid);
 
+
+static inline call_frame_t *
+syncop_create_frame (xlator_t *this)
+{
+	call_frame_t  *frame = NULL;
+	int            ngrps = -1;
+
+	frame = create_frame (this, this->ctx->pool);
+	if (!frame)
+		return NULL;
+
+	frame->root->pid = getpid();
+	frame->root->uid = geteuid ();
+	frame->root->gid = getegid ();
+        ngrps = getgroups (0, 0);
+	if (ngrps < 0) {
+		STACK_DESTROY (frame->root);
+		return NULL;
+	}
+
+	if (call_stack_alloc_groups (frame->root, ngrps) != 0) {
+		STACK_DESTROY (frame->root);
+		return NULL;
+	}
+
+	if (getgroups (ngrps, frame->root->groups) < 0) {
+		STACK_DESTROY (frame->root);
+		return NULL;
+	}
+
+	return frame;
+}
 
 int synclock_init (synclock_t *lock);
 int synclock_destory (synclock_t *lock);
 int synclock_lock (synclock_t *lock);
 int synclock_trylock (synclock_t *lock);
 int synclock_unlock (synclock_t *lock);
+
+
+int syncbarrier_init (syncbarrier_t *barrier);
+int syncbarrier_wait (syncbarrier_t *barrier, int waitfor);
+int syncbarrier_wake (syncbarrier_t *barrier);
+int syncbarrier_destroy (syncbarrier_t *barrier);
 
 int syncop_lookup (xlator_t *subvol, loc_t *loc, dict_t *xattr_req,
                    /* out */
@@ -271,7 +320,7 @@ int syncop_removexattr (xlator_t *subvol, loc_t *loc, const char *name);
 int syncop_fremovexattr (xlator_t *subvol, fd_t *fd, const char *name);
 
 int syncop_create (xlator_t *subvol, loc_t *loc, int32_t flags, mode_t mode,
-                   fd_t *fd, dict_t *dict);
+                   fd_t *fd, dict_t *dict, struct iatt *iatt);
 int syncop_open (xlator_t *subvol, loc_t *loc, int32_t flags, fd_t *fd);
 int syncop_close (fd_t *fd);
 
@@ -297,15 +346,21 @@ int syncop_fstat (xlator_t *subvol, fd_t *fd, struct iatt *stbuf);
 int syncop_stat (xlator_t *subvol, loc_t *loc, struct iatt *stbuf);
 
 int syncop_symlink (xlator_t *subvol, loc_t *loc, const char *newpath,
-                    dict_t *dict);
+                    dict_t *dict, struct iatt *iatt);
 int syncop_readlink (xlator_t *subvol, loc_t *loc, char **buffer, size_t size);
 int syncop_mknod (xlator_t *subvol, loc_t *loc, mode_t mode, dev_t rdev,
-                  dict_t *dict);
-int syncop_mkdir (xlator_t *subvol, loc_t *loc, mode_t mode, dict_t *dict);
+                  dict_t *dict, struct iatt *iatt);
+int syncop_mkdir (xlator_t *subvol, loc_t *loc, mode_t mode, dict_t *dict,
+		  struct iatt *iatt);
 int syncop_link (xlator_t *subvol, loc_t *oldloc, loc_t *newloc);
 int syncop_fsyncdir (xlator_t *subvol, fd_t *fd, int datasync);
 int syncop_access (xlator_t *subvol, loc_t *loc, int32_t mask);
+int syncop_fallocate(xlator_t *subvol, fd_t *fd, int32_t keep_size, off_t offset,
+		     size_t len);
+int syncop_discard(xlator_t *subvol, fd_t *fd, off_t offset, size_t len);
 
 int syncop_rename (xlator_t *subvol, loc_t *oldloc, loc_t *newloc);
+
+int syncop_lk (xlator_t *subvol, fd_t *fd, int cmd, struct gf_flock *flock);
 
 #endif /* _SYNCOP_H */

@@ -27,11 +27,13 @@ function volume_option()
 }
 
 function rebalance_status_field {
-        $CLI volume rebalance $1 status | awk '{print $6}' | sed -n 3p
+        $CLI volume rebalance $1 status | awk '{print $7}' | sed -n 3p
 }
 
 function remove_brick_status_completed_field {
-        $CLI volume remove-brick $V0 $H0:$B0/r2d2_{4,5} status | awk '{print $6}' | sed -n 3p
+        local vol=$1
+        local brick_list=$2
+        $CLI volume remove-brick $vol $brick_list status | awk '{print $7}' | sed -n 3p
 }
 
 function get_mount_process_pid {
@@ -105,6 +107,11 @@ function generate_shd_statedump {
         generate_statedump $(get_shd_process_pid $vol)
 }
 
+function generate_nfs_statedump {
+        local vol=$1
+        generate_statedump $(get_nfs_pid $vol)
+}
+
 function generate_brick_statedump {
         local vol=$1
         local host=$2
@@ -117,6 +124,17 @@ function afr_child_up_status_in_shd {
         #brick_id is (brick-num in volume info - 1)
         local brick_id=$2
         _afr_child_up_status $vol $brick_id generate_shd_statedump
+}
+
+function afr_child_up_status_in_nfs {
+        local vol=$1
+        #brick_id is (brick-num in volume info - 1)
+        local brick_id=$2
+        _afr_child_up_status $vol $brick_id generate_nfs_statedump
+}
+
+function nfs_up_status {
+        gluster volume status | grep "NFS Server" | awk '{print $6}'
 }
 
 function glustershd_up_status {
@@ -221,6 +239,26 @@ function dht_get_layout {
 	getfattr -d -e hex -n $my_xa $1 2> /dev/null | grep "$my_xa=" | cut -d= -f2
 }
 
+function afr_get_specific_changelog_xattr ()
+{
+        local path=$1
+        local key=$2
+        local type=$3
+        local specific_changelog=""
+
+        changelog_xattr=$(afr_get_changelog_xattr "$path" "$key")
+        if [ "$type" == "data" ]; then
+                specific_changelog=${changelog_xattr:2:8}
+        elif [ "$type" == "metadata" ]; then
+                specific_changelog=${changelog_xattr:10:8}
+        elif [ "$type" == "entry" ]; then
+                specific_changelog=${changelog_xattr:18:8}
+        else
+                specific_changlog="error"
+        fi
+
+        echo $specific_changelog
+}
 ##
  # query pathinfo xattr and extract POSIX pathname(s)
  ##

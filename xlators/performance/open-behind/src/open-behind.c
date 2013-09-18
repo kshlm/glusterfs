@@ -681,6 +681,43 @@ err:
 	return 0;
 }
 
+int
+ob_fallocate(call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t mode,
+	     off_t offset, size_t len, dict_t *xdata)
+{
+	call_stub_t *stub;
+
+	stub = fop_fallocate_stub(frame, default_fallocate_resume, fd, mode,
+				  offset, len, xdata);
+	if (!stub)
+		goto err;
+
+	open_and_resume(this, fd, stub);
+
+	return 0;
+err:
+	STACK_UNWIND_STRICT(fallocate, frame, -1, ENOMEM, NULL, NULL, NULL);
+	return 0;
+}
+
+int
+ob_discard(call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
+	   size_t len, dict_t *xdata)
+{
+	call_stub_t *stub;
+
+	stub = fop_discard_stub(frame, default_discard_resume, fd, offset, len,
+				xdata);
+	if (!stub)
+		goto err;
+
+	open_and_resume(this, fd, stub);
+
+	return 0;
+err:
+	STACK_UNWIND_STRICT(discard, frame, -1, ENOMEM, NULL, NULL, NULL);
+	return 0;
+}
 
 int
 ob_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc, int xflags,
@@ -697,6 +734,8 @@ ob_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc, int xflags,
 	fd = fd_lookup (loc->inode, 0);
 
 	open_and_resume (this, fd, stub);
+        if (fd)
+                fd_unref (fd);
 
 	return 0;
 err:
@@ -721,6 +760,8 @@ ob_rename (call_frame_t *frame, xlator_t *this, loc_t *src, loc_t *dst,
 		fd = fd_lookup (dst->inode, 0);
 
 	open_and_resume (this, fd, stub);
+        if (fd)
+                fd_unref (fd);
 
 	return 0;
 err:
@@ -903,6 +944,8 @@ struct xlator_fops fops = {
 	.fentrylk    = ob_fentrylk,
 	.fxattrop    = ob_fxattrop,
 	.fsetattr    = ob_fsetattr,
+	.fallocate   = ob_fallocate,
+	.discard     = ob_discard,
 	.unlink      = ob_unlink,
 	.rename      = ob_rename,
 	.lk          = ob_lk,
@@ -922,15 +965,16 @@ struct volume_options options[] = {
         { .key  = {"use-anonymous-fd"},
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "yes",
-	  .description = "For read operations, use anonymous FD when "
-	  "original FD is open-behind and not yet opened in the backend.",
+          .description = "For read operations, use anonymous FD when "
+          "original FD is open-behind and not yet opened in the backend.",
         },
         { .key  = {"lazy-open"},
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "yes",
-	  .description = "Perform open in the backend only when a necessary "
-	  "FOP arrives (e.g writev on the FD, unlink of the file). When option "
-	  "is disabled, perform backend open right after unwinding open().",
+          .description = "Perform open in the backend only when a necessary "
+          "FOP arrives (e.g writev on the FD, unlink of the file). When option "
+          "is disabled, perform backend open right after unwinding open().",
         },
+        { .key  = {NULL} }
 
 };

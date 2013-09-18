@@ -11,17 +11,15 @@
 
 /*
   TODO:
+  - merge locks in glfs_posix_lock for lock self-healing
   - set proper pid/lk_owner to call frames (currently buried in syncop)
   - fix logging.c/h to store logfp and loglevel in glusterfs_ctx_t and
     reach it via THIS.
-  - fd migration on graph switch.
   - update syncop functions to accept/return xdata. ???
   - protocol/client to reconnect immediately after portmap disconnect.
   - handle SEEK_END failure in _lseek()
   - handle umask (per filesystem?)
-  - implement glfs_set_xlator_option(), like --xlator-option
   - make itables LRU based
-  - implement glfs_fini()
   - 0-copy for readv/writev
   - reconcile the open/creat mess
 */
@@ -51,6 +49,8 @@
 
 #include "glfs.h"
 #include "glfs-internal.h"
+#include "hashfn.h"
+#include "rpc-clnt.h"
 
 
 static gf_boolean_t
@@ -85,7 +85,7 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
 		goto err;
 	}
 
-	ctx->env = syncenv_new (0);
+	ctx->env = syncenv_new (0, 0, 0);
 	if (!ctx->env) {
 		goto err;
 	}
@@ -277,69 +277,100 @@ out:
 ///////////////////////////////////////////////////////////////////////////////
 
 
+int
+glfs_set_xlator_option (struct glfs *fs, const char *xlator, const char *key,
+			const char *value)
+{
+	xlator_cmdline_option_t *option = NULL;
+
+	option = GF_CALLOC (1, sizeof (*option),
+			    glfs_mt_xlator_cmdline_option_t);
+	if (!option)
+		goto enomem;
+
+	INIT_LIST_HEAD (&option->cmd_args);
+
+	option->volume = gf_strdup (xlator);
+	if (!option->volume)
+		goto enomem;
+	option->key = gf_strdup (key);
+	if (!option->key)
+		goto enomem;
+	option->value = gf_strdup (value);
+	if (!option->value)
+		goto enomem;
+
+	list_add (&option->cmd_args, &fs->ctx->cmd_args.xlator_options);
+
+	return 0;
+enomem:
+	errno = ENOMEM;
+
+	if (!option)
+		return -1;
+
+	GF_FREE (option->volume);
+	GF_FREE (option->key);
+	GF_FREE (option->value);
+	GF_FREE (option);
+
+	return -1;
+}
+
+
 struct glfs *
 glfs_from_glfd (struct glfs_fd *glfd)
 {
-	return 	((xlator_t *)glfd->fd->inode->table->xl->ctx->master)->private;
+	return glfd->fs;
 }
 
+
+struct glfs_fd *
+glfs_fd_new (struct glfs *fs)
+{
+	struct glfs_fd  *glfd = NULL;
+
+	glfd = GF_CALLOC (1, sizeof (*glfd), glfs_mt_glfs_fd_t);
+	if (!glfd)
+		return NULL;
+
+	glfd->fs = fs;
+
+	INIT_LIST_HEAD (&glfd->openfds);
+
+	return glfd;
+}
+
+
+void
+glfs_fd_bind (struct glfs_fd *glfd)
+{
+	struct glfs *fs = NULL;
+
+	fs = glfd->fs;
+
+	glfs_lock (fs);
+	{
+		list_add_tail (&glfd->openfds, &fs->openfds);
+	}
+	glfs_unlock (fs);
+}
 
 void
 glfs_fd_destroy (struct glfs_fd *glfd)
 {
 	if (!glfd)
 		return;
+
+	glfs_lock (glfd->fs);
+	{
+		list_del_init (&glfd->openfds);
+	}
+	glfs_unlock (glfd->fs);
+
 	if (glfd->fd)
 		fd_unref (glfd->fd);
 	GF_FREE (glfd);
-}
-
-
-xlator_t *
-glfs_fd_subvol (struct glfs_fd *glfd)
-{
-	xlator_t    *subvol = NULL;
-
-	if (!glfd)
-		return NULL;
-
-	subvol = glfd->fd->inode->table->xl;
-
-	return subvol;
-}
-
-
-xlator_t *
-glfs_active_subvol (struct glfs *fs)
-{
-	xlator_t      *subvol = NULL;
-	inode_table_t *itable = NULL;
-
-	pthread_mutex_lock (&fs->mutex);
-	{
-		while (!fs->init)
-			pthread_cond_wait (&fs->cond, &fs->mutex);
-
-		subvol = fs->active_subvol;
-	}
-	pthread_mutex_unlock (&fs->mutex);
-
-	if (!subvol)
-		return NULL;
-
-	if (!subvol->itable) {
-		itable = inode_table_new (0, subvol);
-		if (!itable) {
-			errno = ENOMEM;
-			return NULL;
-		}
-
-		subvol->itable = itable;
-
-		glfs_first_lookup (subvol);
-	}
-
-	return subvol;
 }
 
 
@@ -398,6 +429,8 @@ glfs_new (const char *volname)
 	pthread_mutex_init (&fs->mutex, NULL);
 	pthread_cond_init (&fs->cond, NULL);
 
+	INIT_LIST_HEAD (&fs->openfds);
+
 	return fs;
 }
 
@@ -441,13 +474,17 @@ glfs_set_volfile_server (struct glfs *fs, const char *transport,
 int
 glfs_set_logging (struct glfs *fs, const char *logfile, int loglevel)
 {
-	int  ret = -1;
+	int  ret = 0;
 
-	ret = gf_log_init (fs->ctx, logfile);
-	if (ret)
-		return ret;
+	if (logfile) {
+                /* passing ident as NULL means to use default ident for syslog */
+		ret = gf_log_init (fs->ctx, logfile, NULL);
+		if (ret)
+			return ret;
+	}
 
-	gf_log_set_loglevel (loglevel);
+	if (loglevel >= 0)
+		gf_log_set_loglevel (loglevel);
 
 	return ret;
 }
@@ -458,7 +495,8 @@ glfs_init_wait (struct glfs *fs)
 {
 	int   ret = -1;
 
-	pthread_mutex_lock (&fs->mutex);
+	/* Always a top-down call, use glfs_lock() */
+	glfs_lock (fs);
 	{
 		while (!fs->init)
 			pthread_cond_wait (&fs->cond,
@@ -466,7 +504,7 @@ glfs_init_wait (struct glfs *fs)
 		ret = fs->ret;
 		errno = fs->err;
 	}
-	pthread_mutex_unlock (&fs->mutex);
+	glfs_unlock (fs);
 
 	return ret;
 }
@@ -485,6 +523,7 @@ glfs_init_done (struct glfs *fs, int ret)
 
 	init_cbk = fs->init_cbk;
 
+	/* Always a bottom-up call, use mutex_lock() */
 	pthread_mutex_lock (&fs->mutex);
 	{
 		fs->init = 1;
@@ -520,6 +559,7 @@ glfs_init_common (struct glfs *fs)
 	if (ret)
 		return ret;
 
+	fs->dev_id = gf_dm_hashfn (fs->volname, strlen (fs->volname));
 	return ret;
 }
 
@@ -555,7 +595,47 @@ glfs_init (struct glfs *fs)
 int
 glfs_fini (struct glfs *fs)
 {
-	int  ret = -1;
+        int  ret = -1;
+        xlator_t *subvol = NULL;
+        glusterfs_ctx_t *ctx = NULL;
+        call_pool_t *call_pool = NULL;
+        int countdown = 100;
 
-	return ret;
+        ctx = fs->ctx;
+
+        if (ctx->mgmt) {
+                rpc_clnt_disable (ctx->mgmt);
+                ctx->mgmt = NULL;
+        }
+
+        __glfs_entry_fs (fs);
+
+        call_pool = fs->ctx->pool;
+
+        while (countdown--) {
+                /* give some time for background frames to finish */
+                if (!call_pool->cnt)
+                        break;
+                usleep (100000);
+        }
+        /* leaked frames may exist, we ignore */
+
+        subvol = glfs_active_subvol (fs);
+        if (subvol) {
+                /* PARENT_DOWN within glfs_subvol_done() is issued only
+                   on graph switch (new graph should activiate and
+                   decrement the extra @winds count taken in glfs_graph_setup()
+
+                   Since we are explicitly destroying, PARENT_DOWN is necessary
+                */
+                xlator_notify (subvol, GF_EVENT_PARENT_DOWN, subvol, 0);
+                /* TBD: wait for CHILD_DOWN before exiting, in case of
+                   asynchronous cleanup like graceful socket disconnection
+                   in the future.
+                */
+        }
+
+        glfs_subvol_done (fs, subvol);
+
+        return ret;
 }

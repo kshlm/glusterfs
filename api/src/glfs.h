@@ -218,6 +218,36 @@ int glfs_set_logging (glfs_t *fs, const char *logfile, int loglevel);
 int glfs_init (glfs_t *fs);
 
 
+/*
+  SYNOPSIS
+
+  glfs_fini: Cleanup and destroy the 'virtual mount'
+
+  DESCRIPTION
+
+  This function attempts to gracefully destroy glfs_t object. An attempt is
+  made to wait for all background processing to complete before returning.
+
+  glfs_fini() must be called after all operations on glfs_t is finished.
+
+  IMPORTANT
+
+  IT IS NECESSARY TO CALL glfs_fini() ON ALL THE INITIALIZED glfs_t
+  OBJECTS BEFORE TERMINATING THE PROGRAM. THERE MAY BE CACHED AND
+  UNWRITTEN / INCOMPLETE OPERATIONS STILL IN PROGRESS EVEN THOUGH THE
+  API CALLS HAVE RETURNED. glfs_fini() WILL WAIT FOR BACKGROUND OPERATIONS
+  TO COMPLETE BEFORE RETURNING, THEREBY MAKING IT SAFE FOR THE PROGRAM TO
+  EXIT.
+
+  PARAMETERS
+
+  @fs: The 'virtual mount' object to be destroyed.
+
+  RETURN VALUES
+
+   0 : Success.
+*/
+
 int glfs_fini (glfs_t *fs);
 
 /*
@@ -300,6 +330,32 @@ glfs_fd_t *glfs_creat (glfs_t *fs, const char *path, int flags,
 int glfs_close (glfs_fd_t *fd);
 
 glfs_t *glfs_from_glfd (glfs_fd_t *fd);
+
+int glfs_set_xlator_option (glfs_t *fs, const char *xlator, const char *key,
+			    const char *value);
+
+/*
+
+  glfs_io_cbk
+
+  The following is the function type definition of the callback
+  function pointer which has to be provided by the caller to the
+  *_async() versions of the IO calls.
+
+  The callback function is called on completion of the requested
+  IO, and the appropriate return value is returned in @ret.
+
+  In case of an error in completing the IO, @ret will be -1 and
+  @errno will be set with the appropriate error.
+
+  @ret will be same as the return value of the non _async() variant
+  of the particular call
+
+  @data is the same context pointer provided by the caller at the
+  time of issuing the async IO call. This can be used by the
+  caller to differentiate different instances of the async requests
+  in a common callback function.
+*/
 
 typedef void (*glfs_io_cbk) (glfs_fd_t *fd, ssize_t ret, void *data);
 
@@ -387,6 +443,9 @@ glfs_fd_t *glfs_opendir (glfs_t *fs, const char *path);
 int glfs_readdir_r (glfs_fd_t *fd, struct dirent *dirent,
 		    struct dirent **result);
 
+int glfs_readdirplus_r (glfs_fd_t *fd, struct stat *stat, struct dirent *dirent,
+			struct dirent **result);
+
 long glfs_telldir (glfs_fd_t *fd);
 
 void glfs_seekdir (glfs_fd_t *fd, long offset);
@@ -441,6 +500,28 @@ int glfs_removexattr (glfs_t *fs, const char *path, const char *name);
 int glfs_lremovexattr (glfs_t *fs, const char *path, const char *name);
 
 int glfs_fremovexattr (glfs_fd_t *fd, const char *name);
+
+int glfs_fallocate(glfs_fd_t *fd, int keep_size, off_t offset, size_t len);
+
+int glfs_discard(glfs_fd_t *fd, off_t offset, size_t len);
+
+int glfs_discard_async (glfs_fd_t *fd, off_t length, size_t lent,
+			glfs_io_cbk fn, void *data);
+
+char *glfs_getcwd (glfs_t *fs, char *buf, size_t size);
+
+int glfs_chdir (glfs_t *fs, const char *path);
+
+int glfs_fchdir (glfs_fd_t *fd);
+
+char *glfs_realpath (glfs_t *fs, const char *path, char *resolved_path);
+
+/*
+ * @cmd and @flock are as specified in man fcntl(2).
+ */
+int glfs_posix_lock (glfs_fd_t *fd, int cmd, struct flock *flock);
+
+glfs_fd_t *glfs_dup (glfs_fd_t *fd);
 
 __END_DECLS
 

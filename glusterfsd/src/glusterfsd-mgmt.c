@@ -37,7 +37,7 @@
 #include "syncop.h"
 #include "xlator.h"
 
-static char is_mgmt_rpc_reconnect;
+static gf_boolean_t is_mgmt_rpc_reconnect = _gf_false;
 
 int glusterfs_mgmt_pmap_signin (glusterfs_ctx_t *ctx);
 int glusterfs_volfile_fetch (glusterfs_ctx_t *ctx);
@@ -1200,7 +1200,7 @@ glusterfs_handle_rpc_msg (rpcsvc_request_t *req)
         return ret;
 }
 
-rpcclnt_cb_actor_t gluster_cbk_actors[] = {
+rpcclnt_cb_actor_t mgmt_cbk_actors[] = {
         [GF_CBK_FETCHSPEC] = {"FETCHSPEC", GF_CBK_FETCHSPEC, mgmt_cbk_spec },
         [GF_CBK_EVENT_NOTIFY] = {"EVENTNOTIFY", GF_CBK_EVENT_NOTIFY,
                                  mgmt_cbk_event},
@@ -1211,7 +1211,7 @@ struct rpcclnt_cb_program mgmt_cbk_prog = {
         .progname  = "GlusterFS Callback",
         .prognum   = GLUSTER_CBK_PROGRAM,
         .progver   = GLUSTER_CBK_VERSION,
-        .actors    = gluster_cbk_actors,
+        .actors    = mgmt_cbk_actors,
         .numactors = GF_CBK_MAXVALUE,
 };
 
@@ -1248,16 +1248,16 @@ rpc_clnt_prog_t clnt_handshake_prog = {
 };
 
 rpcsvc_actor_t glusterfs_actors[] = {
-        [GLUSTERD_BRICK_NULL]          = {"NULL", GLUSTERD_BRICK_NULL, glusterfs_handle_rpc_msg, NULL, 0},
-        [GLUSTERD_BRICK_TERMINATE]     = {"TERMINATE", GLUSTERD_BRICK_TERMINATE, glusterfs_handle_terminate, NULL, 0},
-        [GLUSTERD_BRICK_XLATOR_INFO]   = {"TRANSLATOR INFO", GLUSTERD_BRICK_XLATOR_INFO, glusterfs_handle_translator_info_get, NULL, 0},
-        [GLUSTERD_BRICK_XLATOR_OP]     = {"TRANSLATOR OP", GLUSTERD_BRICK_XLATOR_OP, glusterfs_handle_translator_op, NULL, 0},
-        [GLUSTERD_BRICK_STATUS]        = {"STATUS", GLUSTERD_BRICK_STATUS, glusterfs_handle_brick_status, NULL, 0},
-        [GLUSTERD_BRICK_XLATOR_DEFRAG] = {"TRANSLATOR DEFRAG", GLUSTERD_BRICK_XLATOR_DEFRAG, glusterfs_handle_defrag, NULL, 0},
-        [GLUSTERD_NODE_PROFILE]        = {"NFS PROFILE", GLUSTERD_NODE_PROFILE, glusterfs_handle_nfs_profile, NULL, 0},
-        [GLUSTERD_NODE_STATUS]         = {"NFS STATUS", GLUSTERD_NODE_STATUS, glusterfs_handle_node_status, NULL, 0},
+        [GLUSTERD_BRICK_NULL]          = {"NULL",              GLUSTERD_BRICK_NULL,          glusterfs_handle_rpc_msg,             NULL, 0, DRC_NA},
+        [GLUSTERD_BRICK_TERMINATE]     = {"TERMINATE",         GLUSTERD_BRICK_TERMINATE,     glusterfs_handle_terminate,           NULL, 0, DRC_NA},
+        [GLUSTERD_BRICK_XLATOR_INFO]   = {"TRANSLATOR INFO",   GLUSTERD_BRICK_XLATOR_INFO,   glusterfs_handle_translator_info_get, NULL, 0, DRC_NA},
+        [GLUSTERD_BRICK_XLATOR_OP]     = {"TRANSLATOR OP",     GLUSTERD_BRICK_XLATOR_OP,     glusterfs_handle_translator_op,       NULL, 0, DRC_NA},
+        [GLUSTERD_BRICK_STATUS]        = {"STATUS",            GLUSTERD_BRICK_STATUS,        glusterfs_handle_brick_status,        NULL, 0, DRC_NA},
+        [GLUSTERD_BRICK_XLATOR_DEFRAG] = {"TRANSLATOR DEFRAG", GLUSTERD_BRICK_XLATOR_DEFRAG, glusterfs_handle_defrag,              NULL, 0, DRC_NA},
+        [GLUSTERD_NODE_PROFILE]        = {"NFS PROFILE",       GLUSTERD_NODE_PROFILE,        glusterfs_handle_nfs_profile,         NULL, 0, DRC_NA},
+        [GLUSTERD_NODE_STATUS]         = {"NFS STATUS",        GLUSTERD_NODE_STATUS,         glusterfs_handle_node_status,         NULL, 0, DRC_NA},
 #ifdef HAVE_BD_XLATOR
-        [GLUSTERD_BRICK_BD_OP]         = {"BD OP", GLUSTERD_BRICK_BD_OP, glusterfs_handle_bd_op, NULL, 0}
+        [GLUSTERD_BRICK_BD_OP]         = {"BD OP",             GLUSTERD_BRICK_BD_OP,         glusterfs_handle_bd_op,               NULL, 0, DRC_NA}
 #endif
 };
 
@@ -1327,7 +1327,7 @@ out:
 
 
 /* XXX: move these into @ctx */
-static char oldvolfile[131072];
+static char *oldvolfile = NULL;
 static int oldvollen = 0;
 
 static int
@@ -1363,6 +1363,15 @@ xlator_equal_rec (xlator_t *xl1, xlator_t *xl2)
         }
 
         if (strcmp (xl1->name, xl2->name)) {
+                ret = -1;
+                goto out;
+        }
+
+	/* type could have changed even if xlator names match,
+	   e.g cluster/distrubte and cluster/nufa share the same
+	   xlator name
+	*/
+        if (strcmp (xl1->type, xl2->type)) {
                 ret = -1;
                 goto out;
         }
@@ -1417,6 +1426,19 @@ glusterfs_volfile_reconfigure (FILE *newvolfile_fp)
 
         strcpy (template, "/tmp/tmp.XXXXXX");
         oldvolfile_fd = mkstemp (template);
+        if (oldvolfile_fd == -1) {
+                gf_log ("glusterfsd-mgmt", GF_LOG_ERROR, "Unable to create "
+                        "temporary file: %s (%s)", template,
+                        strerror (errno));
+                goto out;
+        }
+
+        ret = unlink (template);
+        if (ret < 0) {
+                gf_log ("glusterfsd-mgmt", GF_LOG_WARNING, "Unable to delete "
+                        "file: %s", template);
+        }
+
         oldvolfile_fp = fdopen (oldvolfile_fd, "w+b");
         if (!oldvolfile_fp) {
                 gf_log ("glusterfsd-mgmt", GF_LOG_CRITICAL, "Failed to create "
@@ -1500,6 +1522,7 @@ mgmt_getspec_cbk (struct rpc_req *req, struct iovec *iov, int count,
         int                      ret   = 0;
         ssize_t                  size = 0;
         FILE                    *tmpfp = NULL;
+        char                    *volfilebuf = NULL;
 
         frame = myframe;
         ctx = frame->this->ctx;
@@ -1557,6 +1580,15 @@ mgmt_getspec_cbk (struct rpc_req *req, struct iovec *iov, int count,
         if (ret == 0) {
                 gf_log ("glusterfsd-mgmt", GF_LOG_DEBUG,
                         "No need to re-load volfile, reconfigure done");
+                if (oldvolfile)
+                        volfilebuf = GF_REALLOC (oldvolfile, size);
+                else
+                        volfilebuf = GF_CALLOC (1, size, gf_common_mt_char);
+                if (!volfilebuf) {
+                        ret = -1;
+                        goto out;
+                }
+                oldvolfile = volfilebuf;
                 oldvollen = size;
                 memcpy (oldvolfile, rsp.spec, size);
                 goto out;
@@ -1573,11 +1605,20 @@ mgmt_getspec_cbk (struct rpc_req *req, struct iovec *iov, int count,
         if (ret)
                 goto out;
 
+        if (oldvolfile)
+                volfilebuf = GF_REALLOC (oldvolfile, size);
+        else
+                volfilebuf = GF_CALLOC (1, size, gf_common_mt_char);
+        if (!volfilebuf) {
+                ret = -1;
+                goto out;
+        }
+        oldvolfile = volfilebuf;
         oldvollen = size;
         memcpy (oldvolfile, rsp.spec, size);
         if (!is_mgmt_rpc_reconnect) {
                 glusterfs_mgmt_pmap_signin (ctx);
-                is_mgmt_rpc_reconnect = 1;
+                is_mgmt_rpc_reconnect =  _gf_true;
         }
 
 out:
@@ -1780,30 +1821,52 @@ static int
 mgmt_rpc_notify (struct rpc_clnt *rpc, void *mydata, rpc_clnt_event_t event,
                  void *data)
 {
-        xlator_t        *this = NULL;
-        cmd_args_t      *cmd_args = NULL;
-        glusterfs_ctx_t *ctx = NULL;
+        xlator_t         *this = NULL;
+        glusterfs_ctx_t  *ctx = NULL;
         int              ret = 0;
-        int need_term = 0;
-        int emval = 0;
+        server_cmdline_t *server = NULL;
+        rpc_transport_t  *rpc_trans = NULL;
+        int              need_term = 0;
+        int              emval = 0;
 
         this = mydata;
+        rpc_trans = rpc->conn.trans;
         ctx = this->ctx;
-        cmd_args = &ctx->cmd_args;
+
         switch (event) {
         case RPC_CLNT_DISCONNECT:
                 if (!ctx->active) {
-                        cmd_args->max_connect_attempts--;
                         gf_log ("glusterfsd-mgmt", GF_LOG_ERROR,
-                                "failed to connect with remote-host: %s",
+                                "failed to connect with remote-host: %s (%s)",
+                                ctx->cmd_args.volfile_server,
                                 strerror (errno));
-                        gf_log ("glusterfsd-mgmt", GF_LOG_INFO,
-                                "%d connect attempts left",
-                                cmd_args->max_connect_attempts);
-                        if (0 >= cmd_args->max_connect_attempts) {
+                        server = ctx->cmd_args.curr_server;
+                        if (server->list.next == &ctx->cmd_args.volfile_servers) {
                                 need_term = 1;
                                 emval = ENOTCONN;
+                                gf_log("glusterfsd-mgmt", GF_LOG_INFO,
+                                       "Exhausted all volfile servers");
+                                break;
                         }
+                        server = list_entry (server->list.next, typeof(*server),
+                                             list);
+                        ctx->cmd_args.curr_server = server;
+                        ctx->cmd_args.volfile_server = server->volfile_server;
+
+                        ret = dict_set_str (rpc_trans->options,
+                                            "remote-host",
+                                            server->volfile_server);
+                        if (ret != 0) {
+                                gf_log ("glusterfsd-mgmt", GF_LOG_ERROR,
+                                        "failed to set remote-host: %s",
+                                        server->volfile_server);
+                                need_term = 1;
+                                emval = ENOTCONN;
+                                break;
+                        }
+                        gf_log ("glusterfsd-mgmt", GF_LOG_INFO,
+                                "connecting to next volfile server %s",
+                                server->volfile_server);
                 }
                 break;
         case RPC_CLNT_CONNECT:
@@ -1947,7 +2010,7 @@ glusterfs_listener_stop (glusterfs_ctx_t *ctx)
 
         if (ret) {
                 this = THIS;
-                gf_log (this->name, GF_LOG_ERROR, "Failed to unlink linstener "
+                gf_log (this->name, GF_LOG_ERROR, "Failed to unlink listener "
                         "socket %s, error: %s", cmd_args->sock_file,
                         strerror (errno));
         }
@@ -2007,7 +2070,8 @@ glusterfs_mgmt_init (glusterfs_ctx_t *ctx)
 
         ret = rpc_clnt_register_notify (rpc, mgmt_rpc_notify, THIS);
         if (ret) {
-                gf_log (THIS->name, GF_LOG_WARNING, "failed to register notify function");
+                gf_log (THIS->name, GF_LOG_WARNING,
+                        "failed to register notify function");
                 goto out;
         }
 

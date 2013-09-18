@@ -15,6 +15,7 @@
 
 #include <fnmatch.h>
 #include <sys/wait.h>
+#include <dlfcn.h>
 
 #if (HAVE_LIB_XML)
 #include <libxml/encoding.h>
@@ -34,6 +35,7 @@
 #include "glusterd-op-sm.h"
 #include "glusterd-utils.h"
 #include "run.h"
+#include "options.h"
 
 extern struct volopt_map_entry glusterd_volopt_map[];
 
@@ -460,6 +462,8 @@ process_option (char *key, data_t *value, void *param)
         vme.key = key;
         vme.voltype = odt->vme->voltype;
         vme.option = odt->vme->option;
+        vme.op_version = odt->vme->op_version;
+
         if (!vme.option) {
                 vme.option = strrchr (key, '.');
                 if (vme.option)
@@ -1418,6 +1422,7 @@ server_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
         char     *vgname                  = NULL;
         char     *vg                      = NULL;
         glusterd_brickinfo_t *brickinfo   = NULL;
+        char changelog_basepath[PATH_MAX] = {0,};
 
         brickinfo = param;
         path      = brickinfo->path;
@@ -1477,6 +1482,25 @@ server_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
                 if (ret)
                         return -1;
         }
+
+        xl = volgen_graph_add (graph, "features/changelog", volname);
+        if (!xl)
+                return -1;
+
+        ret = xlator_set_option (xl, "changelog-brick", path);
+        if (ret)
+                return -1;
+
+        snprintf (changelog_basepath, sizeof (changelog_basepath),
+                  "%s/%s", path, ".glusterfs/changelogs");
+        ret = xlator_set_option (xl, "changelog-dir", changelog_basepath);
+        if (ret)
+                return -1;
+
+        ret = check_and_add_debug_xl (graph, set_dict, volname, "changelog");
+        if (ret)
+                return -1;
+
         xl = volgen_graph_add (graph, "features/access-control", volname);
         if (!xl)
                 return -1;
@@ -1672,10 +1696,11 @@ static int
 perfxl_option_handler (volgen_graph_t *graph, struct volopt_map_entry *vme,
                        void *param)
 {
-        char *volname = NULL;
         gf_boolean_t enabled = _gf_false;
+        glusterd_volinfo_t *volinfo = NULL;
 
-        volname = param;
+        GF_ASSERT (param);
+        volinfo = param;
 
         if (strcmp (vme->option, "!perf") != 0)
                 return 0;
@@ -1685,7 +1710,13 @@ perfxl_option_handler (volgen_graph_t *graph, struct volopt_map_entry *vme,
         if (!enabled)
                 return 0;
 
-        if (volgen_graph_add (graph, vme->voltype, volname))
+        /* Check op-version before adding the 'open-behind' xlator in the graph
+         */
+        if (!strcmp (vme->key, "performance.open-behind") &&
+            (vme->op_version > volinfo->client_op_version))
+                return 0;
+
+        if (volgen_graph_add (graph, vme->voltype, volinfo->volname))
                 return 0;
         else
                 return -1;
@@ -1850,7 +1881,7 @@ xml_add_volset_element (xmlTextWriterPtr writer, const char *name,
 #endif
 
 static int
-get_key_from_volopt ( struct volopt_map_entry *vme, char **key)
+_get_xlator_opt_key_from_vme ( struct volopt_map_entry *vme, char **key)
 {
         int ret = 0;
 
@@ -1893,11 +1924,22 @@ get_key_from_volopt ( struct volopt_map_entry *vme, char **key)
         return ret;
 }
 
+static void
+_free_xlator_opt_key (char *key)
+{
+        GF_ASSERT (key);
+
+        if (!strcmp (key, AUTH_ALLOW_OPT_KEY) ||
+            !strcmp (key, AUTH_REJECT_OPT_KEY) ||
+            !strcmp (key, NFS_DISABLE_OPT_KEY))
+                GF_FREE (key);
+
+        return;
+}
+
 int
 glusterd_get_volopt_content (dict_t * ctx, gf_boolean_t xml_out)
 {
-
-        char                    *xlator_type = NULL;
         void                    *dl_handle = NULL;
         volume_opt_list_t        vol_opt_handle = {{0},};
         char                    *key = NULL;
@@ -1923,36 +1965,48 @@ glusterd_get_volopt_content (dict_t * ctx, gf_boolean_t xml_out)
 
         for (vme = &glusterd_volopt_map[0]; vme->key; vme++) {
 
-                if ( ( vme->type == NO_DOC) || (vme->type == GLOBAL_NO_DOC) )
+                if ((vme->type == NO_DOC) || (vme->type == GLOBAL_NO_DOC))
                         continue;
-
-                if (get_key_from_volopt (vme, &key))
-                                goto out; /*Some error while getin key*/
 
                 if (vme->description) {
                         descr = vme->description;
                         def_val = vme->value;
                 } else {
-                        if (!xlator_type || strcmp (vme->voltype, xlator_type)){
-                               ret = xlator_volopt_dynload (vme->voltype,
-                                                            &dl_handle,
-                                                            &vol_opt_handle);
-                                if (ret) {
-                                        dl_handle = NULL;
-                                        continue;
-                                }
+                        if (_get_xlator_opt_key_from_vme (vme, &key)) {
+                                gf_log ("glusterd", GF_LOG_DEBUG, "Failed to "
+                                        "get %s key from volume option entry",
+                                        vme->key);
+                                goto out; /*Some error while geting key*/
                         }
+
+                        ret = xlator_volopt_dynload (vme->voltype,
+                                                     &dl_handle,
+                                                     &vol_opt_handle);
+
+                        if (ret) {
+                                gf_log ("glusterd", GF_LOG_DEBUG,
+                                        "xlator_volopt_dynload error(%d)", ret);
+                                ret = 0;
+                                goto cont;
+                        }
+
                         ret = xlator_option_info_list (&vol_opt_handle, key,
                                                        &def_val, &descr);
-                        if (ret) /*Swallow Error i.e if option not found*/
-                                continue;
+                        if (ret) { /*Swallow Error i.e if option not found*/
+                                gf_log ("glusterd", GF_LOG_DEBUG,
+                                        "Failed to get option for %s key", key);
+                                ret = 0;
+                                goto cont;
+                        }
                 }
 
                 if (xml_out) {
 #if (HAVE_LIB_XML)
                         if (xml_add_volset_element (writer,vme->key,
-                                                    def_val, descr))
-                                goto out;
+                                                    def_val, descr)) {
+                                ret = -1;
+                                goto cont;
+                        }
 #else
                         gf_log ("glusterd", GF_LOG_ERROR, "Libxml not present");
 #endif
@@ -1962,11 +2016,18 @@ glusterd_get_volopt_content (dict_t * ctx, gf_boolean_t xml_out)
                                         vme->key, def_val, descr);
                         strcat (output_string, tmp_str);
                 }
-
-                if (!strcmp (key, AUTH_ALLOW_OPT_KEY) ||
-                    !strcmp (key, AUTH_REJECT_OPT_KEY) ||
-                    !strcmp (key, NFS_DISABLE_OPT_KEY))
-                        GF_FREE (key);
+cont:
+                if (dl_handle) {
+                        dlclose (dl_handle);
+                        dl_handle = NULL;
+                        vol_opt_handle.given_opt = NULL;
+                }
+                if (key) {
+                        _free_xlator_opt_key (key);
+                        key = NULL;
+                }
+                if (ret)
+                        goto out;
         }
 
 #if (HAVE_LIB_XML)
@@ -1993,7 +2054,7 @@ glusterd_get_volopt_content (dict_t * ctx, gf_boolean_t xml_out)
         }
 
         ret = dict_set_dynstr (ctx, "help-str", output);
- out:
+out:
         gf_log ("glusterd", GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 
@@ -2255,22 +2316,33 @@ volgen_graph_build_dht_cluster (volgen_graph_t *graph,
         int                     ret                      = -1;
         char                    *decommissioned_children = NULL;
         xlator_t                *dht                     = NULL;
-        char                    *optstr                  = NULL;
-        gf_boolean_t             use_nufa                = _gf_false;
+        char                    *voltype                 = "cluster/distribute";
 
-        if (dict_get_str(volinfo->dict,"cluster.nufa",&optstr) == 0) {
-                /* Keep static analyzers quiet by "using" the value. */
-                ret = gf_string2boolean(optstr,&use_nufa);
+        /* NUFA and Switch section */
+        if (dict_get_str_boolean (volinfo->dict, "cluster.nufa", 0) &&
+            dict_get_str_boolean (volinfo->dict, "cluster.switch", 0)) {
+                gf_log (THIS->name, GF_LOG_ERROR,
+                        "nufa and switch cannot be set together");
+                ret = -1;
+                goto out;
         }
 
+        /* Check for NUFA volume option, and change the voltype */
+        if (dict_get_str_boolean (volinfo->dict, "cluster.nufa", 0))
+                voltype = "cluster/nufa";
+
+        /* Check for switch volume option, and change the voltype */
+        if (dict_get_str_boolean (volinfo->dict, "cluster.switch", 0))
+                voltype = "cluster/switch";
+
         clusters = volgen_graph_build_clusters (graph,  volinfo,
-                                                use_nufa
-                                                        ? "cluster/nufa"
-                                                        : "cluster/distribute",
+                                                voltype,
                                                 "%s-dht",
-                                                child_count, child_count);
+                                                child_count,
+                                                child_count);
         if (clusters < 0)
                 goto out;
+
         dht = first_of (graph);
         ret = _graph_get_decommissioned_children (dht, volinfo,
                                                   &decommissioned_children);
@@ -2364,7 +2436,7 @@ build_distribute:
 
         ret = volgen_graph_build_dht_cluster (graph, volinfo,
                                               dist_count);
-        if (ret)
+        if (ret == -1)
                 goto out;
 
         ret = 0;
@@ -2387,7 +2459,7 @@ client_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
                 goto out;
 
         ret = volume_volgen_graph_build_clusters (graph, volinfo);
-        if (ret)
+        if (ret == -1)
                 goto out;
 
         ret = glusterd_volinfo_get_boolean (volinfo, VKEY_FEATURES_QUOTA);
@@ -2402,11 +2474,24 @@ client_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
                 }
         }
 
+
+        ret = glusterd_volinfo_get_boolean (volinfo, "features.file-snapshot");
+        if (ret == -1)
+                goto out;
+        if (ret) {
+                xl = volgen_graph_add (graph, "features/qemu-block", volname);
+
+                if (!xl) {
+                        ret = -1;
+                        goto out;
+                }
+        }
+
         /* Logic to make sure NFS doesn't have performance translators by
            default for a volume */
         tmp_data = dict_get (set_dict, "nfs-volume-file");
         if (!tmp_data)
-                ret = volgen_graph_set_options_generic (graph, set_dict, volname,
+                ret = volgen_graph_set_options_generic (graph, set_dict, volinfo,
                                                         &perfxl_option_handler);
         else
                 ret = volgen_graph_set_options_generic (graph, set_dict, volname,
@@ -2809,6 +2894,8 @@ build_nfs_graph (volgen_graph_t *graph, dict_t *mod_dict)
         char               *skey          = NULL;
         int                 ret           = 0;
         char               nfs_xprt[16]   = {0,};
+        char               *volname       = NULL;
+        data_t             *data          = NULL;
 
         this = THIS;
         GF_ASSERT (this);
@@ -2831,6 +2918,10 @@ build_nfs_graph (volgen_graph_t *graph, dict_t *mod_dict)
                 goto out;
 
         ret = xlator_set_option (nfsxl, "nfs.nlm", "on");
+        if (ret)
+                goto out;
+
+        ret = xlator_set_option (nfsxl, "nfs.drc", "on");
         if (ret)
                 goto out;
 
@@ -2893,6 +2984,12 @@ build_nfs_graph (volgen_graph_t *graph, dict_t *mod_dict)
                 ret = dict_set_str (set_dict, "nfs-volume-file", "yes");
                 if (ret)
                         goto out;
+
+                if (mod_dict && (data = dict_get (mod_dict, "volume-name"))) {
+                        volname = data->data;
+                        if (strcmp (volname, voliter->volname) == 0)
+                                dict_copy (mod_dict, set_dict);
+                }
 
                 ret = build_client_graph (&cgraph, voliter, set_dict);
                 if (ret)
@@ -3131,7 +3228,7 @@ enumerate_transport_reqs (gf_transport_type type, char **types)
         }
 }
 
-static int
+int
 generate_client_volfiles (glusterd_volinfo_t *volinfo,
                           glusterd_client_type_t client_type)
 {
@@ -3405,6 +3502,9 @@ validate_nfsopts (glusterd_volinfo_t *volinfo,
         char    transport_type[16] = {0,};
         char    *tt                = NULL;
         char    err_str[4096]      = {0,};
+        xlator_t *this             = THIS;
+
+        GF_ASSERT (this);
 
         graph.errstr = op_errstr;
 
@@ -3415,7 +3515,7 @@ validate_nfsopts (glusterd_volinfo_t *volinfo,
                         snprintf (err_str, sizeof (err_str), "Changing nfs "
                                   "transport type is allowed only for volumes "
                                   "of transport type tcp,rdma");
-                        gf_log ("", GF_LOG_ERROR, "%s", err_str);
+                        gf_log (this->name, GF_LOG_ERROR, "%s", err_str);
                         *op_errstr = gf_strdup (err_str);
                         ret = -1;
                         goto out;
@@ -3429,6 +3529,12 @@ validate_nfsopts (glusterd_volinfo_t *volinfo,
                 }
         }
 
+        ret = dict_set_str (val_dict, "volume-name", volinfo->volname);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to set volume name");
+                goto out;
+        }
+
         ret = build_nfs_graph (&graph, val_dict);
         if (!ret)
                 ret = graph_reconf_validateopt (&graph.graph, op_errstr);
@@ -3436,60 +3542,12 @@ validate_nfsopts (glusterd_volinfo_t *volinfo,
         volgen_graph_free (&graph);
 
 out:
-        gf_log ("glusterd", GF_LOG_DEBUG, "Returning %d", ret);
+        if (dict_get (val_dict, "volume-name"))
+                dict_del (val_dict, "volume-name");
+        gf_log (this->name, GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
 
-int
-validate_wb_eagerlock (glusterd_volinfo_t *volinfo, dict_t *val_dict,
-                       char **op_errstr)
-{
-        int          ret = -1;
-        gf_boolean_t wb_val = _gf_false;
-        gf_boolean_t el_val = _gf_false;
-        char         msg[2048] = {0};
-        char         *wb_key = NULL;
-        char         *el_key = NULL;
-
-        wb_key = "performance.write-behind";
-        el_key = "cluster.eager-lock";
-        ret = dict_get_str_boolean (val_dict, wb_key, -1);
-        if (ret < 0)
-                goto check_eager_lock;
-        wb_val = ret;
-        ret = glusterd_volinfo_get_boolean (volinfo, el_key);
-        if (ret < 0)
-                goto out;
-        el_val = ret;
-        goto done;
-
-check_eager_lock:
-        ret = dict_get_str_boolean (val_dict, el_key, -1);
-        if (ret < 0) {
-                ret = 0; //Keys of intereset to this fn are not present.
-                goto out;
-        }
-        el_val = ret;
-        ret = glusterd_volinfo_get_boolean (volinfo, wb_key);
-        if (ret < 0)
-                goto out;
-        wb_val = ret;
-        goto done;
-
-done:
-        ret = 0;
-        if (!wb_val && el_val) {
-                ret = -1;
-                snprintf (msg, sizeof (msg), "%s off and %s on is not "
-                          "valid configuration", wb_key, el_key);
-                gf_log ("glusterd", GF_LOG_ERROR, "%s", msg);
-                if (op_errstr)
-                        *op_errstr = gf_strdup (msg);
-                goto out;
-        }
-out:
-        return ret;
-}
 
 int
 validate_clientopts (glusterd_volinfo_t *volinfo,
@@ -3650,10 +3708,6 @@ glusterd_validate_reconfopts (glusterd_volinfo_t *volinfo, dict_t *val_dict,
                 goto out;
         }
 
-        ret = validate_wb_eagerlock (volinfo, val_dict, op_errstr);
-        if (ret)
-                goto out;
-
         ret = validate_clientopts (volinfo, val_dict, op_errstr);
         if (ret) {
                 gf_log ("", GF_LOG_DEBUG,
@@ -3680,19 +3734,111 @@ out:
         return ret;
 }
 
+static struct volopt_map_entry *
+_gd_get_vmep (char *key) {
+        char *completion = NULL;
+        struct volopt_map_entry *vmep = NULL;
+        int ret = 0;
+
+        COMPLETE_OPTION ((char *)key, completion, ret);
+        for (vmep = glusterd_volopt_map; vmep->key; vmep++) {
+                if (strcmp (vmep->key, key) == 0)
+                        return vmep;
+        }
+
+        return NULL;
+}
+
 uint32_t
 glusterd_get_op_version_for_key (char *key)
 {
-        char *completion = NULL;
         struct volopt_map_entry *vmep = NULL;
-        int   ret = 0;
 
-        COMPLETE_OPTION(key, completion, ret);
-        for (vmep = glusterd_volopt_map; vmep->key; vmep++) {
-                if (strcmp (vmep->key, key) == 0) {
-                        return vmep->op_version;
-                }
-        }
+        GF_ASSERT (key);
+
+        vmep = _gd_get_vmep (key);
+        if (vmep)
+                return vmep->op_version;
 
         return 0;
+}
+
+gf_boolean_t
+gd_is_client_option (char *key)
+{
+        struct volopt_map_entry *vmep = NULL;
+
+        GF_ASSERT (key);
+
+        vmep = _gd_get_vmep (key);
+        if (vmep && (vmep->flags & OPT_FLAG_CLIENT_OPT))
+                return _gf_true;
+
+        return _gf_false;
+}
+
+gf_boolean_t
+gd_is_xlator_option (char *key)
+{
+        struct volopt_map_entry *vmep = NULL;
+
+        GF_ASSERT (key);
+
+        vmep = _gd_get_vmep (key);
+        if (vmep && (vmep->flags & OPT_FLAG_XLATOR_OPT))
+                return _gf_true;
+
+        return _gf_false;
+}
+
+volume_option_type_t
+_gd_get_option_type (char *key)
+{
+        struct volopt_map_entry *vmep = NULL;
+        void                    *dl_handle = NULL;
+        volume_opt_list_t       vol_opt_list = {{0},};
+        int                     ret = -1;
+        volume_option_t         *opt = NULL;
+        char                    *xlopt_key = NULL;
+        volume_option_type_t    opt_type = GF_OPTION_TYPE_MAX;
+
+        GF_ASSERT (key);
+
+        vmep = _gd_get_vmep (key);
+
+        if (vmep) {
+                INIT_LIST_HEAD (&vol_opt_list.list);
+                ret = xlator_volopt_dynload (vmep->voltype, &dl_handle,
+                                             &vol_opt_list);
+                if (ret)
+                        goto out;
+
+                if (_get_xlator_opt_key_from_vme (vmep, &xlopt_key))
+                        goto out;
+
+                opt = xlator_volume_option_get_list (&vol_opt_list, xlopt_key);
+                _free_xlator_opt_key (xlopt_key);
+
+                if (opt)
+                        opt_type = opt->type;
+        }
+
+out:
+        if (dl_handle) {
+                dlclose (dl_handle);
+                dl_handle = NULL;
+        }
+
+        return opt_type;
+}
+
+gf_boolean_t
+gd_is_boolean_option (char *key)
+{
+        GF_ASSERT (key);
+
+        if (GF_OPTION_TYPE_BOOL == _gd_get_option_type (key))
+                return _gf_true;
+
+        return _gf_false;
 }

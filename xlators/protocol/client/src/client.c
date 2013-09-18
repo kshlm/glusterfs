@@ -1961,6 +1961,74 @@ out:
 	return 0;
 }
 
+int32_t
+client_fallocate(call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t mode,
+		 off_t offset, size_t len, dict_t *xdata)
+{
+        int          ret  = -1;
+        clnt_conf_t *conf = NULL;
+        rpc_clnt_procedure_t *proc = NULL;
+        clnt_args_t  args = {0,};
+
+        conf = this->private;
+        if (!conf || !conf->fops)
+                goto out;
+
+        args.fd = fd;
+	args.flags = mode;
+	args.offset = offset;
+	args.size = len;
+        args.xdata = xdata;
+
+        proc = &conf->fops->proctable[GF_FOP_FALLOCATE];
+        if (!proc) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "rpc procedure not found for %s",
+                        gf_fop_list[GF_FOP_FALLOCATE]);
+                goto out;
+        }
+        if (proc->fn)
+                ret = proc->fn (frame, this, &args);
+out:
+        if (ret)
+                STACK_UNWIND_STRICT (fallocate, frame, -1, ENOTCONN, NULL, NULL, NULL);
+
+	return 0;
+}
+
+int32_t
+client_discard(call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
+	       size_t len, dict_t *xdata)
+{
+        int          ret  = -1;
+        clnt_conf_t *conf = NULL;
+        rpc_clnt_procedure_t *proc = NULL;
+        clnt_args_t  args = {0,};
+
+        conf = this->private;
+        if (!conf || !conf->fops)
+                goto out;
+
+        args.fd = fd;
+	args.offset = offset;
+	args.size = len;
+        args.xdata = xdata;
+
+        proc = &conf->fops->proctable[GF_FOP_DISCARD];
+        if (!proc) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "rpc procedure not found for %s",
+                        gf_fop_list[GF_FOP_DISCARD]);
+                goto out;
+        }
+        if (proc->fn)
+                ret = proc->fn (frame, this, &args);
+out:
+        if (ret)
+                STACK_UNWIND_STRICT(discard, frame, -1, ENOTCONN, NULL, NULL, NULL);
+
+	return 0;
+}
 
 int32_t
 client_getspec (call_frame_t *frame, xlator_t *this, const char *key,
@@ -2050,7 +2118,7 @@ client_rpc_notify (struct rpc_clnt *rpc, void *mydata, rpc_clnt_event_t event,
                 gf_log (this->name, GF_LOG_DEBUG, "got RPC_CLNT_CONNECT");
 
                 if ((ret < 0) || (strcasecmp (handshake, "on"))) {
-                        ret = client_handshake (this, conf->rpc);
+                        ret = client_handshake (this, rpc);
                         if (ret)
                                 gf_log (this->name, GF_LOG_WARNING,
                                         "handshake msg returned %d", ret);
@@ -2092,9 +2160,19 @@ client_rpc_notify (struct rpc_clnt *rpc, void *mydata, rpc_clnt_event_t event,
                         client_register_grace_timer (this, conf);
 
                 if (!conf->skip_notify) {
-                        if (conf->connected)
-                                gf_log (this->name, GF_LOG_INFO,
-                                        "disconnected");
+                        if (conf->connected) {
+                               gf_log (this->name,
+                                        ((!conf->disconnect_err_logged)
+                                        ? GF_LOG_INFO : GF_LOG_DEBUG),
+                                        "disconnected from %s. Client process "
+                                        "will keep trying to connect to "
+                                        "glusterd until brick's port is "
+                                        "available",
+                                  conf->rpc->conn.trans->peerinfo.identifier);
+
+                                if (conf->portmap_err_logged)
+                                        conf->disconnect_err_logged = 1;
+                        }
 
                         /* If the CHILD_DOWN event goes to parent xlator
                            multiple times, the logic of parent xlator notify
@@ -2118,10 +2196,14 @@ client_rpc_notify (struct rpc_clnt *rpc, void *mydata, rpc_clnt_event_t event,
                 conf->connected = 0;
                 conf->skip_notify = 0;
 
-		if (conf->quick_reconnect) {
-			conf->quick_reconnect = 0;
-			rpc_clnt_start (conf->rpc);
-		}
+                if (conf->quick_reconnect) {
+                        conf->quick_reconnect = 0;
+                        rpc_clnt_start (rpc);
+
+                } else {
+                        rpc->conn.config.remote_port = 0;
+
+                }
 
                 break;
 
@@ -2665,6 +2747,8 @@ struct xlator_fops fops = {
         .fxattrop    = client_fxattrop,
         .setattr     = client_setattr,
         .fsetattr    = client_fsetattr,
+	.fallocate   = client_fallocate,
+	.discard     = client_discard,
         .getspec     = client_getspec,
 };
 

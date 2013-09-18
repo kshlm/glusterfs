@@ -400,7 +400,8 @@ glusterd_ac_send_friend_remove_req (glusterd_friend_sm_event_t *event,
                 if (ctx)
                         ret = glusterd_xfer_cli_deprobe_resp (ctx->req, ret, 0,
                                                               NULL,
-                                                              ctx->hostname);
+                                                              ctx->hostname,
+                                                              ctx->dict);
                 glusterd_friend_sm ();
                 glusterd_op_sm ();
 
@@ -650,7 +651,8 @@ glusterd_ac_handle_friend_add_req (glusterd_friend_sm_event_t *event, void *ctx)
         uuid_copy (peerinfo->uuid, ev_ctx->uuid);
 
         //Build comparison logic here.
-        ret = glusterd_compare_friend_data (ev_ctx->vols, &status);
+        ret = glusterd_compare_friend_data (ev_ctx->vols, &status,
+                                            peerinfo->hostname);
         if (ret)
                 goto out;
 
@@ -687,7 +689,8 @@ glusterd_ac_handle_friend_add_req (glusterd_friend_sm_event_t *event, void *ctx)
         glusterd_friend_sm_inject_event (new_event);
 
         ret = glusterd_xfer_friend_add_resp (ev_ctx->req, ev_ctx->hostname,
-                                             ev_ctx->port, op_ret, op_errno);
+                                             peerinfo->hostname, ev_ctx->port,
+                                             op_ret, op_errno);
 
 out:
         gf_log ("", GF_LOG_DEBUG, "Returning with %d", ret);
@@ -1075,8 +1078,25 @@ glusterd_friend_sm ()
 
         ret = 0;
 out:
-        if (quorum_action)
+        if (quorum_action) {
+            /* When glusterd is restarted, it needs to wait until the 'friends' view
+             * of the volumes settle, before it starts any of the internal daemons.
+             *
+             * Every friend that was part of the cluster, would send its
+             * cluster-view, 'our' way. For every friend, who belongs to
+             * a partition which has a different cluster-view from our
+             * partition, we may update our cluster-view. For subsequent
+             * friends from that partition would agree with us, if the first
+             * friend wasn't rejected. For every first friend, whom we agreed with,
+             * we would need to start internal daemons/bricks belonging to the
+             * new volumes.
+             * glusterd_spawn_daemons calls functions that are idempotent. ie,
+             * the functions spawn process(es) only if they are not started yet.
+             *
+             * */
+                glusterd_spawn_daemons (NULL);
                 glusterd_do_quorum_action ();
+        }
         return ret;
 }
 

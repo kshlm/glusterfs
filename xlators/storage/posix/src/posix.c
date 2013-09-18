@@ -23,6 +23,7 @@
 #include <pthread.h>
 #include <ftw.h>
 #include <sys/stat.h>
+#include <signal.h>
 
 #ifndef GF_BSD_HOST_OS
 #include <alloca.h>
@@ -128,7 +129,7 @@ posix_lookup (call_frame_t *frame, xlator_t *this,
                 MAKE_ENTRY_HANDLE (real_path, par_path, this, loc, &buf);
 
                 if (uuid_is_null (loc->inode->gfid)) {
-                        posix_gfid_set (this, real_path, loc, xdata);
+                        posix_gfid_heal (this, real_path, loc, xdata);
                         MAKE_ENTRY_HANDLE (real_path, par_path, this,
                                            loc, &buf);
                 }
@@ -559,6 +560,107 @@ out:
                              &statpre, &statpost, NULL);
 
         return 0;
+}
+
+static int32_t
+posix_do_fallocate(call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t flags,
+		   off_t offset, size_t len, struct iatt *statpre,
+		   struct iatt *statpost)
+{
+        struct posix_fd *pfd = NULL;
+        int32_t          ret = -1;
+
+        DECLARE_OLD_FS_ID_VAR;
+
+        SET_FS_ID (frame->root->uid, frame->root->gid);
+
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (fd, out);
+
+        ret = posix_fd_ctx_get (fd, this, &pfd);
+        if (ret < 0) {
+                gf_log (this->name, GF_LOG_DEBUG,
+                        "pfd is NULL from fd=%p", fd);
+                goto out;
+        }
+
+        ret = posix_fdstat (this, pfd->fd, statpre);
+        if (ret == -1) {
+                ret = -errno;
+                gf_log (this->name, GF_LOG_ERROR,
+                        "fallocate (fstat) failed on fd=%p: %s", fd,
+                        strerror (errno));
+                goto out;
+        }
+
+	ret = sys_fallocate(pfd->fd, flags, offset, len);
+	if (ret == -1) {
+		ret = -errno;
+		goto out;
+	}
+
+        ret = posix_fdstat (this, pfd->fd, statpost);
+        if (ret == -1) {
+                ret = -errno;
+                gf_log (this->name, GF_LOG_ERROR,
+                        "fallocate (fstat) failed on fd=%p: %s", fd,
+                        strerror (errno));
+                goto out;
+        }
+
+out:
+        SET_TO_OLD_FS_ID ();
+
+        return ret;
+}
+
+static int32_t
+_posix_fallocate(call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t keep_size,
+		off_t offset, size_t len, dict_t *xdata)
+{
+	int32_t ret;
+	int32_t flags = 0;
+        struct iatt statpre = {0,};
+        struct iatt statpost = {0,};
+
+	if (keep_size)
+		flags = FALLOC_FL_KEEP_SIZE;
+
+	ret = posix_do_fallocate(frame, this, fd, flags, offset, len,
+				 &statpre, &statpost);
+	if (ret < 0)
+		goto err;
+
+	STACK_UNWIND_STRICT(fallocate, frame, 0, 0, &statpre, &statpost, NULL);
+	return 0;
+
+err:
+	STACK_UNWIND_STRICT(fallocate, frame, -1, -ret, NULL, NULL, NULL);
+	return 0;
+}
+
+static int32_t
+posix_discard(call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
+	      size_t len, dict_t *xdata)
+{
+	int32_t ret;
+	int32_t flags = FALLOC_FL_KEEP_SIZE|FALLOC_FL_PUNCH_HOLE;
+        struct iatt statpre = {0,};
+        struct iatt statpost = {0,};
+
+	ret = posix_do_fallocate(frame, this, fd, flags, offset, len,
+				 &statpre, &statpost);
+	if (ret < 0)
+		goto err;
+
+	STACK_UNWIND_STRICT(discard, frame, 0, 0, &statpre, &statpost, NULL);
+	return 0;
+
+err:
+	STACK_UNWIND_STRICT(discard, frame, -1, -ret, NULL, NULL, NULL);
+	return 0;
+
 }
 
 int32_t
@@ -2082,6 +2184,48 @@ err:
         return op_ret;
 }
 
+dict_t*
+_fill_writev_xdata (fd_t *fd, dict_t *xdata, xlator_t *this, int is_append)
+{
+        dict_t  *rsp_xdata = NULL;
+        int32_t ret = 0;
+        inode_t *inode = NULL;
+
+        if (fd)
+                inode = fd->inode;
+
+        if (!fd || !fd->inode || uuid_is_null (fd->inode->gfid)) {
+                gf_log_callingfn (this->name, GF_LOG_ERROR, "Invalid Args: "
+                                  "fd: %p inode: %p gfid:%s", fd, inode?inode:0,
+                                  inode?uuid_utoa(inode->gfid):"N/A");
+                goto out;
+        }
+
+        if (!xdata || !dict_get (xdata, GLUSTERFS_OPEN_FD_COUNT))
+                goto out;
+
+        rsp_xdata = dict_new();
+        if (!rsp_xdata)
+                goto out;
+
+        ret = dict_set_uint32 (rsp_xdata, GLUSTERFS_OPEN_FD_COUNT,
+                               fd->inode->fd_count);
+        if (ret < 0) {
+                gf_log (this->name, GF_LOG_WARNING, "%s: Failed to set "
+                        "dictionary value for %s", uuid_utoa (fd->inode->gfid),
+                        GLUSTERFS_OPEN_FD_COUNT);
+        }
+
+        ret = dict_set_uint32 (rsp_xdata, GLUSTERFS_WRITE_IS_APPEND,
+                               is_append);
+        if (ret < 0) {
+                gf_log (this->name, GF_LOG_WARNING, "%s: Failed to set "
+                        "dictionary value for %s", uuid_utoa (fd->inode->gfid),
+                        GLUSTERFS_WRITE_IS_APPEND);
+        }
+out:
+        return rsp_xdata;
+}
 
 int32_t
 posix_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
@@ -2096,6 +2240,9 @@ posix_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
         struct iatt            preop    = {0,};
         struct iatt            postop    = {0,};
         int                      ret      = -1;
+        dict_t                *rsp_xdata = NULL;
+	int                    is_append = 0;
+	gf_boolean_t           locked = _gf_false;
 
         VALIDATE_OR_GOTO (frame, out);
         VALIDATE_OR_GOTO (this, out);
@@ -2117,6 +2264,17 @@ posix_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
         _fd = pfd->fd;
 
+	if (xdata && dict_get (xdata, GLUSTERFS_WRITE_IS_APPEND)) {
+		/* The write_is_append check and write must happen
+		   atomically. Else another write can overtake this
+		   write after the check and get written earlier.
+
+		   So lock before preop-stat and unlock after write.
+		*/
+		locked = _gf_true;
+		LOCK(&fd->inode->lock);
+	}
+
         op_ret = posix_fdstat (this, _fd, &preop);
         if (op_ret == -1) {
                 op_errno = errno;
@@ -2126,8 +2284,19 @@ posix_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
                 goto out;
         }
 
+	if (locked) {
+		if (preop.ia_size == offset || (fd->flags & O_APPEND))
+			is_append = 1;
+	}
+
         op_ret = __posix_writev (_fd, vector, count, offset,
                                  (pfd->flags & O_DIRECT));
+
+	if (locked) {
+		UNLOCK (&fd->inode->lock);
+		locked = _gf_false;
+	}
+
         if (op_ret < 0) {
                 op_errno = -op_ret;
                 op_ret = -1;
@@ -2143,6 +2312,7 @@ posix_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
         UNLOCK (&priv->lock);
 
         if (op_ret >= 0) {
+                rsp_xdata = _fill_writev_xdata (fd, xdata, this, is_append);
                 /* wiretv successful, we also need to get the stat of
                  * the file we wrote to
                  */
@@ -2172,9 +2342,16 @@ posix_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
 out:
 
-        STACK_UNWIND_STRICT (writev, frame, op_ret, op_errno, &preop, &postop,
-                             NULL);
+	if (locked) {
+		UNLOCK (&fd->inode->lock);
+		locked = _gf_false;
+	}
 
+        STACK_UNWIND_STRICT (writev, frame, op_ret, op_errno, &preop, &postop,
+                             rsp_xdata);
+
+        if (rsp_xdata)
+                dict_unref (rsp_xdata);
         return 0;
 }
 
@@ -2301,6 +2478,33 @@ out:
 }
 
 
+int
+posix_batch_fsync (call_frame_t *frame, xlator_t *this,
+		     fd_t *fd, int datasync, dict_t *xdata)
+{
+	call_stub_t *stub = NULL;
+	struct posix_private *priv = NULL;
+
+	priv = this->private;
+
+	stub = fop_fsync_stub (frame, default_fsync, fd, datasync, xdata);
+	if (!stub) {
+		STACK_UNWIND_STRICT (fsync, frame, -1, ENOMEM, 0, 0, 0);
+		return 0;
+	}
+
+	pthread_mutex_lock (&priv->fsync_mutex);
+	{
+		list_add_tail (&stub->list, &priv->fsyncs);
+		priv->fsync_queue_count++;
+		pthread_cond_signal (&priv->fsync_cond);
+	}
+	pthread_mutex_unlock (&priv->fsync_mutex);
+
+	return 0;
+}
+
+
 int32_t
 posix_fsync (call_frame_t *frame, xlator_t *this,
              fd_t *fd, int32_t datasync, dict_t *xdata)
@@ -2312,6 +2516,7 @@ posix_fsync (call_frame_t *frame, xlator_t *this,
         int               ret      = -1;
         struct iatt       preop = {0,};
         struct iatt       postop = {0,};
+        struct posix_private *priv = NULL;
 
         DECLARE_OLD_FS_ID_VAR;
 
@@ -2326,6 +2531,12 @@ posix_fsync (call_frame_t *frame, xlator_t *this,
         op_ret = 0;
         goto out;
 #endif
+
+	priv = this->private;
+	if (priv->batch_fsync_mode && xdata && dict_get (xdata, "batch-fsync")) {
+		posix_batch_fsync (frame, this, fd, datasync, xdata);
+		return 0;
+	}
 
         ret = posix_fd_ctx_get (fd, this, &pfd);
         if (ret < 0) {
@@ -2439,6 +2650,53 @@ out:
         return 0;
 }
 
+
+int
+posix_xattr_get_real_filename (call_frame_t *frame, xlator_t *this, loc_t *loc,
+			       const char *key, dict_t *dict, dict_t *xdata)
+{
+	char *real_path = NULL;
+	struct dirent *dirent = NULL;
+	DIR *fd = NULL;
+	const char *fname = NULL;
+	char *found = NULL;
+	int ret = -1;
+	int op_ret = -1;
+
+        MAKE_INODE_HANDLE (real_path, this, loc, NULL);
+
+	fd = opendir (real_path);
+	if (!fd)
+		return -errno;
+
+	fname = key + strlen (GF_XATTR_GET_REAL_FILENAME_KEY);
+
+	while ((dirent = readdir (fd))) {
+		if (strcasecmp (dirent->d_name, fname) == 0) {
+			found = gf_strdup (dirent->d_name);
+			if (!found) {
+				closedir (fd);
+				return -ENOMEM;
+			}
+			break;
+		}
+	}
+
+	closedir (fd);
+
+	if (!found)
+		return -ENOENT;
+
+	ret = dict_set_dynstr (dict, (char *)key, found);
+	if (ret) {
+		GF_FREE (found);
+		return -ENOMEM;
+	}
+	ret = strlen (found) + 1;
+
+	return ret;
+}
+
 /**
  * posix_getxattr - this function returns a dictionary with all the
  *                  key:value pair present as xattr. used for
@@ -2493,8 +2751,27 @@ posix_getxattr (call_frame_t *frame, xlator_t *this,
 
         dict = dict_new ();
         if (!dict) {
+		op_errno = ENOMEM;
                 goto out;
         }
+
+	if (loc->inode && name &&
+	    (strncmp (name, GF_XATTR_GET_REAL_FILENAME_KEY,
+		      strlen (GF_XATTR_GET_REAL_FILENAME_KEY)) == 0)) {
+		ret = posix_xattr_get_real_filename (frame, this, loc,
+						     name, dict, xdata);
+		if (ret < 0) {
+			op_ret = -1;
+			op_errno = -ret;
+			gf_log (this->name, GF_LOG_WARNING,
+				"Failed to get rea filename (%s, %s): %s",
+				loc->path, name, strerror (op_errno));
+			goto out;
+		}
+
+		size = ret;
+		goto done;
+	}
 
         if (loc->inode && name && !strcmp (name, GLUSTERFS_OPEN_FD_COUNT)) {
                 if (!list_empty (&loc->inode->fd_list)) {
@@ -2519,8 +2796,13 @@ posix_getxattr (call_frame_t *frame, xlator_t *this,
                 else
                         rpath = real_path;
 
-                (void) snprintf (host_buf, 1024, "<POSIX(%s):%s:%s>",
-                                 priv->base_path, priv->hostname, rpath);
+                (void) snprintf (host_buf, 1024,
+                                 "<POSIX(%s):%s:%s>", priv->base_path,
+                                 ((priv->node_uuid_pathinfo
+                                   && !uuid_is_null(priv->glusterd_uuid))
+                                      ? uuid_utoa (priv->glusterd_uuid)
+                                      : priv->hostname),
+                                 rpath);
 
                 dyn_rpath = gf_strdup (host_buf);
                 if (!dyn_rpath) {
@@ -3897,8 +4179,23 @@ posix_do_readdir (call_frame_t *frame, xlator_t *this,
          */
         ret = dict_get_int32 (dict, GF_READDIR_SKIP_DIRS, &skip_dirs);
 
-        count = posix_fill_readdir (fd, dir, off, size, &entries, this,
-                                    skip_dirs);
+	LOCK (&fd->lock);
+	{
+		/* posix_fill_readdir performs multiple separate individual
+		   readdir() calls to fill up the buffer.
+
+		   In case of NFS where the same anonymous FD is shared between
+		   different applications, reading a common directory can
+		   result in the anonymous fd getting re-used unsafely between
+		   the two readdir requests (in two different io-threads).
+
+		   It would also help, in the future, to replace the loop
+		   around readdir() with a single large getdents() call.
+		*/
+		count = posix_fill_readdir (fd, dir, off, size, &entries, this,
+					    skip_dirs);
+	}
+	UNLOCK (&fd->lock);
 
         /* pick ENOENT to indicate EOF */
         op_errno = errno;
@@ -4101,6 +4398,27 @@ posix_set_owner (xlator_t *this, uid_t uid, gid_t gid)
         return ret;
 }
 
+
+static int
+set_batch_fsync_mode (struct posix_private *priv, const char *str)
+{
+	if (strcmp (str, "none") == 0)
+		priv->batch_fsync_mode = BATCH_NONE;
+	else if (strcmp (str, "syncfs") == 0)
+		priv->batch_fsync_mode = BATCH_SYNCFS;
+	else if (strcmp (str, "syncfs-single-fsync") == 0)
+		priv->batch_fsync_mode = BATCH_SYNCFS_SINGLE_FSYNC;
+	else if (strcmp (str, "syncfs-reverse-fsync") == 0)
+		priv->batch_fsync_mode = BATCH_SYNCFS_REVERSE_FSYNC;
+	else if (strcmp (str, "reverse-fsync") == 0)
+		priv->batch_fsync_mode = BATCH_REVERSE_FSYNC;
+	else
+		return -1;
+
+	return 0;
+}
+
+
 int
 reconfigure (xlator_t *this, dict_t *options)
 {
@@ -4108,12 +4426,25 @@ reconfigure (xlator_t *this, dict_t *options)
 	struct posix_private *priv = NULL;
         uid_t                 uid = -1;
         gid_t                 gid = -1;
+	char                 *batch_fsync_mode_str = NULL;
 
 	priv = this->private;
 
         GF_OPTION_RECONF ("brick-uid", uid, options, uint32, out);
         GF_OPTION_RECONF ("brick-gid", gid, options, uint32, out);
         posix_set_owner (this, uid, gid);
+
+	GF_OPTION_RECONF ("batch-fsync-delay-usec", priv->batch_fsync_delay_usec,
+			  options, uint32, out);
+
+	GF_OPTION_RECONF ("batch-fsync-mode", batch_fsync_mode_str,
+			  options, str, out);
+
+	if (set_batch_fsync_mode (priv, batch_fsync_mode_str) != 0) {
+		gf_log (this->name, GF_LOG_ERROR, "Unknown mode string: %s",
+			batch_fsync_mode_str);
+		goto out;
+	}
 
 	GF_OPTION_RECONF ("linux-aio", priv->aio_configured,
 			  options, bool, out);
@@ -4122,6 +4453,20 @@ reconfigure (xlator_t *this, dict_t *options)
 		posix_aio_on (this);
 	else
 		posix_aio_off (this);
+
+        GF_OPTION_RECONF ("node-uuid-pathinfo", priv->node_uuid_pathinfo,
+                          options, bool, out);
+
+        if (priv->node_uuid_pathinfo &&
+            (uuid_is_null (priv->glusterd_uuid))) {
+                    gf_log (this->name, GF_LOG_INFO,
+                            "glusterd uuid is NULL, pathinfo xattr would"
+                            " fallback to <hostname>:<export>");
+        }
+
+        GF_OPTION_RECONF ("health-check-interval", priv->health_check_interval,
+                          options, uint32, out);
+        posix_spawn_health_check_thread (this);
 
 	ret = 0;
 out:
@@ -4152,6 +4497,7 @@ init (xlator_t *this)
         char                 *guuid         = NULL;
         uid_t                 uid           = -1;
         gid_t                 gid           = -1;
+	char                 *batch_fsync_mode_str;
 
         dir_data = dict_get (this->options, "directory");
 
@@ -4484,11 +4830,48 @@ init (xlator_t *this)
 		}
 	}
 
+        GF_OPTION_INIT ("node-uuid-pathinfo",
+                        _private->node_uuid_pathinfo, bool, out);
+        if (_private->node_uuid_pathinfo &&
+            (uuid_is_null (_private->glusterd_uuid))) {
+                        gf_log (this->name, GF_LOG_INFO,
+                                "glusterd uuid is NULL, pathinfo xattr would"
+                                " fallback to <hostname>:<export>");
+        }
+
+        _private->health_check_active = _gf_false;
+        GF_OPTION_INIT ("health-check-interval",
+                        _private->health_check_interval, uint32, out);
+        if (_private->health_check_interval)
+                posix_spawn_health_check_thread (this);
+
         pthread_mutex_init (&_private->janitor_lock, NULL);
         pthread_cond_init (&_private->janitor_cond, NULL);
         INIT_LIST_HEAD (&_private->janitor_fds);
 
         posix_spawn_janitor_thread (this);
+
+	pthread_mutex_init (&_private->fsync_mutex, NULL);
+	pthread_cond_init (&_private->fsync_cond, NULL);
+	INIT_LIST_HEAD (&_private->fsyncs);
+
+	ret = pthread_create (&_private->fsyncer, NULL, posix_fsyncer, this);
+	if (ret) {
+		gf_log (this->name, GF_LOG_ERROR, "fsyncer thread"
+			" creation failed (%s)", strerror (errno));
+		goto out;
+	}
+
+	GF_OPTION_INIT ("batch-fsync-mode", batch_fsync_mode_str, str, out);
+
+	if (set_batch_fsync_mode (_private, batch_fsync_mode_str) != 0) {
+		gf_log (this->name, GF_LOG_ERROR, "Unknown mode string: %s",
+			batch_fsync_mode_str);
+		goto out;
+	}
+
+	GF_OPTION_INIT ("batch-fsync-delay-usec", _private->batch_fsync_delay_usec,
+			uint32, out);
 out:
         return ret;
 }
@@ -4554,6 +4937,8 @@ struct xlator_fops fops = {
         .fxattrop    = posix_fxattrop,
         .setattr     = posix_setattr,
         .fsetattr    = posix_fsetattr,
+	.fallocate   = _posix_fallocate,
+	.discard     = posix_discard,
 };
 
 struct xlator_cbks cbks = {
@@ -4601,5 +4986,40 @@ struct volume_options options[] = {
           .validate = GF_OPT_VALIDATE_MIN,
           .description = "Support for setting gid of brick's owner"
         },
+        { .key = {"node-uuid-pathinfo"},
+          .type = GF_OPTION_TYPE_BOOL,
+          .default_value = "off",
+          .description = "return glusterd's node-uuid in pathinfo xattr"
+                         " string instead of hostname"
+        },
+        {
+          .key = {"health-check-interval"},
+          .type = GF_OPTION_TYPE_INT,
+          .min = 0,
+          .default_value = "30",
+          .validate = GF_OPT_VALIDATE_MIN,
+          .description = "Interval in seconds for a filesystem health check, "
+                         "set to 0 to disable"
+        },
+	{ .key = {"batch-fsync-mode"},
+	  .type = GF_OPTION_TYPE_STR,
+	  .default_value = "reverse-fsync",
+	  .description = "Possible values:\n"
+	  "\t- syncfs: Perform one syncfs() on behalf oa batch"
+	  "of fsyncs.\n"
+	  "\t- syncfs-single-fsync: Perform one syncfs() on behalf of a batch"
+	  " of fsyncs and one fsync() per batch.\n"
+	  "\t- syncfs-reverse-fsync: Preform one syncfs() on behalf of a batch"
+	  " of fsyncs and fsync() each file in the batch in reverse order.\n"
+	  " in reverse order.\n"
+	  "\t- reverse-fsync: Perform fsync() of each file in the batch in"
+	  " reverse order."
+	},
+	{ .key = {"batch-fsync-delay-usec"},
+	  .type = GF_OPTION_TYPE_INT,
+	  .default_value = "0",
+	  .description = "Num of usecs to wait for aggregating fsync"
+	  " requests",
+	},
         { .key  = {NULL} }
 };

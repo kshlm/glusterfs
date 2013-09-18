@@ -92,7 +92,8 @@ enum gf_quota_type {
 typedef enum gf_quota_type gf_quota_type;
 
 enum gf1_cli_friends_list {
-	GF_CLI_LIST_ALL = 1,
+	GF_CLI_LIST_PEERS = 1,
+	GF_CLI_LIST_POOL_NODES = 2,
 };
 typedef enum gf1_cli_friends_list gf1_cli_friends_list;
 
@@ -120,6 +121,8 @@ enum gf1_cli_gsync_set {
 	GF_GSYNC_OPTION_TYPE_CONFIG = 3,
 	GF_GSYNC_OPTION_TYPE_STATUS = 4,
 	GF_GSYNC_OPTION_TYPE_ROTATE = 5,
+	GF_GSYNC_OPTION_TYPE_CREATE = 6,
+	GF_GSYNC_OPTION_TYPE_DELETE = 7,
 };
 typedef enum gf1_cli_gsync_set gf1_cli_gsync_set;
 
@@ -179,36 +182,6 @@ struct gf_cli_rsp {
 	} dict;
 };
 typedef struct gf_cli_rsp gf_cli_rsp;
-
-struct gf1_cli_probe_req {
-	char *hostname;
-	int port;
-};
-typedef struct gf1_cli_probe_req gf1_cli_probe_req;
-
-struct gf1_cli_probe_rsp {
-	int op_ret;
-	int op_errno;
-	int port;
-	char *hostname;
-	char *op_errstr;
-};
-typedef struct gf1_cli_probe_rsp gf1_cli_probe_rsp;
-
-struct gf1_cli_deprobe_req {
-	char *hostname;
-	int port;
-	int flags;
-};
-typedef struct gf1_cli_deprobe_req gf1_cli_deprobe_req;
-
-struct gf1_cli_deprobe_rsp {
-	int op_ret;
-	int op_errno;
-	char *hostname;
-	char *op_errstr;
-};
-typedef struct gf1_cli_deprobe_rsp gf1_cli_deprobe_rsp;
 
 struct gf1_cli_peer_list_req {
 	int flags;
@@ -304,10 +277,6 @@ extern  bool_t xdr_gf1_cli_top_op (XDR *, gf1_cli_top_op*);
 extern  bool_t xdr_gf_cli_status_type (XDR *, gf_cli_status_type*);
 extern  bool_t xdr_gf_cli_req (XDR *, gf_cli_req*);
 extern  bool_t xdr_gf_cli_rsp (XDR *, gf_cli_rsp*);
-extern  bool_t xdr_gf1_cli_probe_req (XDR *, gf1_cli_probe_req*);
-extern  bool_t xdr_gf1_cli_probe_rsp (XDR *, gf1_cli_probe_rsp*);
-extern  bool_t xdr_gf1_cli_deprobe_req (XDR *, gf1_cli_deprobe_req*);
-extern  bool_t xdr_gf1_cli_deprobe_rsp (XDR *, gf1_cli_deprobe_rsp*);
 extern  bool_t xdr_gf1_cli_peer_list_req (XDR *, gf1_cli_peer_list_req*);
 extern  bool_t xdr_gf1_cli_peer_list_rsp (XDR *, gf1_cli_peer_list_rsp*);
 extern  bool_t xdr_gf1_cli_fsm_log_req (XDR *, gf1_cli_fsm_log_req*);
@@ -336,10 +305,6 @@ extern bool_t xdr_gf1_cli_top_op ();
 extern bool_t xdr_gf_cli_status_type ();
 extern bool_t xdr_gf_cli_req ();
 extern bool_t xdr_gf_cli_rsp ();
-extern bool_t xdr_gf1_cli_probe_req ();
-extern bool_t xdr_gf1_cli_probe_rsp ();
-extern bool_t xdr_gf1_cli_deprobe_req ();
-extern bool_t xdr_gf1_cli_deprobe_rsp ();
 extern bool_t xdr_gf1_cli_peer_list_req ();
 extern bool_t xdr_gf1_cli_peer_list_rsp ();
 extern bool_t xdr_gf1_cli_fsm_log_req ();

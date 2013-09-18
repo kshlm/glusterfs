@@ -84,6 +84,7 @@ glusterd_op_send_cli_response (glusterd_op_t op, int32_t op_ret,
                 }
                 break;
         }
+        case GD_OP_GSYNC_CREATE:
         case GD_OP_GSYNC_SET:
         {
                if (ctx) {
@@ -146,6 +147,21 @@ glusterd_op_send_cli_response (glusterd_op_t op, int32_t op_ret,
                 /*nothing specific to be done*/
                 break;
         }
+        case GD_OP_COPY_FILE:
+        {
+               if (ctx)
+                        ret = dict_get_str (ctx, "errstr", &errstr);
+               break;
+        }
+        case GD_OP_SYS_EXEC:
+        {
+               if (ctx) {
+                        ret = dict_get_str (ctx, "errstr", &errstr);
+                        ret = dict_set_str (ctx, "glusterd_workdir",
+                                            conf->workdir);
+               }
+               break;
+        }
         }
 
         rsp.op_ret = op_ret;
@@ -185,7 +201,21 @@ glusterd_op_send_cli_response (glusterd_op_t op, int32_t op_ret,
 }
 
 int
-glusterd_probe_cbk (struct rpc_req *req, struct iovec *iov,
+glusterd_big_locked_cbk (struct rpc_req *req, struct iovec *iov,
+                         int count, void *myframe, fop_cbk_fn_t fn)
+{
+        glusterd_conf_t *priv = THIS->private;
+        int             ret   = -1;
+
+        synclock_lock (&priv->big_lock);
+        ret = fn (req, iov, count, myframe);
+        synclock_unlock (&priv->big_lock);
+
+        return ret;
+}
+
+int
+__glusterd_probe_cbk (struct rpc_req *req, struct iovec *iov,
                         int count, void *myframe)
 {
         gd1_mgmt_probe_rsp    rsp   = {{0},};
@@ -219,7 +249,8 @@ glusterd_probe_cbk (struct rpc_req *req, struct iovec *iov,
                         glusterd_xfer_cli_probe_resp (ctx->req, rsp.op_ret,
                                                       rsp.op_errno,
                                                       rsp.op_errstr,
-                                                      ctx->hostname, ctx->port);
+                                                      ctx->hostname, ctx->port,
+                                                      ctx->dict);
                 }
 
                 glusterd_destroy_probe_ctx (ctx);
@@ -247,7 +278,8 @@ glusterd_probe_cbk (struct rpc_req *req, struct iovec *iov,
                         glusterd_xfer_cli_probe_resp (ctx->req, rsp.op_ret,
                                                       rsp.op_errno,
                                                       rsp.op_errstr,
-                                                      ctx->hostname, ctx->port);
+                                                      ctx->hostname, ctx->port,
+                                                      ctx->dict);
                 }
 
                 glusterd_destroy_probe_ctx (ctx);
@@ -287,7 +319,16 @@ out:
 }
 
 int
-glusterd_friend_add_cbk (struct rpc_req * req, struct iovec *iov,
+glusterd_probe_cbk (struct rpc_req *req, struct iovec *iov,
+                    int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_probe_cbk);
+}
+
+
+int
+__glusterd_friend_add_cbk (struct rpc_req * req, struct iovec *iov,
                             int count, void *myframe)
 {
         gd1_mgmt_friend_rsp           rsp   = {{0},};
@@ -367,7 +408,7 @@ out:
         if (ctx->req)//reverse probe doesn't have req
                 ret = glusterd_xfer_cli_probe_resp (ctx->req, op_ret, op_errno,
                                                     NULL, ctx->hostname,
-                                                    ctx->port);
+                                                    ctx->port, ctx->dict);
         if (!ret) {
                 glusterd_friend_sm ();
                 glusterd_op_sm ();
@@ -380,7 +421,15 @@ out:
 }
 
 int
-glusterd_friend_remove_cbk (struct rpc_req * req, struct iovec *iov,
+glusterd_friend_add_cbk (struct rpc_req *req, struct iovec *iov,
+                    int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_friend_add_cbk);
+}
+
+int
+__glusterd_friend_remove_cbk (struct rpc_req * req, struct iovec *iov,
                                int count, void *myframe)
 {
         gd1_mgmt_friend_rsp             rsp   = {{0},};
@@ -457,7 +506,7 @@ inject:
 
 respond:
         ret = glusterd_xfer_cli_deprobe_resp (ctx->req, op_ret, op_errno, NULL,
-                                              ctx->hostname);
+                                              ctx->hostname, ctx->dict);
         if (!ret && move_sm_now) {
                 glusterd_friend_sm ();
                 glusterd_op_sm ();
@@ -473,8 +522,16 @@ respond:
         return ret;
 }
 
+int
+glusterd_friend_remove_cbk (struct rpc_req *req, struct iovec *iov,
+                    int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_friend_remove_cbk);
+}
+
 int32_t
-glusterd_friend_update_cbk (struct rpc_req *req, struct iovec *iov,
+__glusterd_friend_update_cbk (struct rpc_req *req, struct iovec *iov,
                               int count, void *myframe)
 {
         int                           ret    = -1;
@@ -506,8 +563,16 @@ out:
         return ret;
 }
 
+int
+glusterd_friend_update_cbk (struct rpc_req *req, struct iovec *iov,
+                    int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_friend_update_cbk);
+}
+
 int32_t
-glusterd_cluster_lock_cbk (struct rpc_req *req, struct iovec *iov,
+__glusterd_cluster_lock_cbk (struct rpc_req *req, struct iovec *iov,
                               int count, void *myframe)
 {
         gd1_mgmt_cluster_lock_rsp     rsp   = {{0},};
@@ -572,7 +637,15 @@ out:
 }
 
 int32_t
-glusterd_cluster_unlock_cbk (struct rpc_req *req, struct iovec *iov,
+glusterd_cluster_lock_cbk (struct rpc_req *req, struct iovec *iov,
+                              int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_cluster_lock_cbk);
+}
+
+int32_t
+__glusterd_cluster_unlock_cbk (struct rpc_req *req, struct iovec *iov,
                                  int count, void *myframe)
 {
         gd1_mgmt_cluster_lock_rsp     rsp   = {{0},};
@@ -634,7 +707,15 @@ out:
 }
 
 int32_t
-glusterd_stage_op_cbk (struct rpc_req *req, struct iovec *iov,
+glusterd_cluster_unlock_cbk (struct rpc_req *req, struct iovec *iov,
+                                 int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_cluster_unlock_cbk);
+}
+
+int32_t
+__glusterd_stage_op_cbk (struct rpc_req *req, struct iovec *iov,
                           int count, void *myframe)
 {
         gd1_mgmt_stage_op_rsp         rsp   = {{0},};
@@ -753,7 +834,15 @@ out:
 }
 
 int32_t
-glusterd_commit_op_cbk (struct rpc_req *req, struct iovec *iov,
+glusterd_stage_op_cbk (struct rpc_req *req, struct iovec *iov,
+                          int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_stage_op_cbk);
+}
+
+int32_t
+__glusterd_commit_op_cbk (struct rpc_req *req, struct iovec *iov,
                           int count, void *myframe)
 {
         gd1_mgmt_commit_op_rsp         rsp   = {{0},};
@@ -911,7 +1000,13 @@ out:
         return ret;
 }
 
-
+int32_t
+glusterd_commit_op_cbk (struct rpc_req *req, struct iovec *iov,
+                          int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_commit_op_cbk);
+}
 
 int32_t
 glusterd_rpc_probe (call_frame_t *frame, xlator_t *this,
@@ -1276,7 +1371,7 @@ out:
 }
 
 int32_t
-glusterd_brick_op_cbk (struct rpc_req *req, struct iovec *iov,
+__glusterd_brick_op_cbk (struct rpc_req *req, struct iovec *iov,
                           int count, void *myframe)
 {
         gd1_mgmt_brick_op_rsp         rsp   = {0};
@@ -1375,6 +1470,14 @@ out:
         free (rsp.op_errstr); //malloced by xdr
         GLUSTERD_STACK_DESTROY (frame);
         return ret;
+}
+
+int32_t
+glusterd_brick_op_cbk (struct rpc_req *req, struct iovec *iov,
+                          int count, void *myframe)
+{
+        return glusterd_big_locked_cbk (req, iov, count, myframe,
+                                        __glusterd_brick_op_cbk);
 }
 
 int32_t
@@ -1541,4 +1644,5 @@ struct rpc_clnt_program gd_peer_prog = {
         .proctable = gd_peer_actors,
         .numproc   = GLUSTERD_FRIEND_MAXVALUE,
 };
+
 

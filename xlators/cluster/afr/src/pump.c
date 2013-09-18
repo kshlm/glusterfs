@@ -2443,6 +2443,7 @@ init (xlator_t *this)
 	priv->metadata_change_log = 1;
 	priv->entry_change_log    = 1;
         priv->use_afr_in_pump = 1;
+        priv->sh_readdir_size = 65536;
 
 	/* Locking options */
 
@@ -2500,6 +2501,12 @@ init (xlator_t *this)
 		i++;
 	}
 
+        ret = gf_asprintf (&priv->sh_domain, "%s-self-heal", this->name);
+        if (-1 == ret) {
+                op_errno = ENOMEM;
+                goto out;
+        }
+
         priv->first_lookup = 1;
         priv->root_inode = NULL;
 
@@ -2531,7 +2538,7 @@ init (xlator_t *this)
                 goto out;
         }
 
-	pump_priv->env = syncenv_new (0);
+	pump_priv->env = this->ctx->env;
         if (!pump_priv->env) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "Could not create new sync-environment");
@@ -2571,9 +2578,6 @@ fini (xlator_t *this)
         pump_priv = priv->pump_private;
         if (!pump_priv)
                 goto afr_priv;
-
-        if (pump_priv->env)
-                syncenv_destroy (pump_priv->env);
 
         GF_FREE (pump_priv->resume_path);
         LOCK_DESTROY (&pump_priv->resume_path_lock);

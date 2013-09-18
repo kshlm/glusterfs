@@ -51,7 +51,8 @@ enum gf_quota_type {
 };
 
 enum gf1_cli_friends_list {
-        GF_CLI_LIST_ALL = 1
+        GF_CLI_LIST_PEERS = 1,
+        GF_CLI_LIST_POOL_NODES = 2
 } ;
 
 enum gf1_cli_get_volume {
@@ -74,7 +75,9 @@ enum gf1_cli_gsync_set {
         GF_GSYNC_OPTION_TYPE_STOP,
         GF_GSYNC_OPTION_TYPE_CONFIG,
         GF_GSYNC_OPTION_TYPE_STATUS,
-        GF_GSYNC_OPTION_TYPE_ROTATE
+        GF_GSYNC_OPTION_TYPE_ROTATE,
+        GF_GSYNC_OPTION_TYPE_CREATE,
+        GF_GSYNC_OPTION_TYPE_DELETE
 };
 
 enum gf1_cli_stats_op {
@@ -123,32 +126,6 @@ enum gf_cli_status_type {
         int     op_errno;
         string  op_errstr<>;
         opaque  dict<>;
-}  ;
-
- struct gf1_cli_probe_req {
-        string  hostname<>;
-	int	port;
-}  ;
-
- struct gf1_cli_probe_rsp {
-        int     op_ret;
-        int     op_errno;
-	int	port;
-        string  hostname<>;
-        string  op_errstr<>;
-}  ;
-
- struct gf1_cli_deprobe_req {
-        string  hostname<>;
-	int	port;
-        int     flags;
-}  ;
-
- struct gf1_cli_deprobe_rsp {
-        int     op_ret;
-        int     op_errno;
-        string  hostname<>;
-        string  op_errstr<>;
 }  ;
 
 struct gf1_cli_peer_list_req {

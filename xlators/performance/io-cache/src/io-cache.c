@@ -316,9 +316,11 @@ ioc_forget (xlator_t *this, inode_t *inode)
 static int32_t
 ioc_invalidate(xlator_t *this, inode_t *inode)
 {
+	uint64_t     ioc_addr = 0;
 	ioc_inode_t *ioc_inode = NULL;
 
-	inode_ctx_get(inode, this, (uint64_t *) &ioc_inode);
+	inode_ctx_get(inode, this, (uint64_t *) &ioc_addr);
+	ioc_inode = (void *) ioc_addr;
 
 	if (ioc_inode)
 		ioc_inode_flush(ioc_inode);
@@ -550,6 +552,13 @@ ioc_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this, int32_t op_ret,
         if (op_ret != -1) {
                 inode_ctx_get (fd->inode, this, &tmp_ioc_inode);
                 ioc_inode = (ioc_inode_t *)(long)tmp_ioc_inode;
+
+                //TODO: see why inode context is NULL and handle it.
+                if (!ioc_inode) {
+                        gf_log (this->name, GF_LOG_ERROR, "inode context is "
+                                "NULL (%s)", uuid_utoa (fd->inode->gfid));
+                        goto out;
+                }
 
                 ioc_table_lock (ioc_inode->table);
                 {
@@ -1415,6 +1424,33 @@ ioc_readdirp (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
         return 0;
 }
 
+static int32_t
+ioc_discard_cbk(call_frame_t *frame, void *cookie, xlator_t *this,
+		int32_t op_ret, int32_t op_errno, struct iatt *pre,
+		struct iatt *post, dict_t *xdata)
+{
+	STACK_UNWIND_STRICT(discard, frame, op_ret, op_errno, pre, post, xdata);
+	return 0;
+}
+
+static int32_t
+ioc_discard(call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
+	    size_t len, dict_t *xdata)
+{
+	uint64_t ioc_inode = 0;
+
+	inode_ctx_get (fd->inode, this, &ioc_inode);
+
+	if (ioc_inode)
+		ioc_inode_flush ((ioc_inode_t *)(long)ioc_inode);
+
+	STACK_WIND(frame, ioc_discard_cbk, FIRST_CHILD(this),
+		   FIRST_CHILD(this)->fops->discard, fd, offset, len, xdata);
+       return 0;
+}
+
+
+
 int32_t
 ioc_get_priority_list (const char *opt_str, struct list_head *first)
 {
@@ -1878,11 +1914,11 @@ int
 ioc_inode_dump (xlator_t *this, inode_t *inode)
 {
 
-        char          *path                           = NULL;
+        char         *path                            = NULL;
         int           ret                             = -1;
         char          key_prefix[GF_DUMP_MAX_BUF_LEN] = {0, };
         uint64_t      tmp_ioc_inode                   = 0;
-        ioc_inode_t   *ioc_inode                      = NULL;
+        ioc_inode_t  *ioc_inode                       = NULL;
         gf_boolean_t  section_added                   = _gf_false;
         char          uuid_str[64]                    = {0,};
 
@@ -1896,9 +1932,6 @@ ioc_inode_dump (xlator_t *this, inode_t *inode)
         if (ioc_inode == NULL)
                 goto out;
 
-        gf_proc_dump_add_section (key_prefix);
-        section_added = _gf_true;
-
         /* Similar to ioc_page_dump function its better to use
          * pthread_mutex_trylock and not to use gf_log in statedump
          * to avoid deadlocks.
@@ -1906,24 +1939,30 @@ ioc_inode_dump (xlator_t *this, inode_t *inode)
         ret = pthread_mutex_trylock (&ioc_inode->inode_lock);
         if (ret)
                 goto out;
-        else
-        {
-                gf_proc_dump_write ("inode.weight", "%d", ioc_inode->weight);
 
-                //inode_path takes blocking lock on the itable.
+        {
+                if (uuid_is_null (ioc_inode->inode->gfid))
+                        goto unlock;
+
+                gf_proc_dump_add_section (key_prefix);
+                section_added = _gf_true;
+
                 __inode_path (ioc_inode->inode, NULL, &path);
+
+                gf_proc_dump_write ("inode.weight", "%d", ioc_inode->weight);
 
                 if (path) {
                         gf_proc_dump_write ("path", "%s", path);
                         GF_FREE (path);
                 }
+
                 gf_proc_dump_write ("uuid", "%s", uuid_utoa_r
                                     (ioc_inode->inode->gfid, uuid_str));
                 __ioc_cache_dump (ioc_inode, key_prefix);
                 __ioc_inode_waitq_dump (ioc_inode, key_prefix);
-
-                pthread_mutex_unlock (&ioc_inode->inode_lock);
         }
+unlock:
+        pthread_mutex_unlock (&ioc_inode->inode_lock);
 
 out:
         if (ret && ioc_inode) {
@@ -2037,6 +2076,7 @@ struct xlator_fops fops = {
         .mknod       = ioc_mknod,
 
         .readdirp    = ioc_readdirp,
+	.discard     = ioc_discard,
 };
 
 

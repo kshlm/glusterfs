@@ -828,7 +828,7 @@ glusterd_op_stage_sync_volume (dict_t *dict, char **op_errstr)
                 goto out;
         }
 
-        if (glusterd_is_local_addr (hostname)) {
+        if (gf_is_local_addr (hostname)) {
                 //volname is not present in case of sync all
                 ret = dict_get_str (dict, "volname", &volname);
                 if (!ret) {
@@ -1160,8 +1160,9 @@ glusterd_options_reset (glusterd_volinfo_t *volinfo, char *key,
                 _delete_reconfig_opt (volinfo->dict, key, value, is_force);
         }
 
-        ret = glusterd_create_volfiles_and_notify_services (volinfo);
+        gd_update_volume_op_versions (volinfo);
 
+        ret = glusterd_create_volfiles_and_notify_services (volinfo);
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR, "Unable to create volfile for"
                         " 'volume reset'");
@@ -1520,6 +1521,7 @@ glusterd_op_set_volume (dict_t *dict)
                 goto out;
         }
 
+        // TODO: Remove this once v3.3 compatability is not required
         check_op_version = dict_get_str_boolean (dict, "check-op-version",
                                                  _gf_false);
 
@@ -1626,7 +1628,21 @@ glusterd_op_set_volume (dict_t *dict)
                 goto out;
         }
 
+        /* Update the cluster op-version before regenerating volfiles so that
+         * correct volfiles are generated
+         */
+        if (new_op_version > priv->op_version) {
+                priv->op_version = new_op_version;
+                ret = glusterd_store_global_info (this);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Failed to store op-version");
+                        goto out;
+                }
+        }
+
         if (!global_opt) {
+                gd_update_volume_op_versions (volinfo);
                 ret = glusterd_create_volfiles_and_notify_services (volinfo);
                 if (ret) {
                         gf_log (this->name, GF_LOG_ERROR,
@@ -1652,6 +1668,7 @@ glusterd_op_set_volume (dict_t *dict)
         } else {
                 list_for_each_entry (voliter, &priv->volumes, vol_list) {
                         volinfo = voliter;
+                        gd_update_volume_op_versions (volinfo);
                         ret = glusterd_create_volfiles_and_notify_services (volinfo);
                         if (ret) {
                                 gf_log (this->name, GF_LOG_ERROR,
@@ -1674,16 +1691,6 @@ glusterd_op_set_volume (dict_t *dict)
                                         goto out;
                                 }
                         }
-                }
-        }
-
-        if (new_op_version > priv->op_version) {
-                priv->op_version = new_op_version;
-                ret = glusterd_store_global_info (this);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Failed to store op-version");
-                        goto out;
                 }
         }
 
@@ -1723,7 +1730,7 @@ glusterd_op_sync_volume (dict_t *dict, char **op_errstr,
                 goto out;
         }
 
-        if (!glusterd_is_local_addr (hostname)) {
+        if (!gf_is_local_addr (hostname)) {
                 ret = 0;
                 goto out;
         }
@@ -1894,6 +1901,105 @@ out:
 }
 
 static int
+_add_brick_name_to_dict (dict_t *dict, char *key, glusterd_brickinfo_t *brick)
+{
+        int     ret = -1;
+        char    tmp[1024] = {0,};
+        char    *brickname = NULL;
+        xlator_t *this = NULL;
+
+        GF_ASSERT (dict);
+        GF_ASSERT (key);
+        GF_ASSERT (brick);
+
+        this = THIS;
+        GF_ASSERT (this);
+
+        snprintf (tmp, sizeof (tmp), "%s:%s", brick->hostname, brick->path);
+        brickname = gf_strdup (tmp);
+        if (!brickname) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to dup brick name");
+                goto out;
+        }
+
+        ret = dict_set_dynstr (dict, key, brickname);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Failed to add brick name to dict");
+                goto out;
+        }
+        brickname = NULL;
+out:
+        if (brickname)
+                GF_FREE (brickname);
+        return ret;
+}
+
+static int
+_add_remove_bricks_to_dict (dict_t *dict, glusterd_volinfo_t *volinfo,
+                            char *prefix)
+{
+        int             ret = -1;
+        int             count = 0;
+        int             i = 0;
+        char            brick_key[1024] = {0,};
+        char            dict_key[1024] ={0,};
+        char            *brick = NULL;
+        xlator_t        *this = NULL;
+
+        GF_ASSERT (dict);
+        GF_ASSERT (volinfo);
+        GF_ASSERT (prefix);
+
+        this = THIS;
+        GF_ASSERT (this);
+
+        ret = dict_get_int32 (volinfo->rebal.dict, "count", &count);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Failed to get brick count");
+                goto out;
+        }
+
+        snprintf (dict_key, sizeof (dict_key), "%s.count", prefix);
+        ret = dict_set_int32 (dict, dict_key, count);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Failed to set brick count in dict");
+                goto out;
+        }
+
+        for (i = 1; i <= count; i++) {
+                memset (brick_key, 0, sizeof (brick_key));
+                snprintf (brick_key, sizeof (brick_key), "brick%d", i);
+
+                ret = dict_get_str (volinfo->rebal.dict, brick_key, &brick);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Unable to get %s", brick_key);
+                        goto out;
+                }
+
+                memset (dict_key, 0, sizeof (dict_key));
+                snprintf (dict_key, sizeof (dict_key), "%s.%s", prefix,
+                          brick_key);
+                ret = dict_set_str (dict, dict_key, brick);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Failed to add brick to dict");
+                        goto out;
+                }
+                brick = NULL;
+        }
+
+out:
+        return ret;
+}
+
+/* This adds the respective task-id and all available parameters of a task into
+ * a dictionary
+ */
+static int
 _add_task_to_dict (dict_t *dict, glusterd_volinfo_t *volinfo, int op, int index)
 {
 
@@ -1910,13 +2016,34 @@ _add_task_to_dict (dict_t *dict, glusterd_volinfo_t *volinfo, int op, int index)
         GF_ASSERT (this);
 
         switch (op) {
-        case GD_OP_REBALANCE:
         case GD_OP_REMOVE_BRICK:
+                snprintf (key, sizeof (key), "task%d", index);
+                ret = _add_remove_bricks_to_dict (dict, volinfo, key);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Failed to add remove bricks to dict");
+                        goto out;
+                }
+        case GD_OP_REBALANCE:
                 uuid_str = gf_strdup (uuid_utoa (volinfo->rebal.rebalance_id));
                 status = volinfo->rebal.defrag_status;
                 break;
 
         case GD_OP_REPLACE_BRICK:
+                snprintf (key, sizeof (key), "task%d.src-brick", index);
+                ret = _add_brick_name_to_dict (dict, key,
+                                               volinfo->rep_brick.src_brick);
+                if (ret)
+                        goto out;
+                memset (key, 0, sizeof (key));
+
+                snprintf (key, sizeof (key), "task%d.dst-brick", index);
+                ret = _add_brick_name_to_dict (dict, key,
+                                               volinfo->rep_brick.dst_brick);
+                if (ret)
+                        goto out;
+                memset (key, 0, sizeof (key));
+
                 uuid_str = gf_strdup (uuid_utoa (volinfo->rep_brick.rb_id));
                 status = volinfo->rep_brick.rb_status;
                 break;
@@ -1929,8 +2056,7 @@ _add_task_to_dict (dict_t *dict, glusterd_volinfo_t *volinfo, int op, int index)
         }
 
         snprintf (key, sizeof (key), "task%d.type", index);
-        ret = dict_set_str (dict, key,
-                            (char *)gd_op_list[op]);
+        ret = dict_set_str (dict, key, (char *)gd_op_list[op]);
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "Error setting task type in dict");
@@ -1939,7 +2065,6 @@ _add_task_to_dict (dict_t *dict, glusterd_volinfo_t *volinfo, int op, int index)
 
         memset (key, 0, sizeof (key));
         snprintf (key, sizeof (key), "task%d.id", index);
-
 
         if (!uuid_str)
                 goto out;
@@ -2142,7 +2267,11 @@ glusterd_op_status_volume (dict_t *dict, char **op_errstr,
         }
 
         /* Active tasks */
+        /* Tasks are added only for normal volume status request for either a
+         * single volume or all volumes, and only by the origin glusterd
+         */
         if (((cmd & GF_CLI_STATUS_MASK) != GF_CLI_STATUS_NONE) ||
+            !(cmd & (GF_CLI_STATUS_VOL | GF_CLI_STATUS_ALL)) ||
             !origin_glusterd)
                 goto out;
 
@@ -2496,12 +2625,13 @@ glusterd_op_build_payload (dict_t **req, char **op_errstr, dict_t *op_ctx)
                         }
                         break;
 
+                case GD_OP_GSYNC_CREATE:
                 case GD_OP_GSYNC_SET:
                         {
                                 ret = glusterd_op_gsync_args_get (dict,
                                                                   &errstr,
                                                                   &volname,
-                                                                  NULL);
+                                                                  NULL, NULL);
                                 if (ret == 0) {
                                         ret = glusterd_dict_set_volid
                                                 (dict, volname, op_errstr);
@@ -2613,6 +2743,18 @@ glusterd_op_build_payload (dict_t **req, char **op_errstr, dict_t *op_ctx)
                                 dict_copy (dict, req_dict);
                         }
                         break;
+
+                case GD_OP_COPY_FILE:
+                        {
+                                dict_copy (dict, req_dict);
+                                break;
+                        }
+
+                case GD_OP_SYS_EXEC:
+                        {
+                                dict_copy (dict, req_dict);
+                                break;
+                        }
 
                 default:
                         break;
@@ -3747,6 +3889,10 @@ glusterd_op_stage_validate (glusterd_op_t op, dict_t *dict, char **op_errstr,
                         ret = glusterd_op_stage_sync_volume (dict, op_errstr);
                         break;
 
+                case GD_OP_GSYNC_CREATE:
+                        ret = glusterd_op_stage_gsync_create (dict, op_errstr);
+                        break;
+
                 case GD_OP_GSYNC_SET:
                         ret = glusterd_op_stage_gsync_set (dict, op_errstr);
                         break;
@@ -3785,13 +3931,21 @@ glusterd_op_stage_validate (glusterd_op_t op, dict_t *dict, char **op_errstr,
                         ret = glusterd_op_stage_bd (dict, op_errstr);
                         break;
 #endif
+
+                case GD_OP_COPY_FILE:
+                        ret = glusterd_op_stage_copy_file (dict, op_errstr);
+                        break;
+
+                case GD_OP_SYS_EXEC:
+                        ret = glusterd_op_stage_sys_exec (dict, op_errstr);
+                        break;
+
                 default:
                         gf_log (this->name, GF_LOG_ERROR, "Unknown op %s",
                                 gd_op_list[op]);
         }
 
-        gf_log (this->name, GF_LOG_DEBUG, "Returning %d", ret);
-
+        gf_log (this->name, GF_LOG_DEBUG, "OP = %d. Returning %d", op, ret);
         return ret;
 }
 
@@ -3849,6 +4003,11 @@ glusterd_op_commit_perform (glusterd_op_t op, dict_t *dict, char **op_errstr,
                         ret = glusterd_op_sync_volume (dict, op_errstr, rsp_dict);
                         break;
 
+                case GD_OP_GSYNC_CREATE:
+                        ret = glusterd_op_gsync_create (dict, op_errstr,
+                                                        rsp_dict);
+                        break;
+
                 case GD_OP_GSYNC_SET:
                         ret = glusterd_op_gsync_set (dict, op_errstr, rsp_dict);
                         break;
@@ -3888,6 +4047,15 @@ glusterd_op_commit_perform (glusterd_op_t op, dict_t *dict, char **op_errstr,
                         ret = 0;
                         break;
 #endif
+
+                case GD_OP_COPY_FILE:
+                        ret = glusterd_op_copy_file (dict, op_errstr);
+                        break;
+
+                case GD_OP_SYS_EXEC:
+                        ret = glusterd_op_sys_exec (dict, op_errstr, rsp_dict);
+                        break;
+
                 default:
                         gf_log (this->name, GF_LOG_ERROR, "Unknown op %s",
                                 gd_op_list[op]);
@@ -3896,8 +4064,8 @@ glusterd_op_commit_perform (glusterd_op_t op, dict_t *dict, char **op_errstr,
 
         if (ret == 0)
             glusterd_op_commit_hook (op, dict, GD_COMMIT_HOOK_POST);
-        gf_log (this->name, GF_LOG_DEBUG, "Returning %d", ret);
 
+        gf_log (this->name, GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
 

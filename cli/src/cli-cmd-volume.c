@@ -393,6 +393,15 @@ cli_cmd_volume_create_cbk (struct cli_state *state, struct cli_cmd_word *word,
                 }
         }
 
+        if (state->mode & GLUSTER_MODE_SCRIPT) {
+                ret = dict_set_int32 (options, "force", _gf_true);
+                if (ret) {
+                        gf_log ("cli", GF_LOG_ERROR, "Failed to set force "
+                                "option");
+                        goto out;
+                }
+        }
+
         CLI_LOCAL_INIT (local, words, frame, options);
 
         if (proc->fn) {
@@ -873,6 +882,7 @@ cli_cmd_volume_set_cbk (struct cli_state *state, struct cli_cmd_word *word,
         call_frame_t            *frame = NULL;
         dict_t                  *options = NULL;
         cli_local_t             *local = NULL;
+        char                    *op_errstr = NULL;
 
         proc = &cli_rpc_prog->proctable[GLUSTER_CLI_SET_VOLUME];
 
@@ -880,9 +890,14 @@ cli_cmd_volume_set_cbk (struct cli_state *state, struct cli_cmd_word *word,
         if (!frame)
                 goto out;
 
-        ret = cli_cmd_volume_set_parse (words, wordcount, &options);
+        ret = cli_cmd_volume_set_parse (words, wordcount, &options, &op_errstr);
         if (ret) {
-                cli_usage_out (word->pattern);
+                if (op_errstr) {
+                    cli_err ("%s", op_errstr);
+                    GF_FREE (op_errstr);
+                } else
+                    cli_usage_out (word->pattern);
+
                 parse_error = 1;
                 goto out;
         }
@@ -944,6 +959,15 @@ cli_cmd_volume_add_brick_cbk (struct cli_state *state,
 
                 if (GF_ANSWER_NO == answer) {
                         ret = 0;
+                        goto out;
+                }
+        }
+
+        if (state->mode & GLUSTER_MODE_SCRIPT) {
+                ret = dict_set_int32 (options, "force", _gf_true);
+                if (ret) {
+                        gf_log ("cli", GF_LOG_ERROR, "Failed to set force "
+                                "option");
                         goto out;
                 }
         }
@@ -1114,6 +1138,15 @@ cli_cmd_volume_replace_brick_cbk (struct cli_state *state,
                 cli_usage_out (word->pattern);
                 parse_error = 1;
                 goto out;
+        }
+
+        if (state->mode & GLUSTER_MODE_SCRIPT) {
+                ret = dict_set_int32 (options, "force", _gf_true);
+                if (ret) {
+                        gf_log ("cli", GF_LOG_ERROR, "Failed to set force"
+                                "option");
+                        goto out;
+                }
         }
 
         CLI_LOCAL_INIT (local, words, frame, options);
@@ -1784,7 +1817,7 @@ struct cli_cmd volume_cmds[] = {
 #ifdef HAVE_BD_XLATOR
           "[device vg] "
 #endif
-          "[transport <tcp|rdma|tcp,rdma>] <NEW-BRICK> ...",
+          "[transport <tcp|rdma|tcp,rdma>] <NEW-BRICK> ... [force]",
           cli_cmd_volume_create_cbk,
           "create a new volume of specified type with mentioned bricks"},
 
@@ -1804,7 +1837,7 @@ struct cli_cmd volume_cmds[] = {
           cli_cmd_volume_rename_cbk,
           "rename volume <VOLNAME> to <NEW-VOLNAME>"},*/
 
-        { "volume add-brick <VOLNAME> [<stripe|replica> <COUNT>] <NEW-BRICK> ...",
+        { "volume add-brick <VOLNAME> [<stripe|replica> <COUNT>] <NEW-BRICK> ... [force]",
           cli_cmd_volume_add_brick_cbk,
           "add brick to volume <VOLNAME>"},
 
@@ -1816,7 +1849,7 @@ struct cli_cmd volume_cmds[] = {
           cli_cmd_volume_defrag_cbk,
           "rebalance operations"},
 
-        { "volume replace-brick <VOLNAME> <BRICK> <NEW-BRICK> {start|pause|abort|status|commit [force]}",
+        { "volume replace-brick <VOLNAME> <BRICK> <NEW-BRICK> {start [force]|pause|abort|status|commit [force]}",
           cli_cmd_volume_replace_brick_cbk,
           "replace-brick operations"},
 
@@ -1845,7 +1878,8 @@ struct cli_cmd volume_cmds[] = {
          "reset all the reconfigured options"},
 
 #if (SYNCDAEMON_COMPILE)
-        {"volume "GEOREP" [<VOLNAME>] [<SLAVE-URL>] {start|stop|config|status|log-rotate} [options...]",
+        {"volume "GEOREP" [<VOLNAME>] [<SLAVE-URL>] {create [push-pem] [force]"
+         "|start [force]|stop [force]|config|status [detail]|delete} [options...]",
          cli_cmd_volume_gsync_set_cbk,
          "Geo-sync operations",
          cli_cmd_check_gsync_exists_cbk},

@@ -30,7 +30,7 @@
 #define CLI_GLUSTERD_PORT                  24007
 #define CLI_DEFAULT_CONN_TIMEOUT             120
 #define CLI_DEFAULT_CMD_TIMEOUT              120
-#define CLI_TOP_CMD_TIMEOUT                  600 //Longer timeout for volume top
+#define CLI_TEN_MINUTES_TIMEOUT              600 //Longer timeout for volume top
 #define DEFAULT_CLI_LOG_FILE_DIRECTORY     DATADIR "/log/glusterfs"
 #define DEFAULT_LOG_FILE_DIRECTORY         DATADIR "/log/glusterfs"
 #define DEFAULT_VAR_RUN_DIRECTORY          DATADIR "/run/gluster"
@@ -66,6 +66,7 @@ struct cli_cmd;
 
 extern char *cli_vol_type_str[];
 extern char *cli_vol_status_str[];
+extern char *cli_vol_task_status_str[];
 
 typedef int (cli_cmd_cbk_t)(struct cli_state *state,
                             struct cli_cmd_word *word,
@@ -147,6 +148,18 @@ struct cli_local {
 #endif
 };
 
+struct gf_cli_gsync_detailed_status_ {
+        char *node;
+        char *master;
+        char *slave;
+        char *health;
+        char *uptime;
+        char *files_syncd;
+        char *files_pending;
+        char *bytes_pending;
+        char *deletes_pending;
+};
+
 struct cli_volume_status {
         int            port;
         int            online;
@@ -164,6 +177,8 @@ struct cli_volume_status {
         char          *inode_size;
 #endif
 };
+
+typedef struct gf_cli_gsync_detailed_status_ gf_cli_gsync_status_t;
 
 typedef struct cli_volume_status cli_volume_status_t;
 
@@ -229,7 +244,7 @@ cli_cmd_quota_parse (const char **words, int wordcount, dict_t **opt);
 
 int32_t
 cli_cmd_volume_set_parse (const char **words, int wordcount,
-                          dict_t **options);
+                          dict_t **options, char **op_errstr);
 
 int32_t
 cli_cmd_volume_add_brick_parse (const char **words, int wordcount,

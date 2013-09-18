@@ -31,6 +31,12 @@ extern rpc_clnt_prog_t *cli_rpc_prog;
 int cli_cmd_system_help_cbk (struct cli_state *state, struct cli_cmd_word *in_word,
                              const char **words, int wordcount);
 
+int cli_cmd_copy_file_cbk (struct cli_state *state, struct cli_cmd_word *word,
+                           const char **words, int wordcount);
+
+int cli_cmd_sys_exec_cbk (struct cli_state *state, struct cli_cmd_word *word,
+                          const char **words, int wordcount);
+
 int
 cli_cmd_getspec_cbk (struct cli_state *state, struct cli_cmd_word *word,
                      const char **words, int wordcount)
@@ -279,6 +285,53 @@ cli_cmd_umount_cbk (struct cli_state *state, struct cli_cmd_word *word,
 }
 
 int
+cli_cmd_uuid_get_cbk (struct cli_state *state, struct cli_cmd_word *word,
+                      const char **words, int wordcount)
+{
+        int                     ret = -1;
+        int                     sent = 0;
+        int                     parse_error = 0;
+        dict_t                  *dict  = NULL;
+        rpc_clnt_procedure_t    *proc = NULL;
+        call_frame_t            *frame = NULL;
+        cli_local_t             *local = NULL;
+        xlator_t                *this  = NULL;
+
+        this = THIS;
+        if (wordcount != 3) {
+                cli_usage_out (word->pattern);
+                parse_error = 1;
+                goto out;
+        }
+
+        proc = &cli_rpc_prog->proctable[GLUSTER_CLI_UUID_GET];
+        frame = create_frame (this, this->ctx->pool);
+        if (!frame)
+                goto out;
+
+        dict = dict_new ();
+        if (!dict)
+                goto out;
+
+        CLI_LOCAL_INIT (local, words, frame, dict);
+        if (proc->fn)
+                ret = proc->fn (frame, this, dict);
+
+out:
+        if (ret) {
+                cli_cmd_sent_status_get (&sent);
+                if ((sent == 0) && (parse_error == 0))
+                        cli_out ("uuid get failed");
+        }
+
+        if (dict)
+                dict_unref (dict);
+
+        CLI_STACK_DESTROY (frame);
+        return ret;
+}
+
+int
 cli_cmd_uuid_reset_cbk (struct cli_state *state, struct cli_cmd_word *word,
                         const char **words, int wordcount)
 {
@@ -364,6 +417,10 @@ struct cli_cmd cli_system_cmds[] = {
           cli_cmd_umount_cbk,
           "request an umount"},
 
+        { "system:: uuid get",
+          cli_cmd_uuid_get_cbk,
+          "get uuid of glusterd"},
+
         { "system:: uuid reset",
           cli_cmd_uuid_reset_cbk,
           "reset the uuid of glusterd"},
@@ -372,8 +429,149 @@ struct cli_cmd cli_system_cmds[] = {
            cli_cmd_system_help_cbk,
            "display help for system commands"},
 
+        { "system:: copy file [<filename>]",
+           cli_cmd_copy_file_cbk,
+           "Copy file from current node's $working_dir to "
+           "$working_dir of all cluster nodes"},
+
+        { "system:: execute <command> <args>",
+           cli_cmd_sys_exec_cbk,
+           "Execute the command on all the nodes "
+           "in the cluster and display their output."},
+
         { NULL, NULL, NULL }
 };
+
+int
+cli_cmd_sys_exec_cbk (struct cli_state *state, struct cli_cmd_word *word,
+                      const char **words, int wordcount)
+{
+        char                   cmd_arg_name[PATH_MAX] = "";
+        char                  *command                = NULL;
+        char                  *saveptr                = NULL;
+        char                  *tmp                    = NULL;
+        int                    ret                    = -1;
+        int                    i                      = -1;
+        int                    cmd_args_count         = 0;
+        int                    in_cmd_args_count      = 0;
+        rpc_clnt_procedure_t  *proc                   = NULL;
+        call_frame_t          *frame                  = NULL;
+        dict_t                *dict                   = NULL;
+        cli_local_t           *local                  = NULL;
+
+        if (wordcount < 3) {
+                cli_usage_out (word->pattern);
+                goto out;
+        }
+
+        dict = dict_new ();
+        if (!dict)
+                goto out;
+
+        command = strtok_r ((char *)words[2], " ", &saveptr);
+        do {
+                tmp = strtok_r (NULL, " ", &saveptr);
+                if (tmp) {
+                        in_cmd_args_count++;
+                        memset (cmd_arg_name, '\0', sizeof(cmd_arg_name));
+                        snprintf (cmd_arg_name, sizeof(cmd_arg_name),
+                                  "cmd_arg_%d", in_cmd_args_count);
+                        ret = dict_set_str (dict, cmd_arg_name, tmp);
+                        if (ret) {
+                                gf_log ("", GF_LOG_ERROR, "Unable to set "
+                                        "%s in dict", cmd_arg_name);
+                                goto out;
+                        }
+                }
+        } while (tmp);
+
+        cmd_args_count = wordcount - 3;
+
+        ret = dict_set_str (dict, "command", command);
+        if (ret) {
+                gf_log ("", GF_LOG_ERROR, "Unable to set command in dict");
+                goto out;
+        }
+
+        for (i=1; i <= cmd_args_count; i++) {
+                in_cmd_args_count++;
+                memset (cmd_arg_name, '\0', sizeof(cmd_arg_name));
+                snprintf (cmd_arg_name, sizeof(cmd_arg_name),
+                          "cmd_arg_%d", in_cmd_args_count);
+                ret = dict_set_str (dict, cmd_arg_name,
+                                    (char *)words[2+i]);
+                if (ret) {
+                        gf_log ("", GF_LOG_ERROR, "Unable to set %s in dict",
+                               cmd_arg_name);
+                        goto out;
+                }
+        }
+
+        ret = dict_set_int32 (dict, "cmd_args_count", in_cmd_args_count);
+        if (ret) {
+                gf_log ("", GF_LOG_ERROR,
+                        "Unable to set cmd_args_count in dict");
+                goto out;
+        }
+
+        ret = dict_set_str (dict, "volname", "N/A");
+        if (ret) {
+                gf_log ("", GF_LOG_ERROR, "Unable to set volname in dict");
+                goto out;
+        }
+
+        proc = &cli_rpc_prog->proctable[GLUSTER_CLI_SYS_EXEC];
+        if (proc && proc->fn) {
+                frame = create_frame (THIS, THIS->ctx->pool);
+                if (!frame)
+                        goto out;
+                CLI_LOCAL_INIT (local, words, frame, dict);
+                ret = proc->fn (frame, THIS, (void*)dict);
+        }
+out:
+        return ret;
+}
+
+int
+cli_cmd_copy_file_cbk (struct cli_state *state, struct cli_cmd_word *word,
+                       const char **words, int wordcount)
+{
+        int                    ret      = -1;
+        rpc_clnt_procedure_t  *proc     = NULL;
+        call_frame_t          *frame    = NULL;
+        char                  *filename = "";
+        dict_t                *dict     = NULL;
+        cli_local_t           *local    = NULL;
+
+        if (wordcount != 4) {
+                cli_usage_out (word->pattern);
+                goto out;
+        }
+
+        dict = dict_new ();
+        if (!dict)
+                goto out;
+
+        filename = (char*)words[3];
+        ret = dict_set_str (dict, "source", filename);
+        if (ret)
+                 gf_log ("", GF_LOG_ERROR, "Unable to set filename in dict");
+
+        ret = dict_set_str (dict, "volname", "N/A");
+        if (ret)
+                 gf_log ("", GF_LOG_ERROR, "Unable to set volname in dict");
+
+        proc = &cli_rpc_prog->proctable[GLUSTER_CLI_COPY_FILE];
+        if (proc && proc->fn) {
+                frame = create_frame (THIS, THIS->ctx->pool);
+                if (!frame)
+                        goto out;
+                CLI_LOCAL_INIT (local, words, frame, dict);
+                ret = proc->fn (frame, THIS, (void*)dict);
+        }
+out:
+        return ret;
+}
 
 int
 cli_cmd_system_help_cbk (struct cli_state *state, struct cli_cmd_word *in_word,

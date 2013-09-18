@@ -13,10 +13,6 @@
 #include "config.h"
 #endif
 
-#ifndef GSYNC_CONF
-#define GSYNC_CONF GEOREP"/gsyncd.conf"
-#endif
-
 /* Widths of various columns in top read/write-perf output
  * Total width of top read/write-perf should be 80 chars
  * including one space between column
@@ -66,6 +62,13 @@ char *cli_volume_backend[] = {"",
                            "Volume Group",
 };
 
+char *cli_vol_task_status_str[] = {"not started",
+                                   "in progress",
+                                   "stopped",
+                                   "completed",
+                                   "failed",
+};
+
 int32_t
 gf_cli_get_volume (call_frame_t *frame, xlator_t *this,
                       void *data);
@@ -87,47 +90,11 @@ rpc_clnt_prog_t cli_pmap_prog = {
         .progver    = GLUSTER_PMAP_VERSION,
 };
 
-void
-gf_cli_probe_strerror (gf1_cli_probe_rsp *rsp, char *msg, size_t len)
-{
-        switch (rsp->op_errno) {
-        case GF_PROBE_ANOTHER_CLUSTER:
-                snprintf (msg, len, "%s is already part of another cluster",
-                          rsp->hostname);
-                break;
-        case GF_PROBE_VOLUME_CONFLICT:
-                snprintf (msg, len, "Atleast one volume on %s conflicts with "
-                          "existing volumes in the cluster", rsp->hostname);
-                break;
-        case GF_PROBE_UNKNOWN_PEER:
-                snprintf (msg, len, "%s responded with 'unknown peer' error, "
-                          "this could happen if %s doesn't have localhost in "
-                          "its peer database", rsp->hostname, rsp->hostname);
-                break;
-        case GF_PROBE_ADD_FAILED:
-                snprintf (msg, len, "Failed to add peer information on %s" ,
-                          rsp->hostname);
-                break;
-        case GF_PROBE_SAME_UUID:
-                snprintf (msg, len, "Peer uuid (host %s) is same as local uuid",
-                          rsp->hostname);
-                break;
-        case GF_PROBE_QUORUM_NOT_MET:
-                snprintf (msg, len, "Cluster quorum is not met. Changing "
-                          "peers is not allowed in this state");
-                break;
-        default:
-                snprintf (msg, len, "Probe returned with unknown "
-                          "errno %d", rsp->op_errno);
-                break;
-        }
-}
-
 int
 gf_cli_probe_cbk (struct rpc_req *req, struct iovec *iov,
                         int count, void *myframe)
 {
-        gf1_cli_probe_rsp     rsp   = {0,};
+        gf_cli_rsp            rsp   = {0,};
         int                   ret   = -1;
         char                  msg[1024] = {0,};
 
@@ -135,7 +102,7 @@ gf_cli_probe_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
         }
 
-        ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gf1_cli_probe_rsp);
+        ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gf_cli_rsp);
         if (ret < 0) {
                 gf_log (((call_frame_t *) myframe)->this->name, GF_LOG_ERROR,
                         "Failed to decode xdr response");
@@ -145,38 +112,11 @@ gf_cli_probe_cbk (struct rpc_req *req, struct iovec *iov,
         }
 
         gf_log ("cli", GF_LOG_INFO, "Received resp to probe");
-         if (!rsp.op_ret) {
-                switch (rsp.op_errno) {
-                        case GF_PROBE_SUCCESS:
-                                snprintf (msg, sizeof (msg),
-                                          "success");
-                                break;
-                        case GF_PROBE_LOCALHOST:
-                                snprintf (msg, sizeof (msg),
-                                          "success: on localhost not needed");
-                                break;
-                        case GF_PROBE_FRIEND:
-                                snprintf (msg, sizeof (msg),
-                                          "success: host %s port %d already"
-                                          " in peer list", rsp.hostname,
-                                          rsp.port);
-                                break;
-                        default:
-                                rsp.op_ret = -1;
-                                snprintf (msg, sizeof (msg),
-                                          "Probe returned with unknown errno"
-                                          " %d", rsp.op_errno);
-                                break;
-                }
-         }
 
-        if (rsp.op_ret) {
-                if (rsp.op_errstr && (strlen (rsp.op_errstr) > 0)) {
-                        snprintf (msg, sizeof (msg), "%s", rsp.op_errstr);
-                } else {
-                        gf_cli_probe_strerror (&rsp, msg, sizeof (msg));
-                }
-                gf_log ("cli", GF_LOG_ERROR, "%s", msg);
+        if (rsp.op_errstr && (strlen (rsp.op_errstr) > 0)) {
+                snprintf (msg, sizeof (msg), "%s", rsp.op_errstr);
+                if (rsp.op_ret)
+                        gf_log ("cli", GF_LOG_ERROR, "%s", msg);
         }
 
         if (global_state->mode & GLUSTER_MODE_XML) {
@@ -191,7 +131,7 @@ gf_cli_probe_cbk (struct rpc_req *req, struct iovec *iov,
         }
 
         if (!rsp.op_ret)
-                cli_out ("peer probe: %s", msg);
+                cli_out ("peer probe: success. %s", msg);
         else
                 cli_err ("peer probe: failed: %s", msg);
 
@@ -206,15 +146,15 @@ int
 gf_cli_deprobe_cbk (struct rpc_req *req, struct iovec *iov,
                        int count, void *myframe)
 {
-        gf1_cli_deprobe_rsp    rsp   = {0,};
+        gf_cli_rsp            rsp   = {0,};
         int                   ret   = -1;
-        char                  msg[1024] = {0,};
+        char              msg[1024] = {0,};
 
         if (-1 == req->rpc_status) {
                 goto out;
         }
 
-        ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gf1_cli_deprobe_rsp);
+        ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gf_cli_rsp);
         if (ret < 0) {
                 gf_log (((call_frame_t *) myframe)->this->name, GF_LOG_ERROR,
                         "Failed to decode xdr response");
@@ -224,48 +164,11 @@ gf_cli_deprobe_cbk (struct rpc_req *req, struct iovec *iov,
         }
 
         gf_log ("cli", GF_LOG_INFO, "Received resp to deprobe");
+
         if (rsp.op_ret) {
                 if (strlen (rsp.op_errstr) > 0) {
                         snprintf (msg, sizeof (msg), "%s", rsp.op_errstr);
                         gf_log ("cli", GF_LOG_ERROR, "%s", rsp.op_errstr);
-                } else {
-                        switch (rsp.op_errno) {
-                                case GF_DEPROBE_LOCALHOST:
-                                        snprintf (msg, sizeof (msg),
-                                                  "%s is localhost",
-                                                  rsp.hostname);
-                                        break;
-                                case GF_DEPROBE_NOT_FRIEND:
-                                        snprintf (msg, sizeof (msg),
-                                                  "%s is not part of cluster",
-                                                  rsp.hostname);
-                                        break;
-                                case GF_DEPROBE_BRICK_EXIST:
-                                        snprintf (msg, sizeof (msg),
-                                                  "Brick(s) with the peer %s "
-                                                  "exist in cluster",
-                                                  rsp.hostname);
-                                        break;
-                                case GF_DEPROBE_FRIEND_DOWN:
-                                        snprintf (msg, sizeof (msg),
-                                                  "One of the peers is probably"
-                                                  " down. Check with 'peer "
-                                                  "status'.");
-                                        break;
-                                case GF_DEPROBE_QUORUM_NOT_MET:
-                                        snprintf (msg, sizeof (msg), "Cluster "
-                                                  "quorum is not met. Changing "
-                                                  "peers is not allowed in this"
-                                                  " state");
-                                        break;
-                                default:
-                                        snprintf (msg, sizeof (msg),
-                                                  "Detach returned with unknown"
-                                                  " errno %d", rsp.op_errno);
-                                        break;
-                        }
-                        gf_log ("cli", GF_LOG_ERROR,"Detach failed with op_ret "
-                                "%d and op_errno %d", rsp.op_ret, rsp.op_errno);
                 }
         } else {
                 snprintf (msg, sizeof (msg), "success");
@@ -295,21 +198,128 @@ out:
 }
 
 int
-gf_cli_list_friends_cbk (struct rpc_req *req, struct iovec *iov,
-                             int count, void *myframe)
+gf_cli_output_peer_status (dict_t *dict, int count)
 {
-        gf1_cli_peer_list_rsp      rsp   = {0,};
         int                        ret   = -1;
-        dict_t                     *dict = NULL;
         char                       *uuid_buf = NULL;
         char                       *hostname_buf = NULL;
         int32_t                    i = 1;
         char                       key[256] = {0,};
         char                       *state = NULL;
-        int32_t                    port = 0;
         int32_t                    connected = 0;
         char                       *connected_str = NULL;
+
+        cli_out ("Number of Peers: %d", count);
+        i = 1;
+        while ( i <= count) {
+                snprintf (key, 256, "friend%d.uuid", i);
+                ret = dict_get_str (dict, key, &uuid_buf);
+                if (ret)
+                        goto out;
+
+                snprintf (key, 256, "friend%d.hostname", i);
+                ret = dict_get_str (dict, key, &hostname_buf);
+                if (ret)
+                        goto out;
+
+                snprintf (key, 256, "friend%d.connected", i);
+                ret = dict_get_int32 (dict, key, &connected);
+                if (ret)
+                        goto out;
+                if (connected)
+                        connected_str = "Connected";
+                else
+                        connected_str = "Disconnected";
+
+
+                snprintf (key, 256, "friend%d.state", i);
+                ret = dict_get_str (dict, key, &state);
+                if (ret)
+                        goto out;
+
+                cli_out ("\nHostname: %s\nUuid: %s\nState: %s (%s)",
+                         hostname_buf, uuid_buf, state, connected_str);
+                i++;
+        }
+
+        ret = 0;
+out:
+        return ret;
+}
+
+int
+gf_cli_output_pool_list (dict_t *dict, int count)
+{
+        int                        ret   = -1;
+        char                       *uuid_buf = NULL;
+        char                       *hostname_buf = NULL;
+        int32_t                    i = 1;
+        char                       key[256] = {0,};
+        int32_t                    connected = 0;
+        char                       *connected_str = NULL;
+
+        if (count >= 1)
+                cli_out ("UUID\t\t\t\t\tHostname\tState");
+
+        while ( i <= count) {
+                snprintf (key, 256, "friend%d.uuid", i);
+                ret = dict_get_str (dict, key, &uuid_buf);
+                if (ret)
+                        goto out;
+
+                snprintf (key, 256, "friend%d.hostname", i);
+                ret = dict_get_str (dict, key, &hostname_buf);
+                if (ret)
+                        goto out;
+
+                snprintf (key, 256, "friend%d.connected", i);
+                ret = dict_get_int32 (dict, key, &connected);
+                if (ret)
+                        goto out;
+                if (connected)
+                        connected_str = "Connected";
+                else
+                        connected_str = "Disconnected";
+
+                cli_out ("%s\t%s\t%s ", uuid_buf, hostname_buf,
+                         connected_str);
+                i++;
+        }
+
+        ret = 0;
+out:
+        return ret;
+}
+
+/* function pointer for gf_cli_output_{pool_list,peer_status} */
+typedef int (*cli_friend_output_fn) (dict_t*, int);
+
+int
+gf_cli_list_friends_cbk (struct rpc_req *req, struct iovec *iov,
+                             int count, void *myframe)
+{
+        gf1_cli_peer_list_rsp      rsp   = {0,};
+        int                        ret   = -1;
+        dict_t                    *dict = NULL;
         char                       msg[1024] = {0,};
+        char                      *cmd = NULL;
+        cli_friend_output_fn       friend_output_fn;
+        call_frame_t              *frame = NULL;
+        unsigned long              flags = 0;
+
+        frame = myframe;
+        flags = (long)frame->local;
+
+        if (flags == GF_CLI_LIST_POOL_NODES) {
+                cmd = "pool list";
+                friend_output_fn = &gf_cli_output_pool_list;
+        } else {
+                cmd = "peer status";
+                friend_output_fn = &gf_cli_output_peer_status;
+        }
+
+        /* 'free' the flags set by gf_cli_list_friends */
+        frame->local = NULL;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -324,7 +334,7 @@ gf_cli_list_friends_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
         }
 
-        gf_log ("cli", GF_LOG_INFO, "Received resp to list: %d",
+        gf_log ("cli", GF_LOG_DEBUG, "Received resp to list: %d",
                 rsp.op_ret);
 
         ret = rsp.op_ret;
@@ -333,7 +343,7 @@ gf_cli_list_friends_cbk (struct rpc_req *req, struct iovec *iov,
 
                 if (!rsp.friends.friends_len) {
                         snprintf (msg, sizeof (msg),
-                                  "peer status: No peers present");
+                                  "%s: No peers present", cmd);
                         if (global_state->mode & GLUSTER_MODE_XML) {
                                 ret = cli_xml_output_peer_status (dict,
                                                                   rsp.op_ret,
@@ -380,49 +390,9 @@ gf_cli_list_friends_cbk (struct rpc_req *req, struct iovec *iov,
                         goto out;
                 }
 
-                cli_out ("Number of Peers: %d", count);
-                i = 1;
-                while ( i <= count) {
-                        snprintf (key, 256, "friend%d.uuid", i);
-                        ret = dict_get_str (dict, key, &uuid_buf);
-                        if (ret)
-                                goto out;
-
-                        snprintf (key, 256, "friend%d.hostname", i);
-                        ret = dict_get_str (dict, key, &hostname_buf);
-                        if (ret)
-                                goto out;
-
-                        snprintf (key, 256, "friend%d.connected", i);
-                        ret = dict_get_int32 (dict, key, &connected);
-                        if (ret)
-                                goto out;
-                        if (connected)
-                                connected_str = "Connected";
-                        else
-                                connected_str = "Disconnected";
-
-                        snprintf (key, 256, "friend%d.port", i);
-                        ret = dict_get_int32 (dict, key, &port);
-                        if (ret)
-                                goto out;
-
-                        snprintf (key, 256, "friend%d.state", i);
-                        ret = dict_get_str (dict, key, &state);
-                        if (ret)
-                                goto out;
-
-                        if (!port) {
-                                cli_out ("\nHostname: %s\nUuid: %s\nState: %s "
-                                         "(%s)",
-                                         hostname_buf, uuid_buf, state,
-                                         connected_str);
-                        } else {
-                                cli_out ("\nHostname: %s\nPort: %d\nUuid: %s\n"
-                                         "State: %s (%s)", hostname_buf, port,
-                                         uuid_buf, state, connected_str);
-                        }
-                        i++;
+                ret = friend_output_fn (dict, count);
+                if (ret) {
+                        goto out;
                 }
         } else {
                 if (global_state->mode & GLUSTER_MODE_XML) {
@@ -443,7 +413,7 @@ gf_cli_list_friends_cbk (struct rpc_req *req, struct iovec *iov,
 out:
         cli_cmd_broadcast_response (ret);
         if (ret)
-                cli_err ("peer status: failed");
+                cli_err ("%s: failed", cmd);
 
         if (dict)
                 dict_destroy (dict);
@@ -926,6 +896,88 @@ out:
 }
 
 int
+gf_cli3_1_uuid_get_cbk (struct rpc_req *req, struct iovec *iov,
+                        int count, void *myframe)
+{
+        char                    *uuid_str = NULL;
+        gf_cli_rsp              rsp   = {0,};
+        int                     ret   = -1;
+        cli_local_t             *local = NULL;
+        call_frame_t            *frame = NULL;
+        dict_t                  *dict = NULL;
+
+        if (-1 == req->rpc_status)
+                goto out;
+
+        frame = myframe;
+
+        ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gf_cli_rsp);
+        if (ret < 0) {
+                gf_log (frame->this->name, GF_LOG_ERROR,
+                        "Failed to decode xdr response");
+                goto out;
+        }
+
+        local = frame->local;
+        frame->local = NULL;
+
+        gf_log ("cli", GF_LOG_INFO, "Received resp to uuid get");
+
+        dict = dict_new ();
+        if (!dict) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = dict_unserialize (rsp.dict.dict_val, rsp.dict.dict_len,
+                                &dict);
+        if (ret) {
+                gf_log ("cli", GF_LOG_ERROR, "Failed to unserialize "
+                        "response for uuid get");
+                goto out;
+        }
+
+        ret = dict_get_str (dict, "uuid", &uuid_str);
+        if (ret) {
+                gf_log ("cli", GF_LOG_ERROR, "Failed to get uuid "
+                        "from dictionary");
+                goto out;
+        }
+
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_dict ("uuidGenerate", dict, rsp.op_ret,
+                                           rsp.op_errno, rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (rsp.op_ret) {
+                if (strcmp (rsp.op_errstr, "") == 0)
+                        cli_err ("Get uuid was unsuccessful");
+                else
+                        cli_err ("%s", rsp.op_errstr);
+
+        } else {
+                cli_out ("UUID: %s", uuid_str);
+
+        }
+        ret = rsp.op_ret;
+
+out:
+        cli_cmd_broadcast_response (ret);
+        cli_local_wipe (local);
+        if (rsp.dict.dict_val)
+                free (rsp.dict.dict_val);
+        if (dict)
+                dict_unref (dict);
+
+        gf_log ("", GF_LOG_DEBUG, "Returning with %d", ret);
+        return ret;
+}
+
+int
 gf_cli3_1_uuid_reset_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
@@ -1161,6 +1213,7 @@ gf_cli_defrag_volume_cbk (struct rpc_req *req, struct iovec *iov,
         char                     key[256] = {0,};
         int32_t                  i = 1;
         uint64_t                 failures = 0;
+        uint64_t                 skipped = 0;
         double                   elapsed = 0;
         char                    *size_str = NULL;
         char                    *task_id_str = NULL;
@@ -1281,11 +1334,12 @@ gf_cli_defrag_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
         }
 
-        cli_out ("%40s %16s %13s %13s %13s %14s %s", "Node", "Rebalanced-files",
-                 "size", "scanned", "failures", "status", "run time in secs");
-        cli_out ("%40s %16s %13s %13s %13s %14s %16s", "---------",
+        cli_out ("%40s %16s %13s %13s %13s %13s %14s %s", "Node",
+                 "Rebalanced-files", "size", "scanned", "failures", "skipped",
+                 "status", "run time in secs");
+        cli_out ("%40s %16s %13s %13s %13s %13s %14s %16s", "---------",
                  "-----------", "-----------", "-----------", "-----------",
-                 "------------", "--------------");
+                 "-----------", "------------", "--------------");
         do {
                 snprintf (key, 256, "node-uuid-%d", i);
                 ret = dict_get_str (dict, key, &node_uuid);
@@ -1329,34 +1383,23 @@ gf_cli_defrag_volume_cbk (struct rpc_req *req, struct iovec *iov,
                                 "failed to get failures count");
 
                 memset (key, 0, 256);
+                snprintf (key, 256, "skipped-%d", i);
+                ret = dict_get_uint64 (dict, key, &skipped);
+                if (ret)
+                        gf_log (frame->this->name, GF_LOG_TRACE,
+                                "failed to get skipped count");
+                memset (key, 0, 256);
                 snprintf (key, 256, "run-time-%d", i);
                 ret = dict_get_double (dict, key, &elapsed);
                 if (ret)
                         gf_log (frame->this->name, GF_LOG_TRACE,
                                 "failed to get run-time");
 
-                switch (status_rcd) {
-                case GF_DEFRAG_STATUS_NOT_STARTED:
-                        status = "not started";
-                        break;
-                case GF_DEFRAG_STATUS_STARTED:
-                        status = "in progress";
-                        break;
-                case GF_DEFRAG_STATUS_STOPPED:
-                        status = "stopped";
-                        break;
-                case GF_DEFRAG_STATUS_COMPLETE:
-                        status = "completed";
-                        break;
-                case GF_DEFRAG_STATUS_FAILED:
-                        status = "failed";
-                        break;
-                }
-
+                status = cli_vol_task_status_str[status_rcd];
                 size_str = gf_uint64_2human_readable(size);
                 cli_out ("%40s %16"PRIu64 " %13s" " %13"PRIu64 " %13"PRIu64
-                         " %14s %16.2f", node_uuid, files, size_str, lookup,
-                         failures, status, elapsed);
+                         " %13"PRIu64 " %14s %16.2f", node_uuid, files,
+                         size_str, lookup, failures, skipped, status, elapsed);
                 GF_FREE(size_str);
 
                 i++;
@@ -1496,6 +1539,8 @@ is_server_debug_xlator (void *myframe)
                 key = *words;
                 words++;
                 value = *words;
+                if (value == NULL)
+                        break;
                 if (strstr (value, "client")) {
                         words++;
                         continue;
@@ -1670,6 +1715,7 @@ gf_cli3_remove_brick_status_cbk (struct rpc_req *req, struct iovec *iov,
         char                    *node_uuid = 0;
         gf_defrag_status_t       status_rcd = GF_DEFRAG_STATUS_NOT_STARTED;
         uint64_t                 failures = 0;
+        uint64_t                 skipped = 0;
         double                   elapsed = 0;
         char                    *size_str = NULL;
         int32_t                  command = 0;
@@ -1770,11 +1816,12 @@ xml_output:
         }
 
 
-        cli_out ("%40s %16s %13s %13s %13s %14s %s", "Node", "Rebalanced-files",
-                 "size", "scanned", "failures", "status", "run-time in secs");
-        cli_out ("%40s %16s %13s %13s %13s %14s %16s", "---------",
+        cli_out ("%40s %16s %13s %13s %13s %13s %14s %s", "Node",
+                 "Rebalanced-files", "size", "scanned", "failures", "skipped",
+                 "status", "run-time in secs");
+        cli_out ("%40s %16s %13s %13s %13s %13s %14s %16s", "---------",
                  "-----------", "-----------", "-----------", "-----------",
-                 "------------", "--------------");
+                  "-----------","------------", "--------------");
 
         do {
                 snprintf (key, 256, "node-uuid-%d", i);
@@ -1817,6 +1864,11 @@ xml_output:
                         gf_log (frame->this->name, GF_LOG_TRACE,
                                 "Failed to get failure on files");
 
+                snprintf (key, 256, "failures-%d", i);
+                ret = dict_get_uint64 (dict, key, &skipped);
+                if (ret)
+                        gf_log (frame->this->name, GF_LOG_TRACE,
+                                "Failed to get skipped files");
                 memset (key, 0, 256);
                 snprintf (key, 256, "run-time-%d", i);
                 ret = dict_get_double (dict, key, &elapsed);
@@ -1843,9 +1895,13 @@ xml_output:
                 }
 
                 size_str = gf_uint64_2human_readable(size);
-                cli_out ("%40s %16"PRIu64 " %13s" " %13"PRIu64 " %13"PRIu64
-                         " %14s %16.2f", node_uuid, files, size_str, lookup,
-                         failures, status, elapsed);
+                
+		if (strcmp (status, "not started")) {
+			cli_out ("%40s %16"PRIu64 " %13s" " %13"PRIu64 " %13"
+				PRIu64 " %13"PRIu64 " %14s %16.2f", node_uuid,
+                                files, size_str, lookup, failures, skipped,
+                                status, elapsed);
+		}
                 GF_FREE(size_str);
 
                 i++;
@@ -1927,7 +1983,6 @@ gf_cli_remove_brick_cbk (struct rpc_req *req, struct iovec *iov,
                 if (ret) {
                         gf_log ("cli", GF_LOG_ERROR,
                                 "remove-brick-id is not present in dict");
-                        goto out;
                 }
                 break;
         case GF_OP_CMD_COMMIT:
@@ -1952,7 +2007,7 @@ gf_cli_remove_brick_cbk (struct rpc_req *req, struct iovec *iov,
         if (global_state->mode & GLUSTER_MODE_XML) {
                 ret = cli_xml_output_vol_remove_brick (_gf_false, rsp_dict,
                                                        rsp.op_ret, rsp.op_errno,
-                                                       rsp.op_errstr);
+                                                       msg);
                 if (ret)
                         gf_log ("cli", GF_LOG_ERROR,
                                 "Error outputting to xml");
@@ -1961,10 +2016,10 @@ gf_cli_remove_brick_cbk (struct rpc_req *req, struct iovec *iov,
 
         if (rsp.op_ret) {
                 cli_err ("volume remove-brick %s: failed: %s", cmd_str,
-                         rsp.op_errstr);
+                         msg);
         } else {
                 cli_out ("volume remove-brick %s: success", cmd_str);
-                if (GF_OP_CMD_START == cmd)
+                if (GF_OP_CMD_START == cmd && task_id_str != NULL)
                         cli_out ("ID: %s", task_id_str);
         }
 
@@ -2599,10 +2654,9 @@ int32_t
 gf_cli_probe (call_frame_t *frame, xlator_t *this,
                  void *data)
 {
-        gf1_cli_probe_req  req      = {0,};
+        gf_cli_req         req      = {{0,},};
         int                ret      = 0;
         dict_t            *dict     = NULL;
-        char              *hostname = NULL;
         int                port     = 0;
 
         if (!frame || !this ||  !data) {
@@ -2611,24 +2665,22 @@ gf_cli_probe (call_frame_t *frame, xlator_t *this,
         }
 
         dict = data;
-        ret = dict_get_str (dict, "hostname", &hostname);
-        if (ret)
-                goto out;
 
         ret = dict_get_int32 (dict, "port", &port);
-        if (ret)
-                port = CLI_GLUSTERD_PORT;
+        if (ret) {
+                ret = dict_set_int32 (dict, "port", CLI_GLUSTERD_PORT);
+                if (ret)
+                        goto out;
+        }
 
-        req.hostname = hostname;
-        req.port     = port;
-
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_PROBE, NULL,
-                              this, gf_cli_probe_cbk,
-                              (xdrproc_t)xdr_gf1_cli_probe_req);
+        ret = cli_to_glusterd (&req, frame, gf_cli_probe_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_PROBE, this, cli_rpc_prog, NULL);
 
 out:
+        GF_FREE (req.dict.dict_val);
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
+
         return ret;
 }
 
@@ -2636,10 +2688,9 @@ int32_t
 gf_cli_deprobe (call_frame_t *frame, xlator_t *this,
                    void *data)
 {
-        gf1_cli_deprobe_req  req      = {0,};
+        gf_cli_req           req      = {{0,},};
         int                  ret      = 0;
         dict_t              *dict     = NULL;
-        char                *hostname = NULL;
         int                  port     = 0;
         int                  flags    = 0;
 
@@ -2649,51 +2700,64 @@ gf_cli_deprobe (call_frame_t *frame, xlator_t *this,
         }
 
         dict = data;
-        ret = dict_get_str (dict, "hostname", &hostname);
-        if (ret)
-                goto out;
-
         ret = dict_get_int32 (dict, "port", &port);
-        if (ret)
-                port = CLI_GLUSTERD_PORT;
+        if (ret) {
+                ret = dict_set_int32 (dict, "port", CLI_GLUSTERD_PORT);
+                if (ret)
+                        goto out;
+        }
 
         ret = dict_get_int32 (dict, "flags", &flags);
-        if (ret)
-                flags = 0;
+        if (ret) {
+                ret = dict_set_int32 (dict, "flags", 0);
+                if (ret)
+                        goto out;
+        }
 
-        req.hostname = hostname;
-        req.port     = port;
-        req.flags    = flags;
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_DEPROBE, NULL,
-                              this, gf_cli_deprobe_cbk,
-                              (xdrproc_t)xdr_gf1_cli_deprobe_req);
+        ret = cli_to_glusterd (&req, frame, gf_cli_deprobe_cbk,
+                               (xdrproc_t)xdr_gf_cli_req, dict,
+                              GLUSTER_CLI_DEPROBE, this, cli_rpc_prog, NULL);
 
 out:
+        GF_FREE (req.dict.dict_val);
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
+
         return ret;
 }
 
 int32_t
 gf_cli_list_friends (call_frame_t *frame, xlator_t *this,
-                        void *data)
+                     void *data)
 {
         gf1_cli_peer_list_req   req = {0,};
         int                     ret = 0;
+        unsigned long           flags = 0;
 
         if (!frame || !this) {
                 ret = -1;
                 goto out;
         }
 
-        req.flags = GF_CLI_LIST_ALL;
+        GF_ASSERT (frame->local == NULL);
 
+        flags = (long)data;
+        req.flags = flags;
+        frame->local = (void*)flags;
         ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
                               GLUSTER_CLI_LIST_FRIENDS, NULL,
                               this, gf_cli_list_friends_cbk,
                               (xdrproc_t) xdr_gf1_cli_peer_list_req);
 
 out:
+        if (ret) {
+                /*
+                 * If everything goes fine, gf_cli_list_friends_cbk()
+                 * [invoked through cli_cmd_submit()]resets the
+                 * frame->local to NULL. In case cli_cmd_submit()
+                 * fails in between, RESET frame->local here.
+                 */
+                frame->local = NULL;
+        }
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
@@ -2804,6 +2868,29 @@ out:
 
         GF_FREE (req.dict.dict_val);
 
+        gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
+        return ret;
+}
+
+int32_t
+gf_cli3_1_uuid_get (call_frame_t *frame, xlator_t *this,
+                      void *data)
+{
+        gf_cli_req                      req = {{0,}};
+        int                             ret = 0;
+        dict_t                          *dict = NULL;
+
+        if (!frame || !this || !data) {
+                ret = -1;
+                goto out;
+        }
+
+        dict = data;
+        ret = cli_to_glusterd (&req, frame, gf_cli3_1_uuid_get_cbk,
+                               (xdrproc_t)xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_UUID_GET, this, cli_rpc_prog,
+                               NULL);
+out:
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
@@ -2950,10 +3037,10 @@ gf_cli_bd_op (call_frame_t *frame, xlator_t *this,
                                            &req.dict.dict_len);
 
 
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_BD_OP, NULL,
-                              this, gf_cli_bd_op_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
+        ret = cli_to_glusterd (&req, frame, gf_cli_bd_op_cbk,
+                               (xdrproc_t)xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_BD_OP, this, cli_rpc_prog,
+                               NULL);
 
 out:
         if (dict)
@@ -3434,6 +3521,7 @@ gf_cli_getspec (call_frame_t *frame, xlator_t *this,
         gf_getspec_req          req = {0,};
         int                     ret = 0;
         dict_t                  *dict = NULL;
+        dict_t                  *op_dict = NULL;
 
         if (!frame || !this ||  !data) {
                 ret = -1;
@@ -3446,12 +3534,45 @@ gf_cli_getspec (call_frame_t *frame, xlator_t *this,
         if (ret)
                 goto out;
 
+        op_dict = dict_new ();
+        if (!dict) {
+                ret = -1;
+                goto out;
+        }
+
+        // Set the supported min and max op-versions, so glusterd can make a
+        // decision
+        ret = dict_set_int32 (op_dict, "min-op-version", GD_OP_VERSION_MIN);
+        if (ret) {
+                gf_log (THIS->name, GF_LOG_ERROR, "Failed to set min-op-version"
+                        " in request dict");
+                goto out;
+        }
+
+        ret = dict_set_int32 (op_dict, "max-op-version", GD_OP_VERSION_MAX);
+        if (ret) {
+                gf_log (THIS->name, GF_LOG_ERROR, "Failed to set max-op-version"
+                        " in request dict");
+                goto out;
+        }
+
+        ret = dict_allocate_and_serialize (op_dict, &req.xdata.xdata_val,
+                                           &req.xdata.xdata_len);
+        if (ret < 0) {
+                gf_log (THIS->name, GF_LOG_ERROR,
+                        "Failed to serialize dictionary");
+                goto out;
+        }
+
         ret = cli_cmd_submit (&req, frame, &cli_handshake_prog,
                               GF_HNDSK_GETSPEC, NULL,
                               this, gf_cli_getspec_cbk,
                               (xdrproc_t) xdr_gf_getspec_req);
 
 out:
+        if (op_dict) {
+                dict_unref(op_dict);
+        }
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
 
         return ret;
@@ -3633,8 +3754,11 @@ gf_cli_gsync_config_command (dict_t *dict)
         char *subop         = NULL;
         char *gwd           = NULL;
         char *slave         = NULL;
+        char *confpath      = NULL;
         char *master        = NULL;
         char *op_name       = NULL;
+        int   ret           = -1;
+        char  conf_path[PATH_MAX] = "";
 
         if (dict_get_str (dict, "subop", &subop) != 0)
                 return -1;
@@ -3653,9 +3777,17 @@ gf_cli_gsync_config_command (dict_t *dict)
         if (dict_get_str (dict, "op_name", &op_name) != 0)
                 op_name = NULL;
 
+        ret = dict_get_str (dict, "conf_path", &confpath);
+        if (!confpath) {
+                ret = snprintf (conf_path, sizeof(conf_path) - 1,
+                                "%s/"GEOREP"/gsyncd_template.conf", gwd);
+                conf_path[ret] = '\0';
+                confpath = conf_path;
+        }
+
         runinit (&runner);
         runner_add_args (&runner, GSYNCD_PREFIX"/gsyncd", "-c", NULL);
-        runner_argprintf (&runner, "%s/"GSYNC_CONF, gwd);
+        runner_argprintf (&runner, "%s", confpath);
         if (master)
                 runner_argprintf (&runner, ":%s", master);
         runner_add_arg (&runner, slave);
@@ -3667,67 +3799,639 @@ gf_cli_gsync_config_command (dict_t *dict)
 }
 
 int
-gf_cli_gsync_out_status (dict_t *dict)
+gf_cli_fetch_gsyncd_status_values (char *status,
+                                   gf_cli_gsync_status_t *sts_val)
 {
-        int   gsync_count              = 0;
-        int   i                        = 0;
-        int   ret                      = 0;
-        char             mst[PATH_MAX] = {0, };
-        char             slv[PATH_MAX] = {0, };
-        char             sts[PATH_MAX] = {0, };
-        char             nds[PATH_MAX] = {0, };
-        char             hyphens[100]  = {0, };
-        char *mst_val                  = NULL;
-        char *slv_val                  = NULL;
-        char *sts_val                  = NULL;
-        char *nds_val                  = NULL;
+        int32_t   ret      = -1;
+        char     *tmp      = NULL;
+        char     *save_ptr = NULL;
+        char     *key      = NULL;
+        char     *value    = NULL;
 
-        cli_out ("%-20s %-20s %-50s %-10s", "NODE", "MASTER", "SLAVE", "STATUS");
+        if (!status || !sts_val) {
+                gf_log ("", GF_LOG_ERROR, "status or sts_val is null");
+                goto out;
+        }
 
-        for (i=0; i<sizeof(hyphens)-1; i++)
-                hyphens[i] = '-';
+        tmp = strtok_r (status, "\n", &save_ptr);
 
+        if (tmp)
+                sts_val->health = gf_strdup (tmp);
+
+        while (tmp) {
+                key = strtok_r (tmp, "=", &value);
+
+                if ((key) && (!strcmp(key, "Uptime")))
+                        sts_val->uptime = gf_strdup (value);
+
+                if ((key) && (!strcmp(key, "FilesSyncd")))
+                        sts_val->files_syncd = gf_strdup (value);
+
+                if ((key) && (!strcmp(key, "FilesPending")))
+                        sts_val->files_pending = gf_strdup (value);
+
+                if ((key) && (!strcmp(key, "BytesPending"))) {
+                        value = gf_uint64_2human_readable(atol(value));
+                        sts_val->bytes_pending = gf_strdup (value);
+                }
+
+                if ((key) && (!strcmp(key, "DeletesPending")))
+                        sts_val->deletes_pending = gf_strdup (value);
+
+                tmp = strtok_r (NULL, ";", &save_ptr);
+        }
+
+        if (sts_val->health)
+                ret = 0;
+
+        if (!sts_val->uptime)
+                sts_val->uptime = gf_strdup ("N/A");
+
+        if (!sts_val->files_syncd)
+                sts_val->files_syncd = gf_strdup ("N/A");
+
+        if (!sts_val->files_pending)
+                sts_val->files_pending = gf_strdup ("N/A");
+
+        if (!sts_val->bytes_pending)
+                sts_val->bytes_pending = gf_strdup ("N/A");
+
+        if (!sts_val->deletes_pending)
+                sts_val->deletes_pending = gf_strdup ("N/A");
+
+out:
+        gf_log ("", GF_LOG_DEBUG, "Returning %d.", ret);
+        return ret;
+}
+
+char*
+get_struct_variable (int mem_num, gf_cli_gsync_status_t *sts_val)
+{
+        switch (mem_num) {
+        case 0: return (sts_val->node);
+        case 1: return (sts_val->master);
+        case 2: return (sts_val->slave);
+        case 3: return (sts_val->health);
+        case 4: return (sts_val->uptime);
+        case 5: return (sts_val->files_syncd);
+        case 6: return (sts_val->files_pending);
+        case 7: return (sts_val->bytes_pending);
+        case 8: return (sts_val->deletes_pending);
+        default:
+                 goto out;
+        }
+
+out:
+        return NULL;
+}
+
+int
+gf_cli_print_status (char **title_values,
+                     gf_cli_gsync_status_t **sts_vals,
+                     int *spacing, int gsync_count,
+                     int number_of_fields, int is_detail)
+{
+        int     indents                  = 0;
+        int     i                        = 0;
+        int     j                        = 0;
+        int     ret                      = 0;
+        int     total_spacing            = 0;
+        char  **output_values            = NULL;
+        char   *tmp                      = NULL;
+        char   *hyphens                  = NULL;
+        char    heading[PATH_MAX]        = {0, };
+        char    indent_spaces[PATH_MAX]  = {0, };
+
+        /* calculating spacing for hyphens */
+        for (i = 0; i < number_of_fields; i++) {
+                /* Suppressing master and slave output for status detail */
+                if ((is_detail) && ((i == 1) || (i == 2))) {
+                        total_spacing++;
+                        continue;
+                } else if ((!is_detail) && (i > 4)) {
+                       /* Suppressing detailed output for
+                        * status */
+                        continue;
+                }
+                spacing[i] += 3; /* Adding extra space to
+                                    distinguish between fields */
+                total_spacing += spacing[i];
+        }
+        total_spacing += 4; /* For the spacing between the fields */
+
+        /* char pointers for each field */
+        output_values = GF_CALLOC (number_of_fields, sizeof (char *),
+                                   gf_common_mt_char);
+        if (!output_values) {
+                ret = -1;
+                goto out;
+        }
+        for (i = 0; i < number_of_fields; i++) {
+                output_values[i] = GF_CALLOC (spacing[i] + 1, sizeof (char),
+                                              gf_common_mt_char);
+                if (!output_values[i]) {
+                        ret = -1;
+                        goto out;
+                }
+        }
+
+        hyphens = GF_CALLOC (total_spacing + 1, sizeof (char),
+                             gf_common_mt_char);
+        if (!hyphens) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = snprintf(heading, sizeof(heading), "MASTER: %s  SLAVE: %s",
+                       sts_vals[0]->master, sts_vals[0]->slave);
+        if (ret) {
+                if (ret < sizeof(heading))
+                        heading[ret] = '\0';
+                else
+                        heading[sizeof(heading) - 1] = '\0';
+                ret = 0;
+        } else {
+                ret = -1;
+                goto out;
+        }
+
+        if (is_detail) {
+                cli_out (" ");
+                if (strlen(heading) > total_spacing)
+                        cli_out ("%s", heading);
+                else {
+                        /* Printing the heading with centre justification */
+                        indents = (total_spacing - strlen(heading)) / 2;
+                        memset (indent_spaces, ' ', indents);
+                        indent_spaces[indents] = '\0';
+                        ret = snprintf (hyphens, total_spacing, "%s%s",
+                                        indent_spaces, heading);
+                        if (ret) {
+                                hyphens[ret] = '\0';
+                                cli_out ("%s", hyphens);
+                                ret = 0;
+                        } else {
+                                ret = -1;
+                                goto out;
+                        }
+                }
+                cli_out (" ");
+        }
+
+        /* setting the title "NODE", "MASTER", etc. from title_values[]
+           and printing the same */
+        for (j = 0; j < number_of_fields; j++) {
+                /* Suppressing master and slave output for status detail */
+                if ((is_detail) && ((j == 1) || (j == 2))) {
+                        output_values[j][0] = '\0';
+                        continue;
+                } else if ((!is_detail) && (j > 4)) {
+                       /* Suppressing detailed output for
+                        * status */
+                       output_values[j][0] = '\0';
+                        continue;
+                }
+                memset (output_values[j], ' ', spacing[j]);
+                memcpy (output_values[j], title_values[j],
+                        strlen(title_values[j]));
+                output_values[j][spacing[j]] = '\0';
+        }
+        cli_out ("%s %s %s %s %s %s %s %s %s", output_values[0],
+                 output_values[1], output_values[2], output_values[3],
+                 output_values[4], output_values[5], output_values[6],
+                 output_values[7], output_values[8]);
+
+        /* setting and printing the hyphens */
+        memset (hyphens, '-', total_spacing);
+        hyphens[total_spacing] = '\0';
         cli_out ("%s", hyphens);
 
+        for (i = 0; i < gsync_count; i++) {
+                for (j = 0; j < number_of_fields; j++) {
+                        /* Suppressing master and slave output for
+                         * status detail */
+                        if ((is_detail) && ((j == 1) || (j == 2))) {
+                                output_values[j][0] = '\0';
+                                continue;
+                        }  else if ((!is_detail) && (j > 4)) {
+                                /* Suppressing detailed output for
+                                 * status */
+                                output_values[j][0] = '\0';
+                                continue;
+                        }
+                        tmp = get_struct_variable(j, sts_vals[i]);
+                        if (!tmp) {
+                                gf_log ("", GF_LOG_ERROR,
+                                        "struct member empty.");
+                                ret = -1;
+                                goto out;
+                        }
+                        memset (output_values[j], ' ', spacing[j]);
+                        memcpy (output_values[j], tmp, strlen (tmp));
+                        output_values[j][spacing[j]] = '\0';
+                }
 
+                cli_out ("%s %s %s %s %s %s %s %s %s", output_values[0],
+                         output_values[1], output_values[2], output_values[3],
+                         output_values[4], output_values[5], output_values[6],
+                         output_values[7], output_values[8]);
+        }
+
+out:
+        if (output_values) {
+                for (i = 0; i < number_of_fields; i++) {
+                        if (output_values[i])
+                                GF_FREE (output_values[i]);
+                }
+                GF_FREE (output_values);
+        }
+
+        if (hyphens)
+                GF_FREE (hyphens);
+
+        return ret;
+}
+
+int
+gf_cli_read_status_data (dict_t *dict,
+                         gf_cli_gsync_status_t **sts_vals,
+                         int *spacing, int gsync_count,
+                         int number_of_fields)
+{
+        int     ret            = 0;
+        int     i              = 0;
+        int     j              = 0;
+        char    mst[PATH_MAX]  = {0, };
+        char    slv[PATH_MAX]  = {0, };
+        char    sts[PATH_MAX]  = {0, };
+        char    nds[PATH_MAX]  = {0, };
+        char   *status         = NULL;
+        char   *tmp            = NULL;
+
+        /* Storing per node status info in each object */
+        for (i = 0; i < gsync_count; i++) {
+                snprintf (nds, sizeof(nds), "node%d", i + 1);
+                snprintf (mst, sizeof(mst), "master%d", i + 1);
+                snprintf (slv, sizeof(slv), "slave%d", i + 1);
+                snprintf (sts, sizeof(sts), "status%d", i + 1);
+
+                /* Fetching the values from dict, and calculating
+                   the max length for each field */
+                ret = dict_get_str (dict, nds, &(sts_vals[i]->node));
+                if (ret)
+                        goto out;
+
+                ret = dict_get_str (dict, mst, &(sts_vals[i]->master));
+                if (ret)
+                        goto out;
+
+                ret = dict_get_str (dict, slv, &(sts_vals[i]->slave));
+                if (ret)
+                        goto out;
+
+                ret = dict_get_str (dict, sts, &status);
+                if (ret)
+                        goto out;
+
+                /* Fetching health and uptime from sts_val */
+                ret = gf_cli_fetch_gsyncd_status_values (status, sts_vals[i]);
+                if (ret)
+                        goto out;
+
+                for (j = 0; j < number_of_fields; j++) {
+                        tmp = get_struct_variable(j, sts_vals[i]);
+                        if (!tmp) {
+                                gf_log ("", GF_LOG_ERROR,
+                                        "struct member empty.");
+                                ret = -1;
+                                goto out;
+                        }
+                        if (strlen (tmp) > spacing[j])
+                                spacing[j] = strlen (tmp);
+                }
+        }
+
+out:
+        return ret;
+}
+
+int
+gf_cli_gsync_status_output (dict_t *dict, int status_detail)
+{
+        int                     gsync_count    = 0;
+        int                     i              = 0;
+        int                     j              = 0;
+        int                     ret            = 0;
+        int                     spacing[10]    = {0};
+        int                     num_of_fields  = 9;
+        char                    errmsg[1024]   = "";
+        char                   *master         = NULL;
+        char                   *slave          = NULL;
+        char                   *tmp            = NULL;
+        char                   *title_values[] = {"NODE", "MASTER", "SLAVE",
+                                                  "HEALTH", "UPTIME",
+                                                  "FILES SYNCD",
+                                                  "FILES PENDING",
+                                                  "BYTES PENDING",
+                                                  "DELETES PENDING"};
+        gf_cli_gsync_status_t **sts_vals = NULL;
+
+        /* Checks if any session is active or not */
         ret = dict_get_int32 (dict, "gsync-count", &gsync_count);
         if (ret) {
-                gf_log ("cli", GF_LOG_INFO, "No active geo-replication sessions"
-                        "present for the selected");
+                ret = dict_get_str (dict, "master", &master);
+
+                ret = dict_get_str (dict, "slave", &slave);
+
+                if (master) {
+                        if (slave)
+                                snprintf (errmsg, sizeof(errmsg), "No active "
+                                          "geo-replication sessions between %s"
+                                          " and %s", master, slave);
+                        else
+                                snprintf (errmsg, sizeof(errmsg), "No active "
+                                          "geo-replication sessions for %s",
+                                          master);
+                } else
+                        snprintf (errmsg, sizeof(errmsg), "No active "
+                                  "geo-replication sessions");
+
+                gf_log ("cli", GF_LOG_INFO, "%s", errmsg);
+                cli_out ("%s", errmsg);
                 ret = 0;
                 goto out;
         }
 
-        for (i = 1; i <= gsync_count; i++) {
-                snprintf (nds, sizeof(nds), "node%d", i);
-                snprintf (mst, sizeof(mst), "master%d", i);
-                snprintf (slv, sizeof(slv), "slave%d", i);
-                snprintf (sts, sizeof(sts), "status%d", i);
+        for (i = 0; i < num_of_fields; i++)
+                spacing[i] = strlen(title_values[i]);
 
-                ret = dict_get_str (dict, nds, &nds_val);
-                if (ret)
+        /* gsync_count = number of nodes reporting output.
+           each sts_val object will store output of each
+           node */
+        sts_vals = GF_CALLOC (gsync_count, sizeof (gf_cli_gsync_status_t *),
+                              gf_common_mt_char);
+        if (!sts_vals) {
+                ret = -1;
+                goto out;
+        }
+        for (i = 0; i < gsync_count; i++) {
+                sts_vals[i] = GF_CALLOC (1, sizeof (gf_cli_gsync_status_t),
+                                         gf_common_mt_char);
+                if (!sts_vals[i]) {
+                        ret = -1;
                         goto out;
-
-                ret = dict_get_str (dict, mst, &mst_val);
-                if (ret)
-                        goto out;
-
-                ret = dict_get_str (dict, slv, &slv_val);
-                if (ret)
-                        goto out;
-
-                ret = dict_get_str (dict, sts, &sts_val);
-                if (ret)
-                        goto out;
-
-                cli_out ("%-20s %-20s %-50s %-10s", nds_val, mst_val,
-                         slv_val, sts_val);
-
+                }
         }
 
- out:
-        return ret;
+        ret = gf_cli_read_status_data (dict, sts_vals, spacing,
+                                       gsync_count, num_of_fields);
+        if (ret) {
+                gf_log ("", GF_LOG_ERROR, "Unable to read status data");
+                goto out;
+        }
 
+        ret = gf_cli_print_status (title_values, sts_vals, spacing, gsync_count,
+                                   num_of_fields, status_detail);
+        if (ret) {
+                gf_log ("", GF_LOG_ERROR, "Unable to print status output");
+                goto out;
+        }
+
+out:
+        if (sts_vals) {
+                for (i = 0; i < gsync_count; i++) {
+                        for (j = 3; j < num_of_fields; j++) {
+                                tmp = get_struct_variable(j, sts_vals[i]);
+                                if (tmp)
+                                        GF_FREE (tmp);
+                        }
+                }
+                GF_FREE (sts_vals);
+        }
+
+        return ret;
+}
+
+static int32_t
+write_contents_to_common_pem_file (dict_t *dict, int output_count)
+{
+        char            *workdir                   = NULL;
+        char             common_pem_file[PATH_MAX] = "";
+        char            *output                    = NULL;
+        char             output_name[PATH_MAX]     = "";
+        int              bytes_writen              = 0;
+        int              fd                        = -1;
+        int              ret                       = -1;
+        int              i                         = -1;
+
+        ret = dict_get_str (dict, "glusterd_workdir", &workdir);
+        if (ret || !workdir) {
+                gf_log ("", GF_LOG_ERROR, "Unable to fetch workdir");
+                ret = -1;
+                goto out;
+        }
+
+        snprintf (common_pem_file, sizeof(common_pem_file),
+                  "%s/geo-replication/common_secret.pem.pub",
+                  workdir);
+
+        unlink (common_pem_file);
+
+        fd = open (common_pem_file, O_WRONLY | O_CREAT, 0600);
+        if (fd == -1) {
+                gf_log ("", GF_LOG_ERROR, "Failed to open %s"
+                        " Error : %s", common_pem_file,
+                        strerror (errno));
+                ret = -1;
+                goto out;
+        }
+
+        for (i = 1; i <= output_count; i++) {
+                memset (output_name, '\0', sizeof (output_name));
+                snprintf (output_name, sizeof (output_name),
+                          "output_%d", i);
+                ret = dict_get_str (dict, output_name, &output);
+                if (ret) {
+                        gf_log ("", GF_LOG_ERROR, "Failed to get %s.",
+                                output_name);
+                        cli_out ("Unable to fetch output.");
+                }
+                if (output) {
+                        bytes_writen = write (fd, output, strlen(output));
+                        if (bytes_writen != strlen(output)) {
+                                gf_log ("", GF_LOG_ERROR, "Failed to write "
+                                        "to %s", common_pem_file);
+                                ret = -1;
+                                goto out;
+                        }
+                        /* Adding the new line character */
+                        bytes_writen = write (fd, "\n", strlen("\n"));
+                        if (bytes_writen != strlen("\n")) {
+                                gf_log ("", GF_LOG_ERROR,
+                                        "Failed to add new line char");
+                                ret = -1;
+                                goto out;
+                        }
+                        output = NULL;
+                }
+        }
+
+        cli_out ("Common secret pub file present at %s", common_pem_file);
+        ret = 0;
+out:
+        if (fd)
+                close (fd);
+
+        gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
+        return ret;
+}
+
+int
+gf_cli_sys_exec_cbk (struct rpc_req *req, struct iovec *iov,
+                     int count, void *myframe)
+{
+        int                     ret     = -1;
+        int                     output_count     = -1;
+        int                     i     = -1;
+        char                   *output  = NULL;
+        char                   *command = NULL;
+        char                    output_name[PATH_MAX] = "";
+        gf_cli_rsp              rsp     = {0, };
+        dict_t                  *dict   = NULL;
+        call_frame_t            *frame  = NULL;
+
+        if (req->rpc_status == -1) {
+                ret = -1;
+                goto out;
+        }
+
+        frame = myframe;
+
+        ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gf_cli_rsp);
+        if (ret < 0) {
+                gf_log (frame->this->name, GF_LOG_ERROR,
+                        "Failed to decode xdr response");
+                goto out;
+       }
+
+        dict = dict_new ();
+
+        if (!dict) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = dict_unserialize (rsp.dict.dict_val, rsp.dict.dict_len, &dict);
+
+        if (ret)
+                goto out;
+
+        if (rsp.op_ret) {
+                cli_err ("%s", rsp.op_errstr ? rsp.op_errstr :
+                         "Command failed.");
+                ret = rsp.op_ret;
+                goto out;
+        }
+
+        ret = dict_get_int32 (dict, "output_count", &output_count);
+        if (ret) {
+                cli_out ("Command executed successfully.");
+                ret = 0;
+                goto out;
+        }
+
+        ret = dict_get_str (dict, "command", &command);
+        if (ret) {
+                gf_log ("", GF_LOG_ERROR,
+                        "Unable to get command from dict");
+                goto out;
+        }
+
+        if (!strcmp (command, "gsec_create")) {
+                ret = write_contents_to_common_pem_file (dict, output_count);
+                if (!ret)
+                        goto out;
+        }
+
+        for (i = 1; i <= output_count; i++) {
+                memset (output_name, '\0', sizeof (output_name));
+                snprintf (output_name, sizeof (output_name),
+                          "output_%d", i);
+                ret = dict_get_str (dict, output_name, &output);
+                if (ret) {
+                        gf_log ("", GF_LOG_ERROR, "Failed to get %s.",
+                                output_name);
+                        cli_out ("Unable to fetch output.");
+                }
+                if (output) {
+                        cli_out ("%s", output);
+                        output = NULL;
+                }
+        }
+
+        ret = 0;
+out:
+        if (dict)
+                dict_unref (dict);
+        cli_cmd_broadcast_response (ret);
+
+        free (rsp.dict.dict_val);
+
+        return ret;
+}
+
+int
+gf_cli_copy_file_cbk (struct rpc_req *req, struct iovec *iov,
+                      int count, void *myframe)
+{
+        int                     ret     = -1;
+        gf_cli_rsp              rsp     = {0, };
+        dict_t                  *dict   = NULL;
+        call_frame_t            *frame  = NULL;
+
+        if (req->rpc_status == -1) {
+                ret = -1;
+                goto out;
+        }
+
+        frame = myframe;
+
+        ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gf_cli_rsp);
+        if (ret < 0) {
+                gf_log (frame->this->name, GF_LOG_ERROR,
+                        "Failed to decode xdr response");
+                goto out;
+       }
+
+        dict = dict_new ();
+
+        if (!dict) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = dict_unserialize (rsp.dict.dict_val, rsp.dict.dict_len, &dict);
+
+       if (ret)
+                goto out;
+
+        if (rsp.op_ret) {
+                cli_err ("%s", rsp.op_errstr ? rsp.op_errstr :
+                         "Copy unsuccessful");
+                ret = rsp.op_ret;
+                goto out;
+        }
+
+        cli_out ("Successfully copied file.");
+
+out:
+        if (dict)
+                dict_unref (dict);
+        cli_cmd_broadcast_response (ret);
+
+        free (rsp.dict.dict_val);
+
+        return ret;
 }
 
 int
@@ -3742,6 +4446,8 @@ gf_cli_gsync_set_cbk (struct rpc_req *req, struct iovec *iov,
         char                    *slave  = NULL;
         int32_t                  type   = 0;
         call_frame_t            *frame  = NULL;
+        gf_boolean_t             status_detail = _gf_false;
+
 
         if (req->rpc_status == -1) {
                 ret = -1;
@@ -3817,8 +4523,30 @@ gf_cli_gsync_set_cbk (struct rpc_req *req, struct iovec *iov,
                 break;
 
                 case GF_GSYNC_OPTION_TYPE_STATUS:
-                        ret = gf_cli_gsync_out_status (dict);
-                        goto out;
+                        status_detail = dict_get_str_boolean (dict,
+                                                              "status-detail",
+                                                              _gf_false);
+                        ret = gf_cli_gsync_status_output (dict, status_detail);
+                break;
+
+                case GF_GSYNC_OPTION_TYPE_DELETE:
+                        if (dict_get_str (dict, "master", &master) != 0)
+                                master = "???";
+                        if (dict_get_str (dict, "slave", &slave) != 0)
+                                slave = "???";
+                        cli_out ("Deleting " GEOREP " session between %s & %s"
+                                 " has been successful", master, slave);
+                break;
+
+                case GF_GSYNC_OPTION_TYPE_CREATE:
+                        if (dict_get_str (dict, "master", &master) != 0)
+                                master = "???";
+                        if (dict_get_str (dict, "slave", &slave) != 0)
+                                slave = "???";
+                        cli_out ("Creating " GEOREP " session between %s & %s"
+                                 " has been successful", master, slave);
+                break;
+
                 default:
                         cli_out (GEOREP" command executed successfully");
         }
@@ -3830,6 +4558,54 @@ out:
 
         free (rsp.dict.dict_val);
 
+        return ret;
+}
+
+int32_t
+gf_cli_sys_exec (call_frame_t *frame, xlator_t *this, void *data)
+{
+        int                      ret    = 0;
+        dict_t                  *dict   = NULL;
+        gf_cli_req               req = {{0,}};
+
+        if (!frame || !this || !data) {
+                ret = -1;
+                gf_log ("cli", GF_LOG_ERROR, "Invalid data");
+                goto out;
+        }
+
+        dict = data;
+
+        ret = cli_to_glusterd (&req, frame, gf_cli_sys_exec_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_SYS_EXEC, this, cli_rpc_prog,
+                               NULL);
+out:
+        GF_FREE (req.dict.dict_val);
+        return ret;
+}
+
+int32_t
+gf_cli_copy_file (call_frame_t *frame, xlator_t *this, void *data)
+{
+        int                      ret    = 0;
+        dict_t                  *dict   = NULL;
+        gf_cli_req               req = {{0,}};
+
+        if (!frame || !this || !data) {
+                ret = -1;
+                gf_log ("cli", GF_LOG_ERROR, "Invalid data");
+                goto out;
+        }
+
+        dict = data;
+
+        ret = cli_to_glusterd (&req, frame, gf_cli_copy_file_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_COPY_FILE, this, cli_rpc_prog,
+                               NULL);
+out:
+        GF_FREE (req.dict.dict_val);
         return ret;
 }
 
@@ -5561,7 +6337,20 @@ cli_print_volume_tasks (dict_t *dict) {
                 if (ret)
                         return;
 
-                cli_out ("%15s%40s%15d", op, task_id_str, status);
+                /*
+                   Replace brick only has two states - In progress and Complete
+                   Ref: xlators/mgmt/glusterd/src/glusterd-replace-brick.c
+                */
+                if (!strcmp (op, "Replace brick")) {
+                    if (status) {
+                        status = GF_DEFRAG_STATUS_COMPLETE;
+                    } else {
+                        status = GF_DEFRAG_STATUS_STARTED;
+                    }
+                }
+
+                cli_out ("%15s%40s%15s", op, task_id_str,
+                         cli_vol_task_status_str[status]);
         }
 
 }
@@ -5620,10 +6409,12 @@ gf_cli_status_cbk (struct rpc_req *req, struct iovec *iov,
                                   "status information.");
 
                 if (global_state->mode & GLUSTER_MODE_XML) {
-                       cli_xml_output_str ("volStatus", msg, rsp.op_ret,
-                                           rsp.op_errno, rsp.op_errstr);
-                       ret = 0;
-                       goto out;
+                        if (!local->all)
+                                cli_xml_output_str ("volStatus", msg,
+                                                    rsp.op_ret, rsp.op_errno,
+                                                    rsp.op_errstr);
+                        ret = 0;
+                        goto out;
                 }
 
                 cli_err ("%s", msg);
@@ -5891,12 +6682,6 @@ gf_cli_status_volume_all (call_frame_t *frame, xlator_t *this, void *data)
                 goto out;
         }
 
-        if (vol_count == 0) {
-                cli_err ("No volumes present");
-                ret = 0;
-                goto out;
-        }
-
         /* remove the "all" flag in cmd */
         cmd &= ~GF_CLI_STATUS_ALL;
         cmd |= GF_CLI_STATUS_VOL;
@@ -5909,6 +6694,12 @@ gf_cli_status_volume_all (call_frame_t *frame, xlator_t *this, void *data)
                                 "Error outputting to xml");
                         goto out;
                 }
+        }
+
+        if (vol_count == 0 && !(global_state->mode & GLUSTER_MODE_XML)) {
+                cli_err ("No volumes present");
+                ret = 0;
+                goto out;
         }
 
         for (i = 0; i < vol_count; i++) {
@@ -6174,6 +6965,7 @@ gf_cli_heal_volume_cbk (struct rpc_req *req, struct iovec *iov,
         gf_xl_afr_op_t          heal_op = GF_AFR_OP_INVALID;
         char                    *operation = NULL;
         char                    *substr = NULL;
+        char                    *heal_op_str = NULL;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -6216,12 +7008,36 @@ gf_cli_heal_volume_cbk (struct rpc_req *req, struct iovec *iov,
 
         gf_log ("cli", GF_LOG_INFO, "Received resp to heal volume");
 
+        switch (heal_op) {
+                case    GF_AFR_OP_HEAL_INDEX:
+                        heal_op_str = "to perform index self heal";
+                        break;
+                case    GF_AFR_OP_HEAL_FULL:
+                        heal_op_str = "to perform full self heal";
+                        break;
+                case    GF_AFR_OP_INDEX_SUMMARY:
+                        heal_op_str = "list of entries to be healed";
+                        break;
+                case    GF_AFR_OP_HEALED_FILES:
+                        heal_op_str = "list of healed entries";
+                        break;
+                case    GF_AFR_OP_HEAL_FAILED_FILES:
+                        heal_op_str = "list of heal failed entries";
+                        break;
+                case    GF_AFR_OP_SPLIT_BRAIN_FILES:
+                        heal_op_str = "list of split brain entries";
+                        break;
+                case    GF_AFR_OP_INVALID:
+                        heal_op_str = "invalid heal op";
+                        break;
+        }
+
         if ((heal_op == GF_AFR_OP_HEAL_FULL) ||
             (heal_op == GF_AFR_OP_HEAL_INDEX)) {
-                operation = "Launching Heal operation";
+                operation = "Launching heal operation";
                 substr = "\nUse heal info commands to check status";
         } else {
-                operation = "Gathering Heal info";
+                operation = "Gathering";
                 substr = "";
         }
 
@@ -6229,15 +7045,15 @@ gf_cli_heal_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 if (strcmp (rsp.op_errstr, "")) {
                         cli_err ("%s", rsp.op_errstr);
                 } else {
-                        cli_err ("%s on volume %s has been unsuccessful",
-                                 operation, volname);
+                        cli_err ("%s %s on volume %s has been unsuccessful",
+                                 operation, heal_op_str, volname);
                 }
 
                 ret = rsp.op_ret;
                 goto out;
         } else {
-                cli_out ("%s on volume %s has been successful%s", operation,
-                         volname, substr);
+                cli_out ("%s %s on volume %s has been successful %s", operation,
+                         heal_op_str, volname, substr);
         }
 
         ret = rsp.op_ret;
@@ -6646,6 +7462,7 @@ struct rpc_clnt_procedure gluster_cli_actors[GLUSTER_CLI_MAXVALUE] = {
         [GLUSTER_CLI_DEPROBE]          = {"DEPROBE_QUERY", gf_cli_deprobe},
         [GLUSTER_CLI_LIST_FRIENDS]     = {"LIST_FRIENDS", gf_cli_list_friends},
         [GLUSTER_CLI_UUID_RESET]       = {"UUID_RESET", gf_cli3_1_uuid_reset},
+        [GLUSTER_CLI_UUID_GET]       = {"UUID_GET", gf_cli3_1_uuid_get},
         [GLUSTER_CLI_CREATE_VOLUME]    = {"CREATE_VOLUME", gf_cli_create_volume},
         [GLUSTER_CLI_DELETE_VOLUME]    = {"DELETE_VOLUME", gf_cli_delete_volume},
         [GLUSTER_CLI_START_VOLUME]     = {"START_VOLUME", gf_cli_start_volume},
@@ -6677,6 +7494,8 @@ struct rpc_clnt_procedure gluster_cli_actors[GLUSTER_CLI_MAXVALUE] = {
         [GLUSTER_CLI_STATEDUMP_VOLUME] = {"STATEDUMP_VOLUME", gf_cli_statedump_volume},
         [GLUSTER_CLI_LIST_VOLUME]      = {"LIST_VOLUME", gf_cli_list_volume},
         [GLUSTER_CLI_CLRLOCKS_VOLUME]  = {"CLEARLOCKS_VOLUME", gf_cli_clearlocks_volume},
+        [GLUSTER_CLI_COPY_FILE]        = {"COPY_FILE", gf_cli_copy_file},
+        [GLUSTER_CLI_SYS_EXEC]         = {"SYS_EXEC", gf_cli_sys_exec},
 #ifdef HAVE_BD_XLATOR
         [GLUSTER_CLI_BD_OP]            = {"BD_OP", gf_cli_bd_op},
 #endif

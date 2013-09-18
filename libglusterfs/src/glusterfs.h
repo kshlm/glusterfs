@@ -32,6 +32,7 @@
 #include <arpa/inet.h>
 #include <sys/poll.h>
 #include <pthread.h>
+#include <limits.h> /* For PATH_MAX */
 
 #include "list.h"
 #include "logging.h"
@@ -83,6 +84,7 @@
 #define GF_XATTR_NODE_UUID_KEY  "trusted.glusterfs.node-uuid"
 #define GF_XATTR_VOL_ID_KEY   "trusted.glusterfs.volume-id"
 #define GF_XATTR_LOCKINFO_KEY   "trusted.glusterfs.lockinfo"
+#define GF_XATTR_GET_REAL_FILENAME_KEY "user.glusterfs.get_real_filename:"
 
 #define GF_READDIR_SKIP_DIRS       "readdir-filter-directories"
 
@@ -94,20 +96,26 @@
                                        strlen (GF_XATTR_LOCKINFO_KEY)) == 0)
 
 #define GF_XATTR_LINKINFO_KEY   "trusted.distribute.linkinfo"
-#define GFID_XATTR_KEY "trusted.gfid"
+#define GFID_XATTR_KEY          "trusted.gfid"
+#define VIRTUAL_GFID_XATTR_KEY_STR  "glusterfs.gfid.string"
+#define VIRTUAL_GFID_XATTR_KEY      "glusterfs.gfid"
+#define UUID_CANONICAL_FORM_LEN 36
 
 #define GLUSTERFS_INTERNAL_FOP_KEY  "glusterfs-internal-fop"
 
 #define ZR_FILE_CONTENT_STR     "glusterfs.file."
 #define ZR_FILE_CONTENT_STRLEN 15
 
+#define GLUSTERFS_WRITE_IS_APPEND "glusterfs.write-is-append"
 #define GLUSTERFS_OPEN_FD_COUNT "glusterfs.open-fd-count"
 #define GLUSTERFS_INODELK_COUNT "glusterfs.inodelk-count"
 #define GLUSTERFS_ENTRYLK_COUNT "glusterfs.entrylk-count"
 #define GLUSTERFS_POSIXLK_COUNT "glusterfs.posixlk-count"
 #define GLUSTERFS_PARENT_ENTRYLK "glusterfs.parent-entrylk"
+#define GLUSTERFS_INODELK_DOM_COUNT "glusterfs.inodelk-dom-count"
 #define QUOTA_SIZE_KEY "trusted.glusterfs.quota.size"
 #define GFID_TO_PATH_KEY "glusterfs.gfid2path"
+#define GF_XATTR_STIME_PATTERN "trusted.glusterfs.*.stime"
 
 /* Index xlator related */
 #define GF_XATTROP_INDEX_GFID "glusterfs.xattrop_index_gfid"
@@ -132,21 +140,24 @@
 #define GLUSTERFS_RPC_REPLY_SIZE               24
 
 #define ZR_FILE_CONTENT_REQUEST(key) (!strncmp(key, ZR_FILE_CONTENT_STR, \
-					       ZR_FILE_CONTENT_STRLEN))
+                                               ZR_FILE_CONTENT_STRLEN))
 
 #define DEFAULT_VAR_RUN_DIRECTORY    DATADIR "/run/gluster"
+#define GF_REPLICATE_TRASH_DIR          ".landfill"
 
 /* GlusterFS's maximum supported Auxilary GIDs */
 /* TODO: Keeping it to 200, so that we can fit in 2KB buffer for auth data
  * in RPC server code, if there is ever need for having more aux-gids, then
  * we have to add aux-gid in payload of actors */
-#define GF_MAX_AUX_GROUPS   200
+#define GF_MAX_AUX_GROUPS   65536
 
 #define GF_UUID_BUF_SIZE 50
 
 #define GF_REBALANCE_TID_KEY     "rebalance-id"
 #define GF_REMOVE_BRICK_TID_KEY  "remove-brick-id"
 #define GF_REPLACE_BRICK_TID_KEY "replace-brick-id"
+
+#define UUID_CANONICAL_FORM_LEN  36
 
 /* NOTE: add members ONLY at the end (just before _MAXVALUE) */
 typedef enum {
@@ -181,8 +192,8 @@ typedef enum {
         GF_FOP_READDIR,
         GF_FOP_INODELK,
         GF_FOP_FINODELK,
-	GF_FOP_ENTRYLK,
-	GF_FOP_FENTRYLK,
+        GF_FOP_ENTRYLK,
+        GF_FOP_FENTRYLK,
         GF_FOP_XATTROP,
         GF_FOP_FXATTROP,
         GF_FOP_FGETXATTR,
@@ -196,6 +207,8 @@ typedef enum {
         GF_FOP_RELEASEDIR,
         GF_FOP_GETSPEC,
         GF_FOP_FREMOVEXATTR,
+	GF_FOP_FALLOCATE,
+	GF_FOP_DISCARD,
         GF_FOP_MAXVALUE,
 } glusterfs_fop_t;
 
@@ -245,20 +258,20 @@ typedef enum {
 
 
 typedef enum {
-	ENTRYLK_LOCK,
-	ENTRYLK_UNLOCK,
-	ENTRYLK_LOCK_NB
+        ENTRYLK_LOCK,
+        ENTRYLK_UNLOCK,
+        ENTRYLK_LOCK_NB
 } entrylk_cmd;
 
 
 typedef enum {
-	ENTRYLK_RDLCK,
-	ENTRYLK_WRLCK
+        ENTRYLK_RDLCK,
+        ENTRYLK_WRLCK
 } entrylk_type;
 
 
 typedef enum {
-	GF_XATTROP_ADD_ARRAY,
+        GF_XATTROP_ADD_ARRAY,
         GF_XATTROP_ADD_ARRAY64,
         GF_XATTROP_OR_ARRAY,
         GF_XATTROP_AND_ARRAY
@@ -274,65 +287,75 @@ typedef enum {
 #define GF_CONTENT_KEY "glusterfs.content"
 
 struct _xlator_cmdline_option {
-	struct list_head    cmd_args;
-	char               *volume;
-	char               *key;
-	char               *value;
+        struct list_head    cmd_args;
+        char               *volume;
+        char               *key;
+        char               *value;
 };
 typedef struct _xlator_cmdline_option xlator_cmdline_option_t;
 
+struct _server_cmdline {
+        struct list_head  list;
+        char              *volfile_server;
+};
+typedef struct _server_cmdline server_cmdline_t;
 
 #define GF_OPTION_ENABLE   _gf_true
 #define GF_OPTION_DISABLE  _gf_false
 #define GF_OPTION_DEFERRED 2
 
 struct _cmd_args {
-	/* basic options */
-	char            *volfile_server;
-	char            *volfile;
-        char            *log_server;
-	gf_loglevel_t    log_level;
-	char            *log_file;
+        /* basic options */
+        char             *volfile_server;
+        server_cmdline_t *curr_server;
+        /* List of backup volfile servers, including original */
+        struct list_head volfile_servers;
+        char             *volfile;
+        char             *log_server;
+        gf_loglevel_t    log_level;
+        char            *log_file;
         int32_t          max_connect_attempts;
-	/* advanced options */
-	uint32_t         volfile_server_port;
-	char            *volfile_server_transport;
+        /* advanced options */
+        uint32_t         volfile_server_port;
+        char            *volfile_server_transport;
         uint32_t         log_server_port;
-	char            *pid_file;
+        char            *pid_file;
         char            *sock_file;
-	int              no_daemon_mode;
-	char            *run_id;
-	int              debug_mode;
+        int              no_daemon_mode;
+        char            *run_id;
+        int              debug_mode;
         int              read_only;
         int              acl;
         int              selinux;
         int              enable_ino32;
         int              worm;
         int              mac_compat;
-	int		 fopen_keep_cache;
-	int		 gid_timeout;
-	struct list_head xlator_options;  /* list of xlator_option_t */
+        int              fopen_keep_cache;
+        int              gid_timeout;
+        int              aux_gfid_mount;
+        struct list_head xlator_options;  /* list of xlator_option_t */
 
-	/* fuse options */
-	int              fuse_direct_io_mode;
+        /* fuse options */
+        int              fuse_direct_io_mode;
+        char             *use_readdirp;
         int              volfile_check;
-	double           fuse_entry_timeout;
-	double           fuse_negative_timeout;
-	double           fuse_attribute_timeout;
-	char            *volume_name;
-	int              fuse_nodev;
-	int              fuse_nosuid;
-	char            *dump_fuse;
+        double           fuse_entry_timeout;
+        double           fuse_negative_timeout;
+        double           fuse_attribute_timeout;
+        char            *volume_name;
+        int              fuse_nodev;
+        int              fuse_nosuid;
+        char            *dump_fuse;
         pid_t            client_pid;
         int              client_pid_set;
         unsigned         uid_map_root;
         int              background_qlen;
         int              congestion_threshold;
-        char            *fuse_mountopts;
+        char             *fuse_mountopts;
 
-	/* key args */
-	char            *mount_point;
-	char            *volfile_id;
+        /* key args */
+        char            *mount_point;
+        char            *volfile_id;
 
         /* required for portmap */
         int             brick_port;
@@ -360,16 +383,16 @@ typedef struct _glusterfs_graph glusterfs_graph_t;
 typedef int32_t (*glusterfsd_mgmt_event_notify_fn_t) (int32_t event, void *data,
                                                       ...);
 struct _glusterfs_ctx {
-	cmd_args_t          cmd_args;
-	char               *process_uuid;
-	FILE               *pidfp;
-	char                fin;
-	void               *timer;
-	void               *ib;
-	void               *pool;
-	void               *event_pool;
+        cmd_args_t          cmd_args;
+        char               *process_uuid;
+        FILE               *pidfp;
+        char                fin;
+        void               *timer;
+        void               *ib;
+        void               *pool;
+        void               *event_pool;
         void               *iobuf_pool;
-	pthread_mutex_t     lock;
+        pthread_mutex_t     lock;
         size_t              page_size;
         struct list_head    graphs; /* double linked list of graphs - one per volfile parse */
         glusterfs_graph_t  *active; /* the latest graph in use */
@@ -385,12 +408,12 @@ struct _glusterfs_ctx {
                                          got changed */
         pid_t               mnt_pid; /* pid of the mount agent */
         int                 process_mode; /*mode in which process is runninng*/
-	struct syncenv      *env;         /* The env pointer to the synctasks */
+        struct syncenv     *env;          /* The env pointer to the synctasks */
 
         struct list_head    mempool_list; /* used to keep a global list of
                                              mempools, used to log details of
                                              mempool in statedump */
-        char                *statedump_path;
+        char               *statedump_path;
 
         struct mem_pool    *dict_pool;
         struct mem_pool    *dict_pair_pool;
@@ -400,9 +423,11 @@ struct _glusterfs_ctx {
                                                      call to fsd-mgmt */
         gf_log_handle_t     log; /* all logging related variables */
 
-        int           mem_acct_enable;
+        int                 mem_acct_enable;
 
         int                 daemon_pipe[2];
+
+        struct _clienttable *clienttable;
 };
 typedef struct _glusterfs_ctx glusterfs_ctx_t;
 

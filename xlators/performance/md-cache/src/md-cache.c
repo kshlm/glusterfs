@@ -52,7 +52,7 @@ static struct mdc_key {
 		.check = 1,
 	},
 	{
-		.name = "security.selinux",
+		.name = GF_SELINUX_XATTR_KEY,
 		.load = 0,
 		.check = 1,
 	},
@@ -132,6 +132,7 @@ struct mdc_local {
         loc_t   loc2;
         fd_t   *fd;
         char   *linkname;
+	char   *key;
         dict_t *xattr;
 };
 
@@ -228,6 +229,8 @@ mdc_local_wipe (xlator_t *this, mdc_local_t *local)
                 fd_unref (local->fd);
 
         GF_FREE (local->linkname);
+
+        GF_FREE (local->key);
 
         if (local->xattr)
                 dict_unref (local->xattr);
@@ -585,6 +588,31 @@ out:
 
 
 int
+mdc_inode_xatt_unset (xlator_t *this, inode_t *inode, char *name)
+{
+        int              ret = -1;
+        struct md_cache *mdc = NULL;
+
+        mdc = mdc_inode_prep (this, inode);
+        if (!mdc)
+                goto out;
+
+        if (!name)
+                goto out;
+
+        LOCK (&mdc->lock);
+        {
+		dict_del (mdc->xattr, name);
+        }
+        UNLOCK (&mdc->lock);
+
+        ret = 0;
+out:
+        return ret;
+}
+
+
+int
 mdc_inode_xatt_get (xlator_t *this, inode_t *inode, dict_t **dict)
 {
         int              ret = -1;
@@ -598,15 +626,57 @@ mdc_inode_xatt_get (xlator_t *this, inode_t *inode, dict_t **dict)
 
         LOCK (&mdc->lock);
         {
+                ret = 0;
+		/* Missing xattr only means no keys were there, i.e
+		   a negative cache for the "loaded" keys
+		*/
                 if (!mdc->xattr)
                         goto unlock;
 
                 if (dict)
                         *dict = dict_ref (mdc->xattr);
-
-                ret = 0;
         }
 unlock:
+        UNLOCK (&mdc->lock);
+
+out:
+        return ret;
+}
+
+
+int
+mdc_inode_iatt_invalidate (xlator_t *this, inode_t *inode)
+{
+        int              ret = -1;
+        struct md_cache *mdc = NULL;
+
+        if (mdc_inode_ctx_get (this, inode, &mdc) != 0)
+                goto out;
+
+        LOCK (&mdc->lock);
+        {
+		mdc->ia_time = 0;
+        }
+        UNLOCK (&mdc->lock);
+
+out:
+        return ret;
+}
+
+
+int
+mdc_inode_xatt_invalidate (xlator_t *this, inode_t *inode)
+{
+        int              ret = -1;
+        struct md_cache *mdc = NULL;
+
+        if (mdc_inode_ctx_get (this, inode, &mdc) != 0)
+                goto out;
+
+        LOCK (&mdc->lock);
+        {
+		mdc->xa_time = 0;
+        }
         UNLOCK (&mdc->lock);
 
 out:
@@ -647,7 +717,7 @@ is_mdc_key_satisfied (const char *key)
 		return 0;
 
 	for (mdc_key = mdc_keys[i].name; (mdc_key = mdc_keys[i].name); i++) {
-		if (!mdc_keys[i].check)
+		if (!mdc_keys[i].load)
 			continue;
 		if (strcmp (mdc_key, key) == 0)
 			return 1;
@@ -721,12 +791,20 @@ mdc_lookup (call_frame_t *frame, xlator_t *this, loc_t *loc,
         struct iatt  stbuf = {0, };
         struct iatt  postparent = {0, };
         dict_t      *xattr_rsp = NULL;
+        dict_t      *xattr_alloc = NULL;
         mdc_local_t *local = NULL;
 
 
         local = mdc_local_get (frame);
         if (!local)
                 goto uncached;
+
+	if (!loc->name)
+		/* A nameless discovery is dangerous to cache. We
+		   perform nameless lookup with the intention of
+		   re-establishing an inode "properly"
+		*/
+		goto uncached;
 
         loc_copy (&local->loc, loc);
 
@@ -752,6 +830,8 @@ mdc_lookup (call_frame_t *frame, xlator_t *this, loc_t *loc,
         return 0;
 
 uncached:
+	if (!xdata)
+		xdata = xattr_alloc = dict_new ();
 	if (xdata)
 		mdc_load_reqs (this, xdata);
 
@@ -760,7 +840,8 @@ uncached:
 
         if (xattr_rsp)
                 dict_unref (xattr_rsp);
-
+	if (xattr_alloc)
+		dict_unref (xattr_alloc);
         return 0;
 }
 
@@ -1573,6 +1654,8 @@ mdc_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         mdc_inode_xatt_update (this, local->loc.inode, local->xattr);
 
+	mdc_inode_iatt_invalidate (this, local->loc.inode);
+
 out:
         MDC_STACK_UNWIND (setxattr, frame, op_ret, op_errno, xdata);
 
@@ -1614,6 +1697,7 @@ mdc_fsetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         mdc_inode_xatt_update (this, local->fd->inode, local->xattr);
 
+	mdc_inode_iatt_invalidate (this, local->fd->inode);
 out:
         MDC_STACK_UNWIND (fsetxattr, frame, op_ret, op_errno, xdata);
 
@@ -1666,6 +1750,7 @@ mdc_getxattr (call_frame_t *frame, xlator_t *this, loc_t *loc, const char *key,
               dict_t *xdata)
 {
         int           ret;
+	int           op_errno = ENODATA;
         mdc_local_t  *local = NULL;
 	dict_t       *xattr = NULL;
 
@@ -1682,10 +1767,12 @@ mdc_getxattr (call_frame_t *frame, xlator_t *this, loc_t *loc, const char *key,
 	if (ret != 0)
 		goto uncached;
 
-	if (!dict_get (xattr, (char *)key))
-		goto uncached;
+	if (!xattr || !dict_get (xattr, (char *)key)) {
+		ret = -1;
+		op_errno = ENODATA;
+	}
 
-        MDC_STACK_UNWIND (getxattr, frame, 0, 0, xattr, xdata);
+        MDC_STACK_UNWIND (getxattr, frame, ret, op_errno, xattr, xdata);
 
         return 0;
 
@@ -1727,6 +1814,7 @@ mdc_fgetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd, const char *key,
         int           ret;
         mdc_local_t  *local = NULL;
 	dict_t       *xattr = NULL;
+	int           op_errno = ENODATA;
 
         local = mdc_local_get (frame);
         if (!local)
@@ -1741,10 +1829,12 @@ mdc_fgetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd, const char *key,
 	if (ret != 0)
 		goto uncached;
 
-	if (!dict_get (xattr, (char *)key))
-		goto uncached;
+	if (!xattr || !dict_get (xattr, (char *)key)) {
+		ret = -1;
+		op_errno = ENODATA;
+	}
 
-        MDC_STACK_UNWIND (fgetxattr, frame, 0, 0, xattr, xdata);
+        MDC_STACK_UNWIND (fgetxattr, frame, ret, op_errno, xattr, xdata);
 
         return 0;
 
@@ -1752,6 +1842,97 @@ uncached:
         STACK_WIND (frame, mdc_fgetxattr_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->fgetxattr,
                     fd, key, xdata);
+        return 0;
+}
+
+int
+mdc_removexattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+		     int32_t op_ret, int32_t op_errno, dict_t *xdata)
+{
+        mdc_local_t  *local = NULL;
+
+        local = frame->local;
+
+        if (op_ret != 0)
+                goto out;
+
+        if (!local)
+                goto out;
+
+	if (local->key)
+		mdc_inode_xatt_unset (this, local->loc.inode, local->key);
+	else
+		mdc_inode_xatt_invalidate (this, local->loc.inode);
+
+	mdc_inode_iatt_invalidate (this, local->loc.inode);
+out:
+        MDC_STACK_UNWIND (removexattr, frame, op_ret, op_errno, xdata);
+
+        return 0;
+}
+
+
+int
+mdc_removexattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
+		 const char *name, dict_t *xdata)
+{
+        mdc_local_t  *local = NULL;
+
+        local = mdc_local_get (frame);
+
+	loc_copy (&local->loc, loc);
+
+	local->key = gf_strdup (name);
+
+        STACK_WIND (frame, mdc_removexattr_cbk,
+                    FIRST_CHILD(this), FIRST_CHILD(this)->fops->removexattr,
+                    loc, name, xdata);
+        return 0;
+}
+
+
+int
+mdc_fremovexattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+		      int32_t op_ret, int32_t op_errno, dict_t *xdata)
+{
+        mdc_local_t  *local = NULL;
+
+        local = frame->local;
+
+        if (op_ret != 0)
+                goto out;
+
+        if (!local)
+                goto out;
+
+	if (local->key)
+		mdc_inode_xatt_unset (this, local->fd->inode, local->key);
+	else
+		mdc_inode_xatt_invalidate (this, local->fd->inode);
+
+	mdc_inode_iatt_invalidate (this, local->fd->inode);
+out:
+        MDC_STACK_UNWIND (fremovexattr, frame, op_ret, op_errno, xdata);
+
+        return 0;
+}
+
+
+int
+mdc_fremovexattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
+		  const char *name, dict_t *xdata)
+{
+        mdc_local_t  *local = NULL;
+
+        local = mdc_local_get (frame);
+
+	local->fd = fd_ref (fd);
+
+	local->key = gf_strdup (name);
+
+        STACK_WIND (frame, mdc_fremovexattr_cbk,
+                    FIRST_CHILD(this), FIRST_CHILD(this)->fops->fremovexattr,
+                    fd, name, xdata);
         return 0;
 }
 
@@ -1782,9 +1963,18 @@ int
 mdc_readdirp (call_frame_t *frame, xlator_t *this, fd_t *fd,
 	      size_t size, off_t offset, dict_t *xdata)
 {
+	dict_t *xattr_alloc = NULL;
+
+	if (!xdata)
+		xdata = xattr_alloc = dict_new ();
+	if (xdata)
+		mdc_load_reqs (this, xdata);
+
 	STACK_WIND (frame, mdc_readdirp_cbk,
 		    FIRST_CHILD (this), FIRST_CHILD (this)->fops->readdirp,
 		    fd, size, offset, xdata);
+	if (xattr_alloc)
+		dict_unref (xattr_alloc);
 	return 0;
 }
 
@@ -1828,6 +2018,83 @@ mdc_readdir (call_frame_t *frame, xlator_t *this, fd_t *fd,
 	return 0;
 }
 
+int
+mdc_fallocate_cbk(call_frame_t *frame, void *cookie, xlator_t *this,
+                  int32_t op_ret, int32_t op_errno,
+                  struct iatt *prebuf, struct iatt *postbuf, dict_t *xdata)
+{
+        mdc_local_t  *local = NULL;
+
+        local = frame->local;
+
+        if (op_ret != 0)
+                goto out;
+
+        if (!local)
+                goto out;
+
+        mdc_inode_iatt_set_validate(this, local->fd->inode, prebuf, postbuf);
+
+out:
+        MDC_STACK_UNWIND (fallocate, frame, op_ret, op_errno, prebuf, postbuf,
+                          xdata);
+
+        return 0;
+}
+
+int mdc_fallocate(call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t mode,
+		  off_t offset, size_t len, dict_t *xdata)
+{
+	mdc_local_t *local;
+
+	local = mdc_local_get(frame);
+	local->fd = fd_ref(fd);
+
+	STACK_WIND(frame, mdc_fallocate_cbk, FIRST_CHILD(this),
+		   FIRST_CHILD(this)->fops->fallocate, fd, mode, offset, len,
+		   xdata);
+
+	return 0;
+}
+
+int
+mdc_discard_cbk(call_frame_t *frame, void *cookie, xlator_t *this,
+                int32_t op_ret, int32_t op_errno,
+                struct iatt *prebuf, struct iatt *postbuf, dict_t *xdata)
+{
+        mdc_local_t  *local = NULL;
+
+        local = frame->local;
+
+        if (op_ret != 0)
+                goto out;
+
+        if (!local)
+                goto out;
+
+        mdc_inode_iatt_set_validate(this, local->fd->inode, prebuf, postbuf);
+
+out:
+        MDC_STACK_UNWIND(discard, frame, op_ret, op_errno, prebuf, postbuf,
+                         xdata);
+
+        return 0;
+}
+
+int mdc_discard(call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
+		size_t len, dict_t *xdata)
+{
+	mdc_local_t *local;
+
+	local = mdc_local_get(frame);
+	local->fd = fd_ref(fd);
+
+	STACK_WIND(frame, mdc_discard_cbk, FIRST_CHILD(this),
+		   FIRST_CHILD(this)->fops->discard, fd, offset, len,
+		   xdata);
+
+	return 0;
+}
 
 int
 mdc_forget (xlator_t *this, inode_t *inode)
@@ -1955,8 +2222,12 @@ struct xlator_fops fops = {
         .fsetxattr   = mdc_fsetxattr,
         .getxattr    = mdc_getxattr,
         .fgetxattr   = mdc_fgetxattr,
+	.removexattr = mdc_removexattr,
+	.fremovexattr= mdc_fremovexattr,
 	.readdirp    = mdc_readdirp,
-	.readdir     = mdc_readdir
+	.readdir     = mdc_readdir,
+	.fallocate   = mdc_fallocate,
+	.discard     = mdc_discard,
 };
 
 
@@ -1986,4 +2257,5 @@ struct volume_options options[] = {
 	  .description = "Convert all readdir requests to readdirplus to "
 			 "collect stat info on each entry.",
 	},
+    { .key = {NULL} },
 };

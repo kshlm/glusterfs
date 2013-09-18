@@ -31,7 +31,7 @@
         glusterd_op_stop_volume_args_get (dict, volname, flags)
 
 int
-glusterd_handle_create_volume (rpcsvc_request_t *req)
+__glusterd_handle_create_volume (rpcsvc_request_t *req)
 {
         int32_t                 ret         = -1;
         gf_cli_req              cli_req     = {{0,}};
@@ -134,6 +134,11 @@ glusterd_handle_create_volume (rpcsvc_request_t *req)
                 goto out;
         }
 
+        if (!dict_get (dict, "force")) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to get 'force' flag");
+                goto out;
+        }
+
         uuid_generate (volume_id);
         free_ptr = gf_strdup (uuid_utoa (volume_id));
         ret = dict_set_dynstr (dict, "volume-id", free_ptr);
@@ -187,7 +192,14 @@ out:
 }
 
 int
-glusterd_handle_cli_start_volume (rpcsvc_request_t *req)
+glusterd_handle_create_volume (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req,
+                                            __glusterd_handle_create_volume);
+}
+
+int
+__glusterd_handle_cli_start_volume (rpcsvc_request_t *req)
 {
         int32_t                         ret = -1;
         gf_cli_req                      cli_req = {{0,}};
@@ -252,9 +264,15 @@ out:
         return ret;
 }
 
+int
+glusterd_handle_cli_start_volume (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req,
+                                            __glusterd_handle_cli_start_volume);
+}
 
 int
-glusterd_handle_cli_stop_volume (rpcsvc_request_t *req)
+__glusterd_handle_cli_stop_volume (rpcsvc_request_t *req)
 {
         int32_t                         ret = -1;
         gf_cli_req                      cli_req = {{0,}};
@@ -322,7 +340,14 @@ out:
 }
 
 int
-glusterd_handle_cli_delete_volume (rpcsvc_request_t *req)
+glusterd_handle_cli_stop_volume (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req,
+                                            __glusterd_handle_cli_stop_volume);
+}
+
+int
+__glusterd_handle_cli_delete_volume (rpcsvc_request_t *req)
 {
         int32_t        ret         = -1;
         gf_cli_req     cli_req     = {{0,},};
@@ -392,7 +417,14 @@ out:
 }
 
 int
-glusterd_handle_cli_heal_volume (rpcsvc_request_t *req)
+glusterd_handle_cli_delete_volume (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req,
+                                            __glusterd_handle_cli_delete_volume);
+}
+
+int
+__glusterd_handle_cli_heal_volume (rpcsvc_request_t *req)
 {
         int32_t                         ret = -1;
         gf_cli_req                      cli_req = {{0,}};
@@ -476,7 +508,14 @@ out:
 }
 
 int
-glusterd_handle_cli_statedump_volume (rpcsvc_request_t *req)
+glusterd_handle_cli_heal_volume (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req,
+                                            __glusterd_handle_cli_heal_volume);
+}
+
+int
+__glusterd_handle_cli_statedump_volume (rpcsvc_request_t *req)
 {
         int32_t                         ret = -1;
         gf_cli_req                      cli_req = {{0,}};
@@ -557,6 +596,13 @@ out:
         return ret;
 }
 
+int
+glusterd_handle_cli_statedump_volume (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req,
+                                            __glusterd_handle_cli_statedump_volume);
+}
+
 #ifdef HAVE_BD_XLATOR
 int
 glusterd_is_valid_vg (const char *name)
@@ -610,6 +656,8 @@ glusterd_op_stage_create_volume (dict_t *dict, char **op_errstr)
 #ifdef HAVE_BD_XLATOR
         char                                    *dev_type = NULL;
 #endif
+        gf_boolean_t                             is_force = _gf_false;
+
         this = THIS;
         GF_ASSERT (this);
         priv = this->private;
@@ -663,6 +711,8 @@ glusterd_op_stage_create_volume (dict_t *dict, char **op_errstr)
                 goto out;
         }
 
+        is_force = dict_get_str_boolean (dict, "force", _gf_false);
+
         if (bricks) {
                 brick_list = gf_strdup (bricks);
                 if (!brick_list) {
@@ -715,10 +765,9 @@ glusterd_op_stage_create_volume (dict_t *dict, char **op_errstr)
                 } else
 #endif
                 if (!uuid_compare (brick_info->uuid, MY_UUID)) {
-                        ret = glusterd_brick_create_path (brick_info->hostname,
-                                                          brick_info->path,
-                                                          volume_uuid,
-                                                          op_errstr);
+                        ret = glusterd_validate_and_create_brickpath (brick_info,
+                                                          volume_uuid, op_errstr,
+                                                          is_force);
                         if (ret)
                                 goto out;
                         brick_list = tmpptr;
@@ -866,7 +915,9 @@ glusterd_op_stage_start_volume (dict_t *dict, char **op_errstr)
                         continue;
 
                 ret = gf_lstat_dir (brickinfo->path, NULL);
-                if (ret) {
+                if (ret && (flags & GF_CLI_FLAG_OP_FORCE)) {
+                        continue;
+                } else if (ret) {
                         snprintf (msg, sizeof (msg), "Failed to find "
                                           "brick directory %s for volume %s. "
                                           "Reason : %s", brickinfo->path,
@@ -875,13 +926,27 @@ glusterd_op_stage_start_volume (dict_t *dict, char **op_errstr)
                 }
                 ret = sys_lgetxattr (brickinfo->path, GF_XATTR_VOL_ID_KEY,
                                      volume_id, 16);
-                if (ret < 0) {
+                if (ret < 0 && (!(flags & GF_CLI_FLAG_OP_FORCE))) {
                         snprintf (msg, sizeof (msg), "Failed to get "
                                   "extended attribute %s for brick dir %s. "
                                   "Reason : %s", GF_XATTR_VOL_ID_KEY,
                                   brickinfo->path, strerror (errno));
                         ret = -1;
                         goto out;
+                } else if (ret < 0) {
+                        ret = sys_lsetxattr (brickinfo->path,
+                                             GF_XATTR_VOL_ID_KEY,
+                                             volinfo->volume_id, 16,
+                                             XATTR_CREATE);
+                        if (ret) {
+                                snprintf (msg, sizeof (msg), "Failed to set "
+                                        "extended attribute %s on %s. Reason: "
+                                        "%s", GF_XATTR_VOL_ID_KEY,
+                                        brickinfo->path, strerror (errno));
+                                goto out;
+                        } else {
+                                continue;
+                        }
                 }
                 if (uuid_compare (volinfo->volume_id, volume_id)) {
                         snprintf (msg, sizeof (msg), "Volume id mismatch for "
@@ -1589,6 +1654,8 @@ glusterd_op_create_volume (dict_t *dict, char **op_errstr)
                 i++;
         }
 
+        gd_update_volume_op_versions (volinfo);
+
         ret = glusterd_store_volinfo (volinfo, GLUSTERD_VOLINFO_VER_AC_INCREMENT);
         if (ret) {
                 glusterd_store_delete_volume (volinfo);
@@ -1605,6 +1672,7 @@ glusterd_op_create_volume (dict_t *dict, char **op_errstr)
         volinfo->rebal.defrag_status = 0;
         list_add_tail (&volinfo->vol_list, &priv->volumes);
         vol_added = _gf_true;
+
 out:
         GF_FREE(free_ptr);
         if (!vol_added && volinfo)
@@ -1638,7 +1706,10 @@ glusterd_op_start_volume (dict_t *dict, char **op_errstr)
 
         list_for_each_entry (brickinfo, &volinfo->bricks, brick_list) {
                 ret = glusterd_brick_start (volinfo, brickinfo, _gf_true);
-                if (ret)
+                /* If 'force' try to start all bricks regardless of success or
+                 * failure
+                 */
+                if (!(flags & GF_CLI_FLAG_OP_FORCE) && ret)
                         goto out;
         }
 
@@ -1844,7 +1915,9 @@ glusterd_clearlocks_unmount (glusterd_volinfo_t *volinfo, char *mntpt)
         runner_add_args (&runner, "/bin/umount", "-f", NULL);
         runner_argprintf (&runner, "%s", mntpt);
 
+        synclock_unlock (&priv->big_lock);
         ret = runner_run (&runner);
+        synclock_lock (&priv->big_lock);
         if (ret) {
                 ret = 0;
                 gf_log ("", GF_LOG_DEBUG,
@@ -1916,7 +1989,9 @@ glusterd_clearlocks_mount (glusterd_volinfo_t *volinfo, char **xl_opts,
         }
 
         runner_argprintf (&runner, "%s", mntpt);
+        synclock_unlock (&priv->big_lock);
         ret = runner_run (&runner);
+        synclock_lock (&priv->big_lock);
         if (ret) {
                 gf_log (THIS->name, GF_LOG_DEBUG,
                         "Could not start glusterfs");

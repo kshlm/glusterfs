@@ -66,7 +66,7 @@ TEST ls -l $M0 2>/dev/null;
 
 TEST $CLI volume rebalance $V0 start force
 
-EXPECT_WITHIN 15 "0" rebalance_completed
+EXPECT_WITHIN 30 "0" rebalance_completed
 
 ## check for layout overlaps.
 EXPECT "0" get_layout $B0/${V0}0 $B0/${V0}1 $B0/${V0}2
@@ -80,3 +80,5 @@ EXPECT "0" get_layout $B0/${V0}0/dir7 $B0/${V0}1/dir7 $B0/${V0}2/dir7
 EXPECT "0" get_layout $B0/${V0}0/dir8 $B0/${V0}1/dir8 $B0/${V0}2/dir8
 EXPECT "0" get_layout $B0/${V0}0/dir9 $B0/${V0}1/dir9 $B0/${V0}2/dir9
 EXPECT "0" get_layout $B0/${V0}0/dir10 $B0/${V0}1/dir10 $B0/${V0}2/dir10
+
+cleanup;

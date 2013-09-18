@@ -19,6 +19,35 @@
 #include "compat.h"
 #include "dht-common.h"
 
+int
+dht_linkfile_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                         int op_ret, int op_errno,
+                         inode_t *inode, struct iatt *stbuf, dict_t *xattr,
+                         struct iatt *postparent)
+{
+        char          is_linkfile   = 0;
+        dht_conf_t   *conf          = NULL;
+        dht_local_t  *local         = NULL;
+        call_frame_t *prev          = NULL;
+
+        local = frame->local;
+        prev = cookie;
+        conf = this->private;
+
+        if (op_ret)
+                goto out;
+
+        is_linkfile = check_is_linkfile (inode, stbuf, xattr,
+                                         conf->link_xattr_name);
+        if (!is_linkfile)
+                gf_log (this->name, GF_LOG_WARNING, "got non-linkfile %s:%s",
+                        prev->this->name, local->loc.path);
+out:
+        local->linkfile.linkfile_cbk (frame, cookie, this, op_ret, op_errno,
+                                      inode, stbuf, postparent, postparent,
+                                      xattr);
+        return 0;
+}
 
 #define is_equal(a, b) (a == b)
 int
@@ -28,15 +57,47 @@ dht_linkfile_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                          struct iatt *postparent, dict_t *xdata)
 {
         dht_local_t  *local = NULL;
+        xlator_t     *subvol = NULL;
+        call_frame_t *prev = NULL;
+        dict_t       *xattrs = NULL;
+        dht_conf_t   *conf = NULL;
+        int           ret = -1;
 
         local = frame->local;
 
         if (!op_ret)
                 local->linked = _gf_true;
 
+        FRAME_SU_UNDO (frame, dht_local_t);
+
+        if (op_ret && (op_errno == EEXIST)) {
+                conf = this->private;
+                prev = cookie;
+                subvol = prev->this;
+                if (!subvol)
+                        goto out;
+                xattrs = dict_new ();
+                if (!xattrs)
+                        goto out;
+                ret = dict_set_uint32 (xattrs, conf->link_xattr_name, 256);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Failed to set linkto key");
+                        goto out;
+                }
+
+                STACK_WIND (frame, dht_linkfile_lookup_cbk, subvol,
+                            subvol->fops->lookup, &local->loc, xattrs);
+                if (xattrs)
+                        dict_unref (xattrs);
+                return 0;
+        }
+out:
         local->linkfile.linkfile_cbk (frame, cookie, this, op_ret, op_errno,
                                       inode, stbuf, preparent, postparent,
                                       xdata);
+        if (xattrs)
+                dict_unref (xattrs);
         return 0;
 }
 
@@ -88,6 +149,9 @@ dht_linkfile_create (call_frame_t *frame, fop_mknod_cbk_t linkfile_cbk,
         }
 
         local->link_subvol = fromvol;
+        /* Always create as root:root. dht_linkfile_attr_heal fixes the
+         * ownsership */
+        FRAME_SU_DO (frame, dht_local_t);
         STACK_WIND (frame, dht_linkfile_create_cbk,
                     fromvol, fromvol->fops->mknod, loc,
                     S_IFREG | DHT_LINKFILE_MODE, 0, 0, dict);
@@ -233,10 +297,10 @@ dht_linkfile_attr_heal (call_frame_t *frame, xlator_t *this)
         GF_VALIDATE_OR_GOTO ("dht", local, out);
         GF_VALIDATE_OR_GOTO ("dht", local->link_subvol, out);
 
-        if ((local->stbuf.ia_type == IA_INVAL) ||
-            (is_equal (frame->root->uid, local->stbuf.ia_uid) &&
-             is_equal (frame->root->gid, local->stbuf.ia_gid)))
+        if (local->stbuf.ia_type == IA_INVAL)
                 return 0;
+
+        uuid_copy (local->loc.gfid, local->stbuf.ia_gfid);
 
         copy = copy_frame (frame);
 
@@ -252,6 +316,8 @@ dht_linkfile_attr_heal (call_frame_t *frame, xlator_t *this)
         subvol = local->link_subvol;
 
         copy->local = copy_local;
+
+        FRAME_SU_DO (copy, dht_local_t);
 
         STACK_WIND (copy, dht_linkfile_setattr_cbk, subvol,
                     subvol->fops->setattr, &copy_local->loc,

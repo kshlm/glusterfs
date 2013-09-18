@@ -477,6 +477,8 @@ rpc_transport_unref (rpc_transport_t *this)
                 if (this->mydata)
                         this->notify (this, this->mydata, RPC_TRANSPORT_CLEANUP,
                                       NULL);
+                this->mydata = NULL;
+                this->notify = NULL;
                 rpc_transport_destroy (this);
 	}
 
@@ -520,18 +522,6 @@ out:
 }
 
 
-inline int
-rpc_transport_unregister_notify (rpc_transport_t *trans)
-{
-        GF_VALIDATE_OR_GOTO ("rpc-transport", trans, out);
-
-        trans->notify = NULL;
-        trans->mydata = NULL;
-
-out:
-        return 0;
-}
-
 
 //give negative values to skip setting that value
 //this function asserts if both the values are negative.
@@ -555,6 +545,63 @@ rpc_transport_keepalive_options_set (dict_t *options, int32_t interval,
         if (ret)
                 goto out;
 out:
+        return ret;
+}
+
+int
+rpc_transport_unix_options_build (dict_t **options, char *filepath,
+                                  int frame_timeout)
+{
+        dict_t                  *dict = NULL;
+        char                    *fpath = NULL;
+        int                     ret = -1;
+
+        GF_ASSERT (filepath);
+        GF_ASSERT (options);
+
+        dict = dict_new ();
+        if (!dict)
+                goto out;
+
+        fpath = gf_strdup (filepath);
+        if (!fpath) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = dict_set_dynstr (dict, "transport.socket.connect-path", fpath);
+        if (ret)
+                goto out;
+
+        ret = dict_set_str (dict, "transport.address-family", "unix");
+        if (ret)
+                goto out;
+
+        ret = dict_set_str (dict, "transport.socket.nodelay", "off");
+        if (ret)
+                goto out;
+
+        ret = dict_set_str (dict, "transport-type", "socket");
+        if (ret)
+                goto out;
+
+        ret = dict_set_str (dict, "transport.socket.keepalive", "off");
+        if (ret)
+                goto out;
+
+        if (frame_timeout > 0) {
+                ret = dict_set_int32 (dict, "frame-timeout", frame_timeout);
+                if (ret)
+                        goto out;
+        }
+
+        *options = dict;
+out:
+        if (ret) {
+                GF_FREE (fpath);
+                if (dict)
+                        dict_unref (dict);
+        }
         return ret;
 }
 

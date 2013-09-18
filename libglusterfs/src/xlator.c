@@ -79,6 +79,8 @@ fill_defaults (xlator_t *xl)
         SET_DEFAULT_FOP (fxattrop);
         SET_DEFAULT_FOP (setattr);
         SET_DEFAULT_FOP (fsetattr);
+	SET_DEFAULT_FOP (fallocate);
+	SET_DEFAULT_FOP (discard);
 
         SET_DEFAULT_FOP (getspec);
 
@@ -119,17 +121,8 @@ xlator_volopt_dynload (char *xlator_type, void **dl_handle,
         int                     ret = -1;
         char                    *name = NULL;
         void                    *handle = NULL;
-        volume_opt_list_t       *vol_opt = NULL;
 
         GF_VALIDATE_OR_GOTO ("xlator", xlator_type, out);
-
-        GF_ASSERT (dl_handle);
-
-        if (*dl_handle)
-                if (dlclose (*dl_handle))
-                        gf_log ("xlator", GF_LOG_WARNING, "Unable to close "
-                                  "previously opened handle( may be stale)."
-                                  "Ignoring the invalid handle");
 
         ret = gf_asprintf (&name, "%s/%s.so", XLATORDIR, xlator_type);
         if (-1 == ret) {
@@ -146,25 +139,15 @@ xlator_volopt_dynload (char *xlator_type, void **dl_handle,
                 gf_log ("xlator", GF_LOG_WARNING, "%s", dlerror ());
                 goto out;
         }
-        *dl_handle = handle;
 
-
-        vol_opt = GF_CALLOC (1, sizeof (volume_opt_list_t),
-                         gf_common_mt_volume_opt_list_t);
-
-        if (!vol_opt) {
+        if (!(opt_list->given_opt = dlsym (handle, "options"))) {
+                dlerror ();
+                gf_log ("xlator", GF_LOG_ERROR,
+                        "Failed to load xlator opt table");
                 goto out;
         }
 
-        if (!(vol_opt->given_opt = dlsym (handle, "options"))) {
-                dlerror ();
-                gf_log ("xlator", GF_LOG_DEBUG,
-                         "Strict option validation not enforced -- neglecting");
-        }
-        opt_list->given_opt = vol_opt->given_opt;
-
-        INIT_LIST_HEAD (&vol_opt->list);
-        list_add_tail (&vol_opt->list, &opt_list->list);
+        *dl_handle = handle;
 
         ret = 0;
  out:
@@ -183,7 +166,7 @@ xlator_dynload (xlator_t *xl)
         char              *name = NULL;
         void              *handle = NULL;
         volume_opt_list_t *vol_opt = NULL;
-
+        class_methods_t   *vtbl = NULL;
 
         GF_VALIDATE_OR_GOTO ("xlator", xl, out);
 
@@ -218,21 +201,42 @@ xlator_dynload (xlator_t *xl)
                 goto out;
         }
 
-        if (!(*VOID(&xl->init) = dlsym (handle, "init"))) {
-                gf_log ("xlator", GF_LOG_WARNING, "dlsym(init) on %s",
-                        dlerror ());
-                goto out;
+        /*
+         * If class_methods exists, its contents override any definitions of
+         * init or fini for that translator.  Otherwise, we fall back to the
+         * older method of looking for init and fini directly.
+         */
+        vtbl = dlsym(handle,"class_methods");
+        if (vtbl) {
+                xl->init        = vtbl->init;
+                xl->fini        = vtbl->fini;
+                xl->reconfigure = vtbl->reconfigure;
+                xl->notify      = vtbl->notify;
         }
+        else {
+                if (!(*VOID(&xl->init) = dlsym (handle, "init"))) {
+                        gf_log ("xlator", GF_LOG_WARNING, "dlsym(init) on %s",
+                                dlerror ());
+                        goto out;
+                }
 
-        if (!(*VOID(&(xl->fini)) = dlsym (handle, "fini"))) {
-                gf_log ("xlator", GF_LOG_WARNING, "dlsym(fini) on %s",
-                        dlerror ());
-                goto out;
-        }
+                if (!(*VOID(&(xl->fini)) = dlsym (handle, "fini"))) {
+                        gf_log ("xlator", GF_LOG_WARNING, "dlsym(fini) on %s",
+                                dlerror ());
+                        goto out;
+                }
+                if (!(*VOID(&(xl->reconfigure)) = dlsym (handle,
+                                                         "reconfigure"))) {
+                        gf_log ("xlator", GF_LOG_TRACE,
+                                "dlsym(reconfigure) on %s -- neglecting",
+                                dlerror());
+                }
+                if (!(*VOID(&(xl->notify)) = dlsym (handle, "notify"))) {
+                        gf_log ("xlator", GF_LOG_TRACE,
+                                "dlsym(notify) on %s -- neglecting",
+                                dlerror ());
+                }
 
-        if (!(*VOID(&(xl->notify)) = dlsym (handle, "notify"))) {
-                gf_log ("xlator", GF_LOG_TRACE,
-                        "dlsym(notify) on %s -- neglecting", dlerror ());
         }
 
         if (!(xl->dumpops = dlsym (handle, "dumpops"))) {
@@ -244,12 +248,6 @@ xlator_dynload (xlator_t *xl)
                 gf_log (xl->name, GF_LOG_TRACE,
                         "dlsym(mem_acct_init) on %s -- neglecting",
                         dlerror ());
-        }
-
-        if (!(*VOID(&(xl->reconfigure)) = dlsym (handle, "reconfigure"))) {
-                gf_log ("xlator", GF_LOG_TRACE,
-                        "dlsym(reconfigure) on %s -- neglecting",
-                        dlerror());
         }
 
         vol_opt = GF_CALLOC (1, sizeof (volume_opt_list_t),
@@ -622,6 +620,31 @@ out:
         return ret;
 }
 
+void
+loc_gfid (loc_t *loc, uuid_t gfid)
+{
+        if (!gfid)
+                goto out;
+        uuid_clear (gfid);
+
+        if (!loc)
+                goto out;
+        else if (!uuid_is_null (loc->gfid))
+                uuid_copy (gfid, loc->gfid);
+        else if (loc->inode && (!uuid_is_null (loc->inode->gfid)))
+                uuid_copy (gfid, loc->inode->gfid);
+out:
+        return;
+}
+
+char*
+loc_gfid_utoa (loc_t *loc)
+{
+        uuid_t gfid;
+        loc_gfid (loc, gfid);
+        return uuid_utoa (gfid);
+}
+
 int
 loc_copy (loc_t *dst, loc_t *src)
 {
@@ -661,6 +684,16 @@ err:
         return ret;
 }
 
+gf_boolean_t
+loc_is_root (loc_t *loc)
+{
+        if (loc && __is_root_gfid (loc->gfid)) {
+                return _gf_true;
+        } else if (loc && loc->inode && __is_root_gfid (loc->inode->gfid)) {
+                return _gf_true;
+        }
+        return _gf_false;
+}
 
 int
 xlator_list_destroy (xlator_list_t *list)

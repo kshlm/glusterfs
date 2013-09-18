@@ -94,6 +94,9 @@ const char *gd_op_list[GD_OP_MAX + 1] = {
         [GD_OP_LIST_VOLUME]             = "Lists",
         [GD_OP_CLEARLOCKS_VOLUME]       = "Clear locks",
         [GD_OP_DEFRAG_BRICK_VOLUME]     = "Rebalance",
+        [GD_OP_COPY_FILE]               = "Copy File",
+        [GD_OP_SYS_EXEC]                = "Execute system commands",
+        [GD_OP_GSYNC_CREATE]            = "Geo-replication Create",
         [GD_OP_MAX]                     = "Invalid op"
 };
 
@@ -519,7 +522,7 @@ runinit_gsyncd_setrx (runner_t *runner, glusterd_conf_t *conf)
 {
         runinit (runner);
         runner_add_args (runner, GSYNCD_PREFIX"/gsyncd", "-c", NULL);
-        runner_argprintf (runner, "%s/"GSYNC_CONF,conf->workdir);
+        runner_argprintf (runner, "%s/"GSYNC_CONF_TEMPLATE, conf->workdir);
         runner_add_arg (runner, "--config-set-rx");
 }
 
@@ -581,7 +584,7 @@ configure_syncdaemon (glusterd_conf_t *conf)
         /* gluster-params */
         runinit_gsyncd_setrx (&runner, conf);
         runner_add_args (&runner, "gluster-params",
-                         "xlator-option=*-dht.assert-no-child-down=true",
+                         "aux-gfid-mount xlator-option=*-dht.assert-no-child-down=true",
                          ".", ".", NULL);
         RUN_GSYNCD_CMD;
 
@@ -598,14 +601,30 @@ configure_syncdaemon (glusterd_conf_t *conf)
         /* pid-file */
         runinit_gsyncd_setrx (&runner, conf);
         runner_add_arg (&runner, "pid-file");
-        runner_argprintf (&runner, "%s/${mastervol}/${eSlave}.pid", georepdir);
+        runner_argprintf (&runner, "%s/${mastervol}_${remotehost}_${slavevol}/${eSlave}.pid", georepdir);
         runner_add_args (&runner, ".", ".", NULL);
         RUN_GSYNCD_CMD;
 
         /* state-file */
         runinit_gsyncd_setrx (&runner, conf);
         runner_add_arg (&runner, "state-file");
-        runner_argprintf (&runner, "%s/${mastervol}/${eSlave}.status", georepdir);
+        runner_argprintf (&runner, "%s/${mastervol}_${remotehost}_${slavevol}/${eSlave}.status", georepdir);
+        runner_add_args (&runner, ".", ".", NULL);
+        RUN_GSYNCD_CMD;
+
+        /* state-detail-file */
+        runinit_gsyncd_setrx (&runner, conf);
+        runner_add_arg (&runner, "state-detail-file");
+        runner_argprintf (&runner, "%s/${mastervol}_${remotehost}_${slavevol}/${eSlave}-detail.status",
+                          georepdir);
+        runner_add_args (&runner, ".", ".", NULL);
+        RUN_GSYNCD_CMD;
+
+        /* state-detail-file */
+        runinit_gsyncd_setrx (&runner, conf);
+        runner_add_arg (&runner, "state-detail-file");
+        runner_argprintf (&runner, "%s/${mastervol}_${remotehost}_${slavevol}/${eSlave}-detail.status",
+                          georepdir);
         runner_add_args (&runner, ".", ".", NULL);
         RUN_GSYNCD_CMD;
 
@@ -633,8 +652,30 @@ configure_syncdaemon (glusterd_conf_t *conf)
         runinit_gsyncd_setrx (&runner, conf);
         runner_add_args (&runner,
                          "gluster-log-file",
-                         DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP"/${mastervol}/${eSlave}.gluster.log",
+                         DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP"/${mastervol}/${eSlave}${local_id}.gluster.log",
                          ".", ".", NULL);
+        RUN_GSYNCD_CMD;
+
+        /* ignore-deletes */
+        runinit_gsyncd_setrx (&runner, conf);
+        runner_add_args (&runner, "ignore-deletes", "true", ".", ".", NULL);
+        RUN_GSYNCD_CMD;
+
+        /* special-sync-mode */
+        runinit_gsyncd_setrx (&runner, conf);
+        runner_add_args (&runner, "special-sync-mode", "partial", ".", ".", NULL);
+        RUN_GSYNCD_CMD;
+
+        /* change-detector == changelog */
+        runinit_gsyncd_setrx (&runner, conf);
+        runner_add_args(&runner, "change-detector", "changelog", ".", ".", NULL);
+        RUN_GSYNCD_CMD;
+
+        runinit_gsyncd_setrx (&runner, conf);
+        runner_add_arg(&runner, "working-dir");
+        runner_argprintf(&runner, "%s/${mastervol}/${eSlave}",
+                         DEFAULT_VAR_RUN_DIRECTORY);
+        runner_add_args (&runner, ".", ".", NULL);
         RUN_GSYNCD_CMD;
 
         /************
@@ -650,7 +691,7 @@ configure_syncdaemon (glusterd_conf_t *conf)
         /* gluster-params */
         runinit_gsyncd_setrx (&runner, conf);
         runner_add_args (&runner, "gluster-params",
-                         "xlator-option=*-dht.assert-no-child-down=true",
+                         "aux-gfid-mount xlator-option=*-dht.assert-no-child-down=true",
                          ".", NULL);
         RUN_GSYNCD_CMD;
 
@@ -869,27 +910,31 @@ _install_mount_spec (dict_t *opts, char *key, data_t *value, void *data)
         return -1;
 }
 
+
 static int
-glusterd_default_synctask_cbk (int ret, call_frame_t *frame, void *opaque)
+gd_default_synctask_cbk (int ret, call_frame_t *frame, void *opaque)
 {
-    return ret;
+        glusterd_conf_t     *priv = THIS->private;
+        synclock_unlock (&priv->big_lock);
+        return ret;
 }
 
-static int
-glusterd_launch_synctask (xlator_t *this, synctask_fn_t fn)
+static void
+glusterd_launch_synctask (synctask_fn_t fn, void *opaque)
 {
-    glusterd_conf_t *priv = NULL;
-    int              ret  = -1;
+        xlator_t        *this = NULL;
+        glusterd_conf_t *priv = NULL;
+        int             ret   = -1;
 
-    priv = this->private;
+        this = THIS;
+        priv = this->private;
 
-    ret = synctask_new (this->ctx->env, fn,
-                        glusterd_default_synctask_cbk, NULL, priv);
-
-    if (ret)
-            gf_log (this->name, GF_LOG_CRITICAL, "Failed to create synctask"
-                    "for starting process");
-    return ret;
+        synclock_lock (&priv->big_lock);
+        ret = synctask_new (this->ctx->env, fn, gd_default_synctask_cbk, NULL,
+                            opaque);
+        if (ret)
+                gf_log (this->name, GF_LOG_CRITICAL, "Failed to spawn bricks"
+                        " and other volume related services");
 }
 
 /*
@@ -913,10 +958,8 @@ init (xlator_t *this)
         int                first_time        = 0;
         char              *mountbroker_root  = NULL;
         int                i                 = 0;
-
-#ifdef DEBUG
         char              *valgrind_str      = NULL;
-#endif
+
         dir_data = dict_get (this->options, "working-directory");
 
         if (!dir_data) {
@@ -955,6 +998,7 @@ init (xlator_t *this)
                 first_time = 1;
         }
 
+        setenv ("GLUSTERD_WORKING_DIR", workdir, 1);
         gf_log (this->name, GF_LOG_INFO, "Using %s as working directory",
                 workdir);
 
@@ -1084,6 +1128,7 @@ init (xlator_t *this)
         conf->gfs_mgmt = &gd_brick_prog;
         strncpy (conf->workdir, workdir, PATH_MAX);
 
+        synclock_init (&conf->big_lock);
         pthread_mutex_init (&conf->xprt_lock, NULL);
         INIT_LIST_HEAD (&conf->xprt_list);
 
@@ -1098,7 +1143,6 @@ init (xlator_t *this)
                 goto out;
 
         /* Set option to run bricks on valgrind if enabled in glusterd.vol */
-#ifdef DEBUG
         conf->valgrind = _gf_false;
         ret = dict_get_str (this->options, "run-with-valgrind", &valgrind_str);
         if (ret < 0) {
@@ -1111,7 +1155,6 @@ init (xlator_t *this)
                                 "run-with-valgrind value not a boolean string");
                 }
         }
-#endif
 
         this->private = conf;
         (void) glusterd_nodesvc_set_online_status ("glustershd", _gf_false);
@@ -1148,6 +1191,13 @@ init (xlator_t *this)
         if (ret < 0)
                 goto out;
 
+        /* If there are no 'friends', this would be the best time to
+         * spawn process/bricks that may need (re)starting since last
+         * time (this) glusterd was up.*/
+
+        if (list_empty (&conf->peers)) {
+                glusterd_launch_synctask (glusterd_spawn_daemons, NULL);
+        }
         ret = glusterd_options_init (this);
         if (ret < 0)
                 goto out;
@@ -1155,13 +1205,6 @@ init (xlator_t *this)
         ret = glusterd_handle_upgrade_downgrade (this->options, conf);
         if (ret)
                 goto out;
-
-        glusterd_launch_synctask (this,
-                                  (synctask_fn_t) glusterd_restart_bricks);
-        glusterd_launch_synctask (this,
-                                  (synctask_fn_t) glusterd_restart_gsyncds);
-        glusterd_launch_synctask (this,
-                                  (synctask_fn_t) glusterd_restart_rebalance);
 
         ret = glusterd_hooks_spawn_worker (this);
         if (ret)
@@ -1200,7 +1243,7 @@ fini (xlator_t *this)
         conf = this->private;
         FREE (conf->pmap);
         if (conf->handle)
-                glusterd_store_handle_destroy (conf->handle);
+                gf_store_handle_destroy (conf->handle);
         glusterd_sm_tr_log_delete (&conf->op_sm_log);
         GF_FREE (conf);
         this->private = NULL;
@@ -1289,11 +1332,9 @@ struct volume_options options[] = {
         { .key = {GEOREP"-log-group"},
           .type = GF_OPTION_TYPE_ANY,
         },
-#ifdef DEBUG
         { .key = {"run-with-valgrind"},
           .type = GF_OPTION_TYPE_BOOL,
         },
-#endif
         { .key = {"server-quorum-type"},
           .type = GF_OPTION_TYPE_STR,
           .value = { "none", "server"},

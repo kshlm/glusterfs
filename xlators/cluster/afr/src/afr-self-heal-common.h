@@ -15,13 +15,6 @@
 #define AFR_SH_MIN_PARTICIPANTS 2
 
 typedef enum {
-        AFR_SELF_HEAL_ENTRY,
-        AFR_SELF_HEAL_METADATA,
-        AFR_SELF_HEAL_DATA,
-        AFR_SELF_HEAL_INVALID = -1,
-} afr_self_heal_type;
-
-typedef enum {
         AFR_LOOKUP_FAIL_CONFLICTS = 1,
         AFR_LOOKUP_FAIL_MISSING_GFIDS = 2,
 } afr_lookup_flags_t;
@@ -98,13 +91,13 @@ int
 afr_sh_entry_impunge_create (call_frame_t *impunge_frame, xlator_t *this,
                              int child_index);
 int
-afr_sh_data_unlock (call_frame_t *frame, xlator_t *this,
+afr_sh_data_unlock (call_frame_t *frame, xlator_t *this, char *dom,
                     afr_lock_cbk_t lock_cbk);
 afr_local_t *
-afr_local_copy (afr_local_t *l, xlator_t *this);
+afr_self_heal_local_init (afr_local_t *l, xlator_t *this);
 int
 afr_sh_data_lock (call_frame_t *frame, xlator_t *this,
-                  off_t start, off_t len, gf_boolean_t block,
+                  off_t start, off_t len, gf_boolean_t block, char *dom,
                   afr_lock_cbk_t success_handler,
                   afr_lock_cbk_t failure_handler);
 void
@@ -133,4 +126,19 @@ int
 afr_sh_erase_pending (call_frame_t *frame, xlator_t *this,
                       afr_transaction_type type, afr_fxattrop_cbk_t cbk,
                       int (*finish)(call_frame_t *frame, xlator_t *this));
+
+void
+afr_set_local_for_unhealable (afr_local_t *local);
+
+int
+is_self_heal_failed (afr_self_heal_t *sh, afr_sh_fail_check_type type);
+
+void
+afr_set_self_heal_status (afr_self_heal_t *sh, afr_self_heal_status status);
+
+void
+afr_log_self_heal_completion_status (afr_local_t *local, gf_loglevel_t  logl);
+
+char*
+afr_get_pending_matrix_str (int32_t *pending_matrix[], xlator_t *this);
 #endif /* __AFR_SELF_HEAL_COMMON_H__ */

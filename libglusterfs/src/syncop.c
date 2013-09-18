@@ -28,7 +28,7 @@ __run (struct synctask *task)
         case SYNCTASK_SUSPEND:
                 break;
         case SYNCTASK_RUN:
-                gf_log (task->xl->name, GF_LOG_WARNING,
+                gf_log (task->xl->name, GF_LOG_DEBUG,
                         "re-running already running task");
                 env->runcount--;
                 break;
@@ -38,7 +38,11 @@ __run (struct synctask *task)
         case SYNCTASK_DONE:
                 gf_log (task->xl->name, GF_LOG_WARNING,
                         "running completed task");
-                break;
+		return;
+	case SYNCTASK_ZOMBIE:
+		gf_log (task->xl->name, GF_LOG_WARNING,
+			"attempted to wake up zombie!!");
+		return;
         }
 
         list_add_tail (&task->all_tasks, &env->runq);
@@ -70,7 +74,11 @@ __wait (struct synctask *task)
         case SYNCTASK_DONE:
                 gf_log (task->xl->name, GF_LOG_WARNING,
                         "running completed task");
-                break;
+                return;
+	case SYNCTASK_ZOMBIE:
+		gf_log (task->xl->name, GF_LOG_WARNING,
+			"attempted to sleep a zombie!!");
+		return;
         }
 
         list_add_tail (&task->all_tasks, &env->waitq);
@@ -80,53 +88,23 @@ __wait (struct synctask *task)
 
 
 void
-synctask_waitfor (struct synctask *task, int waitfor)
+synctask_yield (struct synctask *task)
 {
-	struct syncenv *env = NULL;
         xlator_t *oldTHIS = THIS;
-
-	env = task->env;
 
 #if defined(__NetBSD__) && defined(_UC_TLSBASE)
         /* Preserve pthread private pointer through swapcontex() */
         task->proc->sched.uc_flags &= ~_UC_TLSBASE;
 #endif
 
-	pthread_mutex_lock (&env->mutex);
-	{
-		task->waitfor = waitfor;
-	}
-	pthread_mutex_unlock (&env->mutex);
-
+        if (task->state != SYNCTASK_DONE)
+                task->state = SYNCTASK_SUSPEND;
         if (swapcontext (&task->ctx, &task->proc->sched) < 0) {
                 gf_log ("syncop", GF_LOG_ERROR,
                         "swapcontext failed (%s)", strerror (errno));
         }
 
         THIS = oldTHIS;
-}
-
-
-void
-synctask_yield (struct synctask *task)
-{
-	synctask_waitfor (task, 1);
-}
-
-
-void
-synctask_yawn (struct synctask *task)
-{
-	struct syncenv *env = NULL;
-
-	env = task->env;
-
-	pthread_mutex_lock (&env->mutex);
-	{
-		task->woken = 0;
-		task->waitfor = 0;
-	}
-	pthread_mutex_unlock (&env->mutex);
 }
 
 
@@ -139,14 +117,14 @@ synctask_wake (struct synctask *task)
 
         pthread_mutex_lock (&env->mutex);
         {
-                task->woken++;
+                task->woken = 1;
 
-                if (task->slept && task->woken >= task->waitfor)
+                if (task->slept)
                         __run (task);
+
+		pthread_cond_broadcast (&env->cond);
         }
         pthread_mutex_unlock (&env->mutex);
-
-        pthread_cond_broadcast (&env->cond);
 }
 
 void
@@ -179,9 +157,10 @@ synctask_destroy (struct synctask *task)
         if (task->opframe)
                 STACK_DESTROY (task->opframe->root);
 
-        pthread_mutex_destroy (&task->mutex);
-
-        pthread_cond_destroy (&task->cond);
+        if (task->synccbk == NULL) {
+               pthread_mutex_destroy (&task->mutex);
+               pthread_cond_destroy (&task->cond);
+        }
 
         FREE (task);
 }
@@ -197,6 +176,7 @@ synctask_done (struct synctask *task)
 
         pthread_mutex_lock (&task->mutex);
         {
+		task->state = SYNCTASK_ZOMBIE;
                 task->done = 1;
                 pthread_cond_broadcast (&task->cond);
         }
@@ -220,20 +200,19 @@ synctask_setid (struct synctask *task, uid_t uid, gid_t gid)
 }
 
 
-int
-synctask_new (struct syncenv *env, synctask_fn_t fn, synctask_cbk_t cbk,
-              call_frame_t *frame, void *opaque)
+struct synctask *
+synctask_create (struct syncenv *env, synctask_fn_t fn, synctask_cbk_t cbk,
+		 call_frame_t *frame, void *opaque)
 {
         struct synctask *newtask = NULL;
         xlator_t        *this    = THIS;
-        int              ret     = 0;
 
         VALIDATE_OR_GOTO (env, err);
         VALIDATE_OR_GOTO (fn, err);
 
         newtask = CALLOC (1, sizeof (*newtask));
         if (!newtask)
-                return -ENOMEM;
+                return NULL;
 
         newtask->frame      = frame;
         if (!frame) {
@@ -254,6 +233,7 @@ synctask_new (struct syncenv *env, synctask_fn_t fn, synctask_cbk_t cbk,
         newtask->gid = newtask->opframe->root->gid;
 
         INIT_LIST_HEAD (&newtask->all_tasks);
+        INIT_LIST_HEAD (&newtask->waitq);
 
         if (getcontext (&newtask->ctx) < 0) {
                 gf_log ("syncop", GF_LOG_ERROR,
@@ -291,21 +271,7 @@ synctask_new (struct syncenv *env, synctask_fn_t fn, synctask_cbk_t cbk,
          */
         syncenv_scale(env);
 
-        if (!cbk) {
-                pthread_mutex_lock (&newtask->mutex);
-                {
-                        while (!newtask->done) {
-                                pthread_cond_wait (&newtask->cond, &newtask->mutex);
-                        }
-                }
-                pthread_mutex_unlock (&newtask->mutex);
-
-                ret = newtask->ret;
-
-                synctask_destroy (newtask);
-        }
-
-        return ret;
+	return newtask;
 err:
         if (newtask) {
                 FREE (newtask->stack);
@@ -313,7 +279,46 @@ err:
                         STACK_DESTROY (newtask->opframe->root);
                 FREE (newtask);
         }
-        return -1;
+
+        return NULL;
+}
+
+
+int
+synctask_join (struct synctask *task)
+{
+	int ret = 0;
+
+	pthread_mutex_lock (&task->mutex);
+	{
+		while (!task->done)
+			pthread_cond_wait (&task->cond, &task->mutex);
+	}
+	pthread_mutex_unlock (&task->mutex);
+
+	ret = task->ret;
+
+	synctask_destroy (task);
+
+	return ret;
+}
+
+
+int
+synctask_new (struct syncenv *env, synctask_fn_t fn, synctask_cbk_t cbk,
+              call_frame_t *frame, void *opaque)
+{
+	struct synctask *newtask = NULL;
+	int              ret = 0;
+
+	newtask = synctask_create (env, fn, cbk, frame, opaque);
+	if (!newtask)
+		return -1;
+
+        if (!cbk)
+		ret = synctask_join (newtask);
+
+        return ret;
 }
 
 
@@ -336,7 +341,7 @@ syncenv_task (struct syncproc *proc)
                         if (!list_empty (&env->runq))
                                 break;
                         if ((ret == ETIMEDOUT) &&
-                            (env->procs > SYNCENV_PROC_MIN)) {
+                            (env->procs > env->procmin)) {
                                 task = NULL;
                                 env->procs--;
                                 memset (proc, 0, sizeof (*proc));
@@ -348,6 +353,9 @@ syncenv_task (struct syncproc *proc)
 
                 list_del_init (&task->all_tasks);
                 env->runcount--;
+
+                task->woken = 0;
+                task->slept = 0;
 
                 task->proc = proc;
         }
@@ -368,10 +376,6 @@ synctask_switchto (struct synctask *task)
         synctask_set (task);
         THIS = task->xl;
 
-        task->woken = 0;
-        task->slept = 0;
-	task->waitfor = 0;
-
 #if defined(__NetBSD__) && defined(_UC_TLSBASE)
         /* Preserve pthread private pointer through swapcontex() */
         task->ctx.uc_flags &= ~_UC_TLSBASE;
@@ -389,7 +393,7 @@ synctask_switchto (struct synctask *task)
 
         pthread_mutex_lock (&env->mutex);
         {
-                if (task->woken >= task->waitfor) {
+                if (task->woken) {
                         __run (task);
                 } else {
                         task->slept = 1;
@@ -437,13 +441,13 @@ syncenv_scale (struct syncenv *env)
                         goto unlock;
 
                 scale = env->runcount;
-                if (scale > SYNCENV_PROC_MAX)
-                        scale = SYNCENV_PROC_MAX;
+                if (scale > env->procmax)
+                        scale = env->procmax;
                 if (scale > env->procs)
                         diff = scale - env->procs;
                 while (diff) {
                         diff--;
-                        for (; (i < SYNCENV_PROC_MAX); i++) {
+                        for (; (i < env->procmax); i++) {
                                 if (env->proc[i].processor == 0)
                                         break;
                         }
@@ -470,11 +474,19 @@ syncenv_destroy (struct syncenv *env)
 
 
 struct syncenv *
-syncenv_new (size_t stacksize)
+syncenv_new (size_t stacksize, int procmin, int procmax)
 {
         struct syncenv *newenv = NULL;
         int             ret = 0;
         int             i = 0;
+
+	if (!procmin || procmin < 0)
+		procmin = SYNCENV_PROC_MIN;
+	if (!procmax || procmax > SYNCENV_PROC_MAX)
+		procmax = SYNCENV_PROC_MAX;
+
+	if (procmin > procmax)
+		return NULL;
 
         newenv = CALLOC (1, sizeof (*newenv));
 
@@ -490,8 +502,10 @@ syncenv_new (size_t stacksize)
         newenv->stacksize    = SYNCENV_DEFAULT_STACKSIZE;
         if (stacksize)
                 newenv->stacksize = stacksize;
+	newenv->procmin = procmin;
+	newenv->procmax = procmax;
 
-        for (i = 0; i < SYNCENV_PROC_MIN; i++) {
+        for (i = 0; i < newenv->procmin; i++) {
                 newenv->proc[i].env = newenv;
                 ret = pthread_create (&newenv->proc[i].processor, NULL,
                                       syncenv_processor, &newenv->proc[i]);
@@ -546,12 +560,11 @@ __synclock_lock (struct synclock *lock)
 		if (task) {
 			/* called within a synctask */
 			list_add_tail (&task->waitq, &lock->waitq);
-			{
-				pthread_mutex_unlock (&lock->guard);
-				synctask_yield (task);
-				pthread_mutex_lock (&lock->guard);
-			}
-			list_del_init (&task->waitq);
+                        pthread_mutex_unlock (&lock->guard);
+                        synctask_yield (task);
+                        /* task is removed from waitq in unlock,
+                         * under lock->guard.*/
+                        pthread_mutex_lock (&lock->guard);
 		} else {
 			/* called by a non-synctask */
 			pthread_cond_wait (&lock->cond, &lock->guard);
@@ -633,6 +646,7 @@ __synclock_unlock (synclock_t *lock)
 	pthread_cond_signal (&lock->cond);
 	if (!list_empty (&lock->waitq)) {
 		task = list_entry (lock->waitq.next, struct synctask, waitq);
+                list_del_init (&task->waitq);
 		synctask_wake (task);
 	}
 
@@ -650,6 +664,120 @@ synclock_unlock (synclock_t *lock)
 		ret = __synclock_unlock (lock);
 	}
 	pthread_mutex_unlock (&lock->guard);
+
+	return ret;
+}
+
+/* Barriers */
+
+int
+syncbarrier_init (struct syncbarrier *barrier)
+{
+	if (!barrier) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	pthread_cond_init (&barrier->cond, 0);
+	barrier->count = 0;
+	INIT_LIST_HEAD (&barrier->waitq);
+
+	return pthread_mutex_init (&barrier->guard, 0);
+}
+
+
+int
+syncbarrier_destroy (struct syncbarrier *barrier)
+{
+	if (!barrier) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	pthread_cond_destroy (&barrier->cond);
+	return pthread_mutex_destroy (&barrier->guard);
+}
+
+
+static int
+__syncbarrier_wait (struct syncbarrier *barrier, int waitfor)
+{
+	struct synctask *task = NULL;
+
+	if (!barrier) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	task = synctask_get ();
+
+	while (barrier->count < waitfor) {
+		if (task) {
+			/* called within a synctask */
+			list_add_tail (&task->waitq, &barrier->waitq);
+                        pthread_mutex_unlock (&barrier->guard);
+                        synctask_yield (task);
+                        pthread_mutex_lock (&barrier->guard);
+		} else {
+			/* called by a non-synctask */
+			pthread_cond_wait (&barrier->cond, &barrier->guard);
+		}
+	}
+
+	barrier->count = 0;
+
+	return 0;
+}
+
+
+int
+syncbarrier_wait (struct syncbarrier *barrier, int waitfor)
+{
+	int ret = 0;
+
+	pthread_mutex_lock (&barrier->guard);
+	{
+		ret = __syncbarrier_wait (barrier, waitfor);
+	}
+	pthread_mutex_unlock (&barrier->guard);
+
+	return ret;
+}
+
+
+static int
+__syncbarrier_wake (struct syncbarrier *barrier)
+{
+	struct synctask *task = NULL;
+
+	if (!barrier) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	barrier->count++;
+
+	pthread_cond_signal (&barrier->cond);
+	if (!list_empty (&barrier->waitq)) {
+		task = list_entry (barrier->waitq.next, struct synctask, waitq);
+                list_del_init (&task->waitq);
+		synctask_wake (task);
+	}
+
+	return 0;
+}
+
+
+int
+syncbarrier_wake (struct syncbarrier *barrier)
+{
+	int ret = 0;
+
+	pthread_mutex_lock (&barrier->guard);
+	{
+		ret = __syncbarrier_wake (barrier);
+	}
+	pthread_mutex_unlock (&barrier->guard);
 
 	return ret;
 }
@@ -717,6 +845,8 @@ entry_copy (gf_dirent_t *source)
         sink->d_type = source->d_type;
         sink->d_stat = source->d_stat;
 
+	if (source->inode)
+		sink->inode = inode_ref (source->inode);
         return sink;
 }
 
@@ -1346,6 +1476,9 @@ syncop_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         args->op_ret   = op_ret;
         args->op_errno = op_errno;
 
+	if (buf)
+		args->iatt1 = *buf;
+
         __wake (args);
 
         return 0;
@@ -1353,7 +1486,7 @@ syncop_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 syncop_create (xlator_t *subvol, loc_t *loc, int32_t flags, mode_t mode,
-               fd_t *fd, dict_t *xdata)
+               fd_t *fd, dict_t *xdata, struct iatt *iatt)
 {
         struct syncargs args = {0, };
 
@@ -1361,6 +1494,9 @@ syncop_create (xlator_t *subvol, loc_t *loc, int32_t flags, mode_t mode,
                 loc, flags, mode, 0, fd, xdata);
 
         errno = args.op_errno;
+	if (iatt)
+		*iatt = args.iatt1;
+
         return args.op_ret;
 
 }
@@ -1657,6 +1793,8 @@ syncop_symlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         args->op_ret   = op_ret;
         args->op_errno = op_errno;
+	if (buf)
+		args->iatt1 = *buf;
 
         __wake (args);
 
@@ -1664,7 +1802,8 @@ syncop_symlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 }
 
 int
-syncop_symlink (xlator_t *subvol, loc_t *loc, const char *newpath, dict_t *dict)
+syncop_symlink (xlator_t *subvol, loc_t *loc, const char *newpath, dict_t *dict,
+		struct iatt *iatt)
 {
         struct syncargs args = {0, };
 
@@ -1672,6 +1811,9 @@ syncop_symlink (xlator_t *subvol, loc_t *loc, const char *newpath, dict_t *dict)
                 newpath, loc, 0, dict);
 
         errno = args.op_errno;
+	if (iatt)
+		*iatt = args.iatt1;
+
         return args.op_ret;
 
 }
@@ -1725,6 +1867,9 @@ syncop_mknod_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         args->op_ret   = op_ret;
         args->op_errno = op_errno;
 
+	if (buf)
+		args->iatt1 = *buf;
+
         __wake (args);
 
         return 0;
@@ -1732,7 +1877,7 @@ syncop_mknod_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 syncop_mknod (xlator_t *subvol, loc_t *loc, mode_t mode, dev_t rdev,
-              dict_t *dict)
+              dict_t *dict, struct iatt *iatt)
 {
         struct syncargs args = {0, };
 
@@ -1740,6 +1885,9 @@ syncop_mknod (xlator_t *subvol, loc_t *loc, mode_t mode, dev_t rdev,
                 loc, mode, rdev, 0, dict);
 
         errno = args.op_errno;
+	if (iatt)
+		*iatt = args.iatt1;
+
         return args.op_ret;
 
 }
@@ -1757,6 +1905,8 @@ syncop_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         args->op_ret   = op_ret;
         args->op_errno = op_errno;
+	if (buf)
+		args->iatt1 = *buf;
 
         __wake (args);
 
@@ -1765,7 +1915,8 @@ syncop_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 
 int
-syncop_mkdir (xlator_t *subvol, loc_t *loc, mode_t mode, dict_t *dict)
+syncop_mkdir (xlator_t *subvol, loc_t *loc, mode_t mode, dict_t *dict,
+	      struct iatt *iatt)
 {
         struct syncargs args = {0, };
 
@@ -1773,6 +1924,9 @@ syncop_mkdir (xlator_t *subvol, loc_t *loc, mode_t mode, dict_t *dict)
                 loc, mode, 0, dict);
 
         errno = args.op_errno;
+	if (iatt)
+		*iatt = args.iatt1;
+
         return args.op_ret;
 
 }
@@ -1801,5 +1955,100 @@ syncop_access (xlator_t *subvol, loc_t *loc, int32_t mask)
                 loc, mask, NULL);
 
         errno = args.op_errno;
+        return args.op_ret;
+}
+
+
+int
+syncop_fallocate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                      int op_ret, int op_errno, struct iatt *prebuf,
+                      struct iatt *postbuf, dict_t *xdata)
+{
+	struct syncargs *args = NULL;
+
+        args = cookie;
+
+        args->op_ret   = op_ret;
+        args->op_errno = op_errno;
+
+        __wake (args);
+
+	return 0;
+}
+
+int
+syncop_fallocate(xlator_t *subvol, fd_t *fd, int32_t keep_size, off_t offset,
+		 size_t len)
+{
+        struct syncargs args = {0, };
+
+        SYNCOP (subvol, (&args), syncop_fallocate_cbk, subvol->fops->fallocate,
+                fd, keep_size, offset, len, NULL);
+
+        errno = args.op_errno;
+        return args.op_ret;
+}
+
+
+int
+syncop_discard_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                    int op_ret, int op_errno, struct iatt *prebuf,
+                    struct iatt *postbuf, dict_t *xdata)
+{
+	struct syncargs *args = NULL;
+
+        args = cookie;
+
+        args->op_ret   = op_ret;
+        args->op_errno = op_errno;
+
+        __wake (args);
+
+	return 0;
+}
+
+int
+syncop_discard(xlator_t *subvol, fd_t *fd, off_t offset, size_t len)
+{
+        struct syncargs args = {0, };
+
+        SYNCOP (subvol, (&args), syncop_discard_cbk, subvol->fops->discard,
+                fd, offset, len, NULL);
+
+        errno = args.op_errno;
+        return args.op_ret;
+}
+
+
+int
+syncop_lk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+	       int op_ret, int op_errno, struct gf_flock *flock,
+	       dict_t *xdata)
+{
+        struct syncargs *args = NULL;
+
+        args = cookie;
+
+        args->op_ret   = op_ret;
+        args->op_errno = op_errno;
+	if (flock)
+		args->flock = *flock;
+        __wake (args);
+
+        return 0;
+}
+
+
+int
+syncop_lk (xlator_t *subvol, fd_t *fd, int cmd, struct gf_flock *flock)
+{
+        struct syncargs args = {0, };
+
+        SYNCOP (subvol, (&args), syncop_lk_cbk, subvol->fops->lk,
+                fd, cmd, flock, NULL);
+
+        errno = args.op_errno;
+	*flock = args.flock;
+
         return args.op_ret;
 }

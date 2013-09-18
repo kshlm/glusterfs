@@ -197,7 +197,7 @@ call_bail (void *data)
                           ".%"GF_PRI_SUSECONDS, trav->saved_at.tv_usec);
 
 		gf_log (conn->trans->name, GF_LOG_ERROR,
-			"bailing out frame type(%s) op(%s(%d)) xid = 0x%ux "
+			"bailing out frame type(%s) op(%s(%d)) xid = 0x%x "
                         "sent = %s. timeout = %d",
 			trav->rpcreq->prog->progname,
                         (trav->rpcreq->prog->procnames) ?
@@ -359,7 +359,7 @@ saved_frames_unwind (struct saved_frames *saved_frames)
                 gf_log_callingfn (trav->rpcreq->conn->trans->name,
                                   GF_LOG_ERROR,
                                   "forced unwinding frame type(%s) op(%s(%d)) "
-                                  "called at %s (xid=0x%ux)",
+                                  "called at %s (xid=0x%x)",
                                   trav->rpcreq->prog->progname,
                                   ((trav->rpcreq->prog->procnames) ?
                                    trav->rpcreq->prog->procnames[trav->rpcreq->procnum]
@@ -661,7 +661,7 @@ rpc_clnt_reply_init (rpc_clnt_connection_t *conn, rpc_transport_pollin_t *msg,
         }
 
         gf_log (conn->trans->name, GF_LOG_TRACE,
-                "received rpc message (RPC XID: 0x%ux"
+                "received rpc message (RPC XID: 0x%x"
                 " Program: %s, ProgVers: %d, Proc: %d) from rpc-transport (%s)",
                 saved_frame->rpcreq->xid,
                 saved_frame->rpcreq->prog->progname,
@@ -819,6 +819,9 @@ out:
         return;
 }
 
+static void
+rpc_clnt_destroy (struct rpc_clnt *rpc);
+
 int
 rpc_clnt_notify (rpc_transport_t *trans, void *mydata,
                  rpc_transport_event_t event, void *data, ...)
@@ -864,9 +867,7 @@ rpc_clnt_notify (rpc_transport_t *trans, void *mydata,
         }
 
         case RPC_TRANSPORT_CLEANUP:
-                /* this event should not be received on a client for, a
-                 * transport is only disconnected, but never destroyed.
-                 */
+                rpc_clnt_destroy (clnt);
                 ret = 0;
                 break;
 
@@ -1481,7 +1482,7 @@ rpc_clnt_submit (struct rpc_clnt *rpc, rpc_clnt_prog_t *prog,
                 if (ret == -1) {
                         gf_log (conn->trans->name, GF_LOG_WARNING,
                                 "failed to submit rpc-request "
-                                "(XID: 0x%ux Program: %s, ProgVers: %d, "
+                                "(XID: 0x%x Program: %s, ProgVers: %d, "
                                 "Proc: %d) to rpc-transport (%s)", rpcreq->xid,
                                 rpcreq->prog->progname, rpcreq->prog->progver,
                                 rpcreq->procnum, rpc->conn.trans->name);
@@ -1492,7 +1493,7 @@ rpc_clnt_submit (struct rpc_clnt *rpc, rpc_clnt_prog_t *prog,
                         __save_frame (rpc, frame, rpcreq);
 
                         gf_log ("rpc-clnt", GF_LOG_TRACE, "submitted request "
-                                "(XID: 0x%ux Program: %s, ProgVers: %d, "
+                                "(XID: 0x%x Program: %s, ProgVers: %d, "
                                 "Proc: %d) to rpc-transport (%s)", rpcreq->xid,
                                 rpcreq->prog->progname, rpcreq->prog->progver,
                                 rpcreq->procnum, rpc->conn.trans->name);
@@ -1541,18 +1542,21 @@ rpc_clnt_ref (struct rpc_clnt *rpc)
 
 
 static void
+rpc_clnt_trigger_destroy (struct rpc_clnt *rpc)
+{
+        if (!rpc)
+                return;
+
+        rpc_clnt_disable (rpc);
+        rpc_transport_unref (rpc->conn.trans);
+}
+
+static void
 rpc_clnt_destroy (struct rpc_clnt *rpc)
 {
         if (!rpc)
                 return;
 
-        if (rpc->conn.trans) {
-                rpc_transport_unregister_notify (rpc->conn.trans);
-                rpc_transport_disconnect (rpc->conn.trans);
-                rpc_transport_unref (rpc->conn.trans);
-        }
-
-        rpc_clnt_reconnect_cleanup (&rpc->conn);
         saved_frames_destroy (rpc->conn.saved_frames);
         pthread_mutex_destroy (&rpc->lock);
         pthread_mutex_destroy (&rpc->conn.lock);
@@ -1579,12 +1583,35 @@ rpc_clnt_unref (struct rpc_clnt *rpc)
         }
         pthread_mutex_unlock (&rpc->lock);
         if (!count) {
-                rpc_clnt_destroy (rpc);
+                rpc_clnt_trigger_destroy (rpc);
                 return NULL;
         }
         return rpc;
 }
 
+
+char
+rpc_clnt_is_disabled (struct rpc_clnt *rpc)
+{
+
+        rpc_clnt_connection_t *conn = NULL;
+        char                   disabled = 0;
+
+        if (!rpc) {
+                goto out;
+        }
+
+        conn = &rpc->conn;
+
+        pthread_mutex_lock (&conn->lock);
+        {
+                disabled = rpc->disabled;
+        }
+        pthread_mutex_unlock (&conn->lock);
+
+out:
+        return disabled;
+}
 
 void
 rpc_clnt_disable (struct rpc_clnt *rpc)
@@ -1669,59 +1696,3 @@ rpc_clnt_reconfig (struct rpc_clnt *rpc, struct rpc_clnt_config *config)
         }
 }
 
-int
-rpc_clnt_transport_unix_options_build (dict_t **options, char *filepath,
-                                       int frame_timeout)
-{
-        dict_t                  *dict = NULL;
-        char                    *fpath = NULL;
-        int                     ret = -1;
-
-        GF_ASSERT (filepath);
-        GF_ASSERT (options);
-
-        dict = dict_new ();
-        if (!dict)
-                goto out;
-
-        fpath = gf_strdup (filepath);
-        if (!fpath) {
-                ret = -1;
-                goto out;
-        }
-
-        ret = dict_set_dynstr (dict, "transport.socket.connect-path", fpath);
-        if (ret)
-                goto out;
-
-        ret = dict_set_str (dict, "transport.address-family", "unix");
-        if (ret)
-                goto out;
-
-        ret = dict_set_str (dict, "transport.socket.nodelay", "off");
-        if (ret)
-                goto out;
-
-        ret = dict_set_str (dict, "transport-type", "socket");
-        if (ret)
-                goto out;
-
-        ret = dict_set_str (dict, "transport.socket.keepalive", "off");
-        if (ret)
-                goto out;
-
-        if (frame_timeout > 0) {
-                ret = dict_set_int32 (dict, "frame-timeout", frame_timeout);
-                if (ret)
-                        goto out;
-        }
-
-        *options = dict;
-out:
-        if (ret) {
-                GF_FREE (fpath);
-                if (dict)
-                        dict_unref (dict);
-        }
-        return ret;
-}

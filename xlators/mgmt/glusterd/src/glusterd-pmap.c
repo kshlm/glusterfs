@@ -280,7 +280,7 @@ out:
 }
 
 int
-gluster_pmap_portbybrick (rpcsvc_request_t *req)
+__gluster_pmap_portbybrick (rpcsvc_request_t *req)
 {
         pmap_port_by_brick_req    args = {0,};
         pmap_port_by_brick_rsp    rsp  = {0,};
@@ -314,7 +314,14 @@ fail:
 
 
 int
-gluster_pmap_brickbyport (rpcsvc_request_t *req)
+gluster_pmap_portbybrick (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req, __gluster_pmap_portbybrick);
+}
+
+
+int
+__gluster_pmap_brickbyport (rpcsvc_request_t *req)
 {
         pmap_brick_by_port_req    args = {0,};
         pmap_brick_by_port_rsp    rsp  = {0,};
@@ -340,6 +347,14 @@ fail:
         return 0;
 }
 
+
+int
+gluster_pmap_brickbyport (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req, __gluster_pmap_brickbyport);
+}
+
+
 static int
 glusterd_brick_update_signin (glusterd_brickinfo_t *brickinfo,
                               gf_boolean_t value)
@@ -350,7 +365,7 @@ glusterd_brick_update_signin (glusterd_brickinfo_t *brickinfo,
 }
 
 int
-gluster_pmap_signup (rpcsvc_request_t *req)
+__gluster_pmap_signup (rpcsvc_request_t *req)
 {
         pmap_signup_req    args = {0,};
         pmap_signup_rsp    rsp  = {0,};
@@ -376,7 +391,13 @@ fail:
 }
 
 int
-gluster_pmap_signin (rpcsvc_request_t *req)
+gluster_pmap_signup (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req, __gluster_pmap_signup);
+}
+
+int
+__gluster_pmap_signin (rpcsvc_request_t *req)
 {
         pmap_signin_req    args = {0,};
         pmap_signin_rsp    rsp  = {0,};
@@ -407,9 +428,15 @@ fail:
 }
 
 
+int
+gluster_pmap_signin (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req, __gluster_pmap_signin);
+}
+
 
 int
-gluster_pmap_signout (rpcsvc_request_t *req)
+__gluster_pmap_signout (rpcsvc_request_t *req)
 {
         pmap_signout_req    args = {0,};
         pmap_signout_rsp    rsp  = {0,};
@@ -440,18 +467,19 @@ fail:
         return 0;
 }
 
+int
+gluster_pmap_signout (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req, __gluster_pmap_signout);
+}
+
 rpcsvc_actor_t gluster_pmap_actors[] = {
-        [GF_PMAP_NULL] = {"NULL", GF_PMAP_NULL, NULL, NULL, 0},
-        [GF_PMAP_PORTBYBRICK] = {"PORTBYBRICK", GF_PMAP_PORTBYBRICK,
-                                 gluster_pmap_portbybrick, NULL, 0},
-        [GF_PMAP_BRICKBYPORT] = {"BRICKBYPORT", GF_PMAP_BRICKBYPORT,
-                                 gluster_pmap_brickbyport, NULL, 0},
-        [GF_PMAP_SIGNIN] = {"SIGNIN", GF_PMAP_SIGNIN,
-                              gluster_pmap_signin, NULL, 0},
-        [GF_PMAP_SIGNOUT] = {"SIGNOUT", GF_PMAP_SIGNOUT,
-                              gluster_pmap_signout, NULL, 0},
-        [GF_PMAP_SIGNUP] = {"SIGNUP", GF_PMAP_SIGNUP,
-                              gluster_pmap_signup, NULL, 0},
+        [GF_PMAP_NULL]        = {"NULL",        GF_PMAP_NULL,        NULL,                     NULL, 0, DRC_NA},
+        [GF_PMAP_PORTBYBRICK] = {"PORTBYBRICK", GF_PMAP_PORTBYBRICK, gluster_pmap_portbybrick, NULL, 0, DRC_NA},
+        [GF_PMAP_BRICKBYPORT] = {"BRICKBYPORT", GF_PMAP_BRICKBYPORT, gluster_pmap_brickbyport, NULL, 0, DRC_NA},
+        [GF_PMAP_SIGNIN]      = {"SIGNIN",      GF_PMAP_SIGNIN,      gluster_pmap_signin,      NULL, 0, DRC_NA},
+        [GF_PMAP_SIGNOUT]     = {"SIGNOUT",     GF_PMAP_SIGNOUT,     gluster_pmap_signout,     NULL, 0, DRC_NA},
+        [GF_PMAP_SIGNUP]      = {"SIGNUP",      GF_PMAP_SIGNUP,      gluster_pmap_signup,      NULL, 0, DRC_NA},
 };
 
 

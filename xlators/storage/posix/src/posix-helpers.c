@@ -22,6 +22,7 @@
 #include <pthread.h>
 #include <ftw.h>
 #include <sys/stat.h>
+#include <signal.h>
 
 #ifndef GF_BSD_HOST_OS
 #include <alloca.h>
@@ -900,6 +901,74 @@ unlock:
         UNLOCK (&priv->lock);
 }
 
+static int
+is_fresh_file (struct stat *stat)
+{
+        struct timeval tv;
+
+        gettimeofday (&tv, NULL);
+
+        if ((stat->st_ctime >= (tv.tv_sec - 1))
+            && (stat->st_ctime <= tv.tv_sec))
+                return 1;
+
+        return 0;
+}
+
+
+int
+posix_gfid_heal (xlator_t *this, const char *path, loc_t *loc, dict_t *xattr_req)
+{
+        /* The purpose of this function is to prevent a race
+           where an inode creation FOP (like mkdir/mknod/create etc)
+           races with lookup in the following way:
+
+                   {create thread}       |    {lookup thread}
+                                         |
+                                         t0
+                      mkdir ("name")     |
+                                         t1
+                                         |     posix_gfid_set ("name", 2);
+                                         t2
+             posix_gfid_set ("name", 1); |
+                                         t3
+                      lstat ("name");    |     lstat ("name");
+
+          In the above case mkdir FOP would have resulted with GFID 2 while
+          it should have been GFID 1. It matters in the case where GFID would
+          have gotten set to 1 on other subvolumes of replciate/distribute
+
+          The "solution" here is that, if we detect lookup is attempting to
+          set a GFID on a file which is created very recently, but does not
+          yet have a GFID (i.e, between t1 and t2), then "fake" it as though
+          posix_gfid_heal was called at t0 instead.
+        */
+
+        uuid_t       uuid_curr;
+        int          ret = 0;
+        struct stat  stat = {0, };
+
+        if (!xattr_req)
+                goto out;
+
+        if (sys_lstat (path, &stat) != 0)
+                goto out;
+
+        ret = sys_lgetxattr (path, GFID_XATTR_KEY, uuid_curr, 16);
+        if (ret != 16) {
+                if (is_fresh_file (&stat)) {
+                        ret = -1;
+                        errno = ENOENT;
+                        goto out;
+                }
+        }
+
+        ret = posix_gfid_set (this, path, loc, xattr_req);
+out:
+        return ret;
+}
+
+
 int
 posix_acl_xattr_set (xlator_t *this, const char *path, dict_t *xattr_req)
 {
@@ -1062,4 +1131,260 @@ posix_fd_ctx_get (fd_t *fd, xlator_t *this, struct posix_fd **pfd)
         UNLOCK (&fd->inode->lock);
 
         return ret;
+}
+
+static void *
+posix_health_check_thread_proc (void *data)
+{
+        xlator_t             *this               = NULL;
+        struct posix_private *priv               = NULL;
+        uint32_t              interval           = 0;
+        int                   ret                = -1;
+        struct stat           sb                 = {0, };
+
+        this = data;
+        priv = this->private;
+
+        /* prevent races when the interval is updated */
+        interval = priv->health_check_interval;
+        if (interval == 0)
+                goto out;
+
+        gf_log (this->name, GF_LOG_DEBUG, "health-check thread started, "
+                "interval = %d seconds", interval);
+
+        while (1) {
+                /* aborting sleep() is a request to exit this thread, sleep()
+                 * will normally not return when cancelled */
+                ret = sleep (interval);
+                if (ret > 0)
+                        break;
+
+                /* prevent thread errors while doing the health-check(s) */
+                pthread_setcancelstate (PTHREAD_CANCEL_DISABLE, NULL);
+
+                /* Do the health-check, it should be moved to its own function
+                 * in case it gets more complex. */
+                ret = stat (priv->base_path, &sb);
+                if (ret < 0) {
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "stat() on %s returned: %s", priv->base_path,
+                                strerror (errno));
+                        goto abort;
+                }
+
+                pthread_setcancelstate (PTHREAD_CANCEL_ENABLE, NULL);
+        }
+
+out:
+        gf_log (this->name, GF_LOG_DEBUG, "health-check thread exiting");
+
+        LOCK (&priv->lock);
+        {
+                priv->health_check_active = _gf_false;
+        }
+        UNLOCK (&priv->lock);
+
+        return NULL;
+
+abort:
+        /* health-check failed */
+        gf_log (this->name, GF_LOG_EMERG, "health-check failed, going down");
+        xlator_notify (this->parents->xlator, GF_EVENT_CHILD_DOWN, this);
+
+        ret = sleep (30);
+        if (ret == 0) {
+                gf_log (this->name, GF_LOG_EMERG, "still alive! -> SIGTERM");
+                kill (getpid(), SIGTERM);
+        }
+
+        ret = sleep (30);
+        if (ret == 0) {
+                gf_log (this->name, GF_LOG_EMERG, "still alive! -> SIGKILL");
+                kill (getpid(), SIGKILL);
+        }
+
+        return NULL;
+}
+
+void
+posix_spawn_health_check_thread (xlator_t *xl)
+{
+        struct posix_private *priv               = NULL;
+        int                   ret                = -1;
+
+        priv = xl->private;
+
+        LOCK (&priv->lock);
+        {
+                /* cancel the running thread  */
+                if (priv->health_check_active == _gf_true) {
+                        pthread_cancel (priv->health_check);
+                        priv->health_check_active = _gf_false;
+                }
+
+                /* prevent scheduling a check in a tight loop */
+                if (priv->health_check_interval == 0)
+                        goto unlock;
+
+                ret = pthread_create (&priv->health_check, NULL,
+                                      posix_health_check_thread_proc, xl);
+                if (ret < 0) {
+                        priv->health_check_interval = 0;
+                        priv->health_check_active = _gf_false;
+                        gf_log (xl->name, GF_LOG_ERROR,
+                                "unable to setup health-check thread: %s",
+                                strerror (errno));
+                        goto unlock;
+                }
+
+                /* run the thread detached, resources will be freed on exit */
+                pthread_detach (priv->health_check);
+                priv->health_check_active = _gf_true;
+        }
+unlock:
+        UNLOCK (&priv->lock);
+}
+
+int
+posix_fsyncer_pick (xlator_t *this, struct list_head *head)
+{
+	struct posix_private *priv = NULL;
+	int count = 0;
+
+	priv = this->private;
+	pthread_mutex_lock (&priv->fsync_mutex);
+	{
+		while (list_empty (&priv->fsyncs))
+			pthread_cond_wait (&priv->fsync_cond,
+					   &priv->fsync_mutex);
+
+		count = priv->fsync_queue_count;
+		priv->fsync_queue_count = 0;
+		list_splice_init (&priv->fsyncs, head);
+	}
+	pthread_mutex_unlock (&priv->fsync_mutex);
+
+	return count;
+}
+
+
+void
+posix_fsyncer_process (xlator_t *this, call_stub_t *stub, gf_boolean_t do_fsync)
+{
+	struct posix_fd *pfd = NULL;
+	int ret = -1;
+	struct posix_private *priv = NULL;
+
+	priv = this->private;
+
+	ret = posix_fd_ctx_get (stub->args.fd, this, &pfd);
+	if (ret < 0) {
+		gf_log (this->name, GF_LOG_ERROR,
+			"could not get fdctx for fd(%s)",
+			uuid_utoa (stub->args.fd->inode->gfid));
+		call_unwind_error (stub, -1, EINVAL);
+		return;
+	}
+
+	if (do_fsync) {
+#ifdef HAVE_FDATASYNC
+		if (stub->args.datasync)
+			ret = fdatasync (pfd->fd);
+		else
+#endif
+			ret = fsync (pfd->fd);
+	} else {
+		ret = 0;
+	}
+
+	if (ret) {
+		gf_log (this->name, GF_LOG_ERROR,
+			"could not fstat fd(%s)",
+			uuid_utoa (stub->args.fd->inode->gfid));
+		call_unwind_error (stub, -1, errno);
+		return;
+	}
+
+	call_unwind_error (stub, 0, 0);
+}
+
+
+static void
+posix_fsyncer_syncfs (xlator_t *this, struct list_head *head)
+{
+	call_stub_t *stub = NULL;
+	struct posix_fd *pfd = NULL;
+	int ret = -1;
+
+	stub = list_entry (head->prev, call_stub_t, list);
+	ret = posix_fd_ctx_get (stub->args.fd, this, &pfd);
+	if (ret)
+		return;
+
+#ifdef GF_LINUX_HOST_OS
+	/* syncfs() is not "declared" in RHEL's glibc even though
+	   the kernel has support.
+	*/
+#include <sys/syscall.h>
+#include <unistd.h>
+#ifdef SYS_syncfs
+	syscall (SYS_syncfs, pfd->fd);
+#else
+	sync();
+#endif
+#else
+        sync();
+#endif
+}
+
+
+void *
+posix_fsyncer (void *d)
+{
+	xlator_t *this = d;
+	struct posix_private *priv = NULL;
+	call_stub_t *stub = NULL;
+	call_stub_t *tmp = NULL;
+	struct list_head list;
+	int count = 0;
+	gf_boolean_t do_fsync = _gf_true;
+
+	priv = this->private;
+
+	for (;;) {
+		INIT_LIST_HEAD (&list);
+
+		count = posix_fsyncer_pick (this, &list);
+
+		usleep (priv->batch_fsync_delay_usec);
+
+		gf_log (this->name, GF_LOG_DEBUG,
+			"picked %d fsyncs", count);
+
+		switch (priv->batch_fsync_mode) {
+		case BATCH_NONE:
+		case BATCH_REVERSE_FSYNC:
+			break;
+		case BATCH_SYNCFS:
+		case BATCH_SYNCFS_SINGLE_FSYNC:
+		case BATCH_SYNCFS_REVERSE_FSYNC:
+			posix_fsyncer_syncfs (this, &list);
+			break;
+		}
+
+		if (priv->batch_fsync_mode == BATCH_SYNCFS)
+			do_fsync = _gf_false;
+		else
+			do_fsync = _gf_true;
+
+		list_for_each_entry_safe_reverse (stub, tmp, &list, list) {
+			list_del_init (&stub->list);
+
+			posix_fsyncer_process (this, stub, do_fsync);
+
+			if (priv->batch_fsync_mode == BATCH_SYNCFS_SINGLE_FSYNC)
+				do_fsync = _gf_false;
+		}
+	}
 }

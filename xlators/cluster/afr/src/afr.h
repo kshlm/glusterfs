@@ -30,6 +30,7 @@
 #define AFR_SH_READDIR_SIZE_KEY "self-heal-readdir-size"
 
 #define AFR_LOCKEE_COUNT_MAX    3
+#define AFR_DOM_COUNT_MAX    3
 
 struct _pump_private;
 
@@ -86,6 +87,7 @@ typedef struct afr_inode_ctx_ {
         int32_t  *fresh_children;//increasing order of latency
         afr_spb_state_t mdata_spb;
         afr_spb_state_t data_spb;
+        uint32_t        open_fd_count;
 } afr_inode_ctx_t;
 
 typedef enum {
@@ -170,9 +172,38 @@ typedef struct _afr_private {
         gf_boolean_t           did_discovery;
         gf_boolean_t           readdir_failover;
         uint64_t               sh_readdir_size;
+        gf_boolean_t           ensure_durability;
+        char                   *sh_domain;
 } afr_private_t;
 
+typedef enum {
+        AFR_SELF_HEAL_NOT_ATTEMPTED,
+        AFR_SELF_HEAL_STARTED,
+        AFR_SELF_HEAL_FAILED,
+        AFR_SELF_HEAL_SYNC_BEGIN,
+} afr_self_heal_status;
+
 typedef struct {
+        afr_self_heal_status gfid_or_missing_entry_self_heal;
+        afr_self_heal_status metadata_self_heal;
+        afr_self_heal_status data_self_heal;
+        afr_self_heal_status entry_self_heal;
+} afr_sh_status_for_all_type;
+
+typedef enum {
+        AFR_SELF_HEAL_ENTRY,
+        AFR_SELF_HEAL_METADATA,
+        AFR_SELF_HEAL_DATA,
+        AFR_SELF_HEAL_GFID_OR_MISSING_ENTRY,
+        AFR_SELF_HEAL_INVALID = -1,
+} afr_self_heal_type;
+
+typedef enum {
+        AFR_CHECK_ALL,
+        AFR_CHECK_SPECIFIC,
+} afr_sh_fail_check_type;
+
+struct afr_self_heal_ {
         /* External interface: These are variables (some optional) that
            are set by whoever has triggered self-heal */
 
@@ -249,10 +280,10 @@ typedef struct {
         const char *linkname;
         gf_boolean_t entries_skipped;
 
-        int   op_failed;
         gf_boolean_t actual_sh_started;
         gf_boolean_t sync_done;
         gf_boolean_t data_lock_held;
+        gf_boolean_t sh_dom_lock_held;
         gf_boolean_t eof_reached;
         fd_t  *healing_fd;
         int   file_has_holes;
@@ -263,13 +294,17 @@ typedef struct {
         uint8_t *checksum;
         afr_post_remove_call_t post_remove_call;
 
-        loc_t parent_loc;
+        char    *data_sh_info;
+        char    *metadata_sh_info;
 
+        loc_t parent_loc;
         call_frame_t *orig_frame;
         call_frame_t *old_loop_frame;
         gf_boolean_t unwound;
 
         afr_sh_algo_private_t *private;
+        afr_sh_status_for_all_type  afr_all_sh_status;
+        afr_self_heal_type       sh_type_in_action;
 
         struct afr_sh_algorithm  *algo;
         afr_lock_cbk_t data_lock_success_handler;
@@ -282,7 +317,9 @@ typedef struct {
         void (*gfid_sh_success_cbk) (call_frame_t *sh_frame, xlator_t *this);
 
         call_frame_t *sh_frame;
-} afr_self_heal_t;
+};
+
+typedef struct afr_self_heal_ afr_self_heal_t;
 
 typedef enum {
         AFR_DATA_TRANSACTION,          /* truncate, write, ... */
@@ -356,12 +393,19 @@ int
 afr_entry_lockee_cmp (const void *l1, const void *l2);
 
 typedef struct {
+        char    *domain; /* Domain on which inodelk is taken */
+        struct gf_flock flock;
+        unsigned char *locked_nodes;
+        int32_t lock_count;
+} afr_inodelk_t;
+
+typedef struct {
         loc_t *lk_loc;
-        struct gf_flock lk_flock;
 
         int                     lockee_count;
         afr_entry_lockee_t      lockee[AFR_LOCKEE_COUNT_MAX];
 
+        afr_inodelk_t       inodelk[AFR_DOM_COUNT_MAX];
         const char *lk_basename;
         const char *lower_basename;
         const char *higher_basename;
@@ -370,13 +414,11 @@ typedef struct {
 
         unsigned char *locked_nodes;
         unsigned char *lower_locked_nodes;
-        unsigned char *inode_locked_nodes;
 
         selfheal_lk_type_t selfheal_lk_type;
         transaction_lk_type_t transaction_lk_type;
 
         int32_t lock_count;
-        int32_t inodelk_lock_count;
         int32_t entrylk_lock_count;
 
         uint64_t lock_number;
@@ -387,6 +429,7 @@ typedef struct {
         int32_t lock_op_ret;
         int32_t lock_op_errno;
         afr_lock_cbk_t lock_cbk;
+        char *domain; /* Domain on which inode/entry lock/unlock in progress.*/
 } afr_internal_lock_t;
 
 typedef struct _afr_locked_fd {
@@ -406,9 +449,11 @@ typedef struct _afr_local {
         unsigned int call_count;
         unsigned int success_count;
         unsigned int enoent_count;
+        uint32_t     open_fd_count;
+        gf_boolean_t update_open_fd_count;
 
 
-        unsigned int govinda_gOvinda;
+        unsigned int unhealable;
 
         unsigned int read_child_index;
         unsigned char read_child_returned;
@@ -453,6 +498,11 @@ typedef struct _afr_local {
 	   O_DSYNC?
 	*/
 	gf_boolean_t      stable_write;
+
+	/* This write appended to the file. Nnot necessarily O_APPEND,
+	   just means the offset of write was at the end of file.
+	*/
+	gf_boolean_t      append_write;
 
         /*
           This struct contains the arguments for the "continuation"
@@ -652,6 +702,22 @@ typedef struct _afr_local {
                         dict_t *params;
                         char *linkpath;
                 } symlink;
+
+		struct {
+			int32_t mode;
+			off_t offset;
+			size_t len;
+			struct iatt prebuf;
+			struct iatt postbuf;
+		} fallocate;
+
+		struct {
+			off_t offset;
+			size_t len;
+			struct iatt prebuf;
+			struct iatt postbuf;
+		} discard;
+
         } cont;
 
         struct {
@@ -677,6 +743,7 @@ typedef struct _afr_local {
 		   of the transaction frame */
 		call_stub_t      *resume_stub;
 
+		struct list_head  eager_locked;
 
                 int32_t         **txn_changelog;//changelog after pre+post ops
                 unsigned char   *pre_op;
@@ -744,6 +811,9 @@ typedef struct {
 	   (i.e, without O_SYNC or O_DSYNC)
 	*/
 	gf_boolean_t      witnessed_unstable_write;
+
+	/* list of frames currently in progress */
+	struct list_head  eager_locked;
 } afr_fd_ctx_t;
 
 
@@ -820,8 +890,8 @@ afr_blocking_lock (call_frame_t *frame, xlator_t *this);
 int
 afr_internal_lock_finish (call_frame_t *frame, xlator_t *this);
 
-void
-afr_lk_transfer_datalock (call_frame_t *dst, call_frame_t *src,
+int
+afr_lk_transfer_datalock (call_frame_t *dst, call_frame_t *src, char *dom,
                           unsigned int child_count);
 
 int pump_start (call_frame_t *frame, xlator_t *this);
@@ -922,22 +992,6 @@ afr_launch_openfd_self_heal (call_frame_t *frame, xlator_t *this, fd_t *fd);
                         mem_put (__local);                      \
                 }                                               \
         } while (0);
-
-#define AFR_CALL_RESUME(stub)					\
-        do {                                                    \
-                afr_local_t *__local = NULL;                    \
-                xlator_t    *__this = NULL;                     \
-								\
-		__local = stub->frame->local;			\
-		__this = stub->frame->this;			\
-		stub->frame->local = NULL;			\
-								\
-		call_resume (stub);				\
-                if (__local) {                                  \
-                        afr_local_cleanup (__local, __this);    \
-                        mem_put (__local);                      \
-                }                                               \
-        } while (0)
 
 #define AFR_NUM_CHANGE_LOGS            3 /*data + metadata + entry*/
 /* allocate and return a string that is the basename of argument */
@@ -1124,5 +1178,14 @@ afr_fd_has_witnessed_unstable_write (xlator_t *this, fd_t *fd);
 
 void
 afr_delayed_changelog_wake_resume (xlator_t *this, fd_t *fd, call_stub_t *stub);
+
+int
+afr_inodelk_init (afr_inodelk_t *lk, char *dom, size_t child_count);
+
+void
+afr_handle_open_fd_count (call_frame_t *frame, xlator_t *this);
+
+afr_inode_ctx_t*
+afr_inode_ctx_get (inode_t *inode, xlator_t *this);
 
 #endif /* __AFR_H__ */

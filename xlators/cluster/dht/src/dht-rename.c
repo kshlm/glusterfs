@@ -306,7 +306,38 @@ err:
                           NULL, NULL);
         return 0;
 }
+#define DHT_MARK_FOP_INTERNAL(xattr) do {                                      \
+                int tmp = -1;                                                  \
+                if (!xattr) {                                                  \
+                        xattr = dict_new ();                                   \
+                        if (!xattr)                                            \
+                                break;                                         \
+                }                                                              \
+                tmp = dict_set_str (xattr, GLUSTERFS_INTERNAL_FOP_KEY, "yes"); \
+                if (tmp) {                                                     \
+                        gf_log (this->name, GF_LOG_ERROR, "Failed to set"      \
+                                " internal dict key for %s", local->loc.path); \
+                }                                                              \
+        }while (0)
+int
+dht_rename_done (call_frame_t *frame, xlator_t *this)
+{
+        dht_local_t     *local = NULL;
 
+        local = frame->local;
+
+        if (local->linked == _gf_true) {
+                local->linked = _gf_false;
+                dht_linkfile_attr_heal (frame, this);
+        }
+        DHT_STRIP_PHASE1_FLAGS (&local->stbuf);
+        DHT_STACK_UNWIND (rename, frame, local->op_ret, local->op_errno,
+                          &local->stbuf, &local->preoldparent,
+                          &local->postoldparent, &local->preparent,
+                          &local->postparent, NULL);
+
+        return 0;
+}
 
 int
 dht_rename_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
@@ -340,11 +371,7 @@ dht_rename_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         WIPE (&local->postparent);
 
         if (is_last_call (this_call_cnt)) {
-                DHT_STRIP_PHASE1_FLAGS (&local->stbuf);
-                DHT_STACK_UNWIND (rename, frame, local->op_ret, local->op_errno,
-                                  &local->stbuf, &local->preoldparent,
-                                  &local->postoldparent, &local->preparent,
-                                  &local->postparent, NULL);
+                dht_rename_done (frame, this);
         }
 
 out:
@@ -362,7 +389,7 @@ dht_rename_cleanup (call_frame_t *frame)
         xlator_t    *dst_hashed = NULL;
         xlator_t    *dst_cached = NULL;
         int          call_cnt = 0;
-
+        dict_t      *xattr      = NULL;
 
         local = frame->local;
         this  = frame->this;
@@ -386,13 +413,15 @@ dht_rename_cleanup (call_frame_t *frame)
         if (!call_cnt)
                 goto nolinks;
 
+        DHT_MARK_FOP_INTERNAL (xattr);
+
         if (dst_hashed != src_hashed && dst_hashed != src_cached) {
                 gf_log (this->name, GF_LOG_TRACE,
                         "unlinking linkfile %s @ %s => %s",
                         local->loc.path, dst_hashed->name, src_cached->name);
                 STACK_WIND (frame, dht_rename_unlink_cbk,
                             dst_hashed, dst_hashed->fops->unlink,
-                            &local->loc, 0, NULL);
+                            &local->loc, 0, xattr);
         }
 
         if (src_cached != dst_hashed) {
@@ -401,8 +430,11 @@ dht_rename_cleanup (call_frame_t *frame)
                         local->loc2.path, src_cached->name);
                 STACK_WIND (frame, dht_rename_unlink_cbk,
                             src_cached, src_cached->fops->unlink,
-                            &local->loc2, 0, NULL);
+                            &local->loc2, 0, xattr);
         }
+
+        if (xattr)
+                dict_unref (xattr);
 
         return 0;
 
@@ -467,6 +499,7 @@ dht_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         xlator_t     *rename_subvol = NULL;
         call_frame_t *link_frame = NULL;
         dht_local_t *link_local = NULL;
+        dict_t       *xattr     = NULL;
 
         local = frame->local;
         prev = cookie;
@@ -476,6 +509,8 @@ dht_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         dst_hashed = local->dst_hashed;
         dst_cached = local->dst_cached;
 
+        if (local->linked == _gf_true)
+                FRAME_SU_UNDO (frame, dht_local_t);
         if (op_ret == -1) {
                 gf_log (this->name, GF_LOG_WARNING,
                         "%s: rename on %s failed (%s)", local->loc.path,
@@ -510,16 +545,20 @@ dht_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
 err:
-        dht_iatt_merge (this, &local->stbuf, stbuf, prev->this);
-        dht_iatt_merge (this, &local->preoldparent, preoldparent, prev->this);
-        dht_iatt_merge (this, &local->postoldparent, postoldparent, prev->this);
-        dht_iatt_merge (this, &local->preparent, prenewparent, prev->this);
-        dht_iatt_merge (this, &local->postparent, postnewparent, prev->this);
-
-        if (local->linked == _gf_true) {
-                local->linked = _gf_false;
-                dht_linkfile_attr_heal (frame, this);
+        /* Merge attrs only from src_cached. In case there of src_cached !=
+         * dst_hashed, this ignores linkfile attrs. */
+        if (prev->this == src_cached) {
+                dht_iatt_merge (this, &local->stbuf, stbuf, prev->this);
+                dht_iatt_merge (this, &local->preoldparent, preoldparent,
+                                prev->this);
+                dht_iatt_merge (this, &local->postoldparent, postoldparent,
+                                prev->this);
+                dht_iatt_merge (this, &local->preparent, prenewparent,
+                                prev->this);
+                dht_iatt_merge (this, &local->postparent, postnewparent,
+                                prev->this);
         }
+
 
         /* NOTE: rename_subvol is the same subvolume from which dht_rename_cbk
          *       is called. since rename has already happened on rename_subvol,
@@ -544,6 +583,8 @@ err:
         if (local->call_cnt == 0)
                 goto unwind;
 
+        DHT_MARK_FOP_INTERNAL (xattr);
+
         if (src_cached != dst_hashed && src_cached != dst_cached) {
                 gf_log (this->name, GF_LOG_TRACE,
                         "deleting old src datafile %s @ %s",
@@ -551,7 +592,7 @@ err:
 
                 STACK_WIND (frame, dht_rename_unlink_cbk,
                             src_cached, src_cached->fops->unlink,
-                            &local->loc, 0, NULL);
+                            &local->loc, 0, xattr);
         }
 
         if (src_hashed != rename_subvol && src_hashed != src_cached) {
@@ -561,7 +602,7 @@ err:
 
                 STACK_WIND (frame, dht_rename_unlink_cbk,
                             src_hashed, src_hashed->fops->unlink,
-                            &local->loc, 0, NULL);
+                            &local->loc, 0, xattr);
         }
 
         if (dst_cached
@@ -573,8 +614,10 @@ err:
 
                 STACK_WIND (frame, dht_rename_unlink_cbk,
                             dst_cached, dst_cached->fops->unlink,
-                            &local->loc2, 0, NULL);
+                            &local->loc2, 0, xattr);
         }
+        if (xattr)
+                dict_unref (xattr);
         return 0;
 
 unwind:
@@ -582,16 +625,16 @@ unwind:
         WIPE (&local->postoldparent);
         WIPE (&local->preparent);
         WIPE (&local->postparent);
+        if (xattr)
+                dict_unref (xattr);
 
-        DHT_STRIP_PHASE1_FLAGS (&local->stbuf);
-        DHT_STACK_UNWIND (rename, frame, local->op_ret, local->op_errno,
-                          &local->stbuf, &local->preoldparent,
-                          &local->postoldparent, &local->preparent,
-                          &local->postparent, NULL);
+        dht_rename_done (frame, this);
 
         return 0;
 
 cleanup:
+        if (xattr)
+                dict_unref (xattr);
         dht_rename_cleanup (frame);
 
         return 0;
@@ -625,6 +668,8 @@ dht_do_rename (call_frame_t *frame)
                 "renaming %s => %s (%s)",
                 local->loc.path, local->loc2.path, rename_subvol->name);
 
+        if (local->linked == _gf_true)
+                FRAME_SU_DO (frame, dht_local_t);
         STACK_WIND (frame, dht_rename_cbk,
                     rename_subvol, rename_subvol->fops->rename,
                     &local->loc, &local->loc2, NULL);
@@ -655,7 +700,8 @@ dht_rename_links_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 local->op_ret   = -1;
                 if (op_errno != ENOENT)
                         local->op_errno = op_errno;
-        } else {
+        } else if (local->src_cached == prev->this) {
+                /* merge of attr returned only from linkfile creation */
                 dht_iatt_merge (this, &local->stbuf, stbuf, prev->this);
         }
 
@@ -722,6 +768,7 @@ dht_rename_create_links (call_frame_t *frame)
         xlator_t    *dst_hashed = NULL;
         xlator_t    *dst_cached = NULL;
         int          call_cnt = 0;
+        dict_t      *xattr = NULL;
 
 
         local = frame->local;
@@ -732,6 +779,7 @@ dht_rename_create_links (call_frame_t *frame)
         dst_hashed = local->dst_hashed;
         dst_cached = local->dst_cached;
 
+        DHT_MARK_FOP_INTERNAL (xattr);
 
         if (src_cached == dst_cached) {
                 if (dst_hashed == dst_cached)
@@ -743,7 +791,7 @@ dht_rename_create_links (call_frame_t *frame)
 
 		STACK_WIND (frame, dht_rename_unlink_links_cbk,
 			    dst_hashed, dst_hashed->fops->unlink,
-			    &local->loc2, 0, NULL);
+			    &local->loc2, 0, xattr);
                 return 0;
         }
 
@@ -770,7 +818,7 @@ dht_rename_create_links (call_frame_t *frame)
 			local->loc2.path, src_cached->name);
 		STACK_WIND (frame, dht_rename_links_cbk,
 			    src_cached, src_cached->fops->link,
-			    &local->loc, &local->loc2, NULL);
+			    &local->loc, &local->loc2, xattr);
 	}
 
 nolinks:
@@ -778,6 +826,8 @@ nolinks:
                 /* skip to next step */
                 dht_do_rename (frame);
         }
+        if (xattr)
+                dict_unref (xattr);
 
         return 0;
 }

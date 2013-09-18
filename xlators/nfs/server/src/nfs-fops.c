@@ -191,6 +191,12 @@ nfs_create_frame (xlator_t *xl, nfs_user_t *nfu)
         frame = create_frame (xl, (call_pool_t *)xl->ctx->pool);
         if (!frame)
                 goto err;
+	if (call_stack_alloc_groups (frame->root, nfu->ngrps) != 0) {
+		STACK_DESTROY (frame->root);
+		frame = NULL;
+		goto err;
+	}
+
         frame->root->pid = NFS_PID;
         frame->root->uid = nfu->uid;
         frame->root->gid = nfu->gids[NFS_PRIMGID_IDX];
@@ -385,19 +391,6 @@ nfs_fop_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 {
         struct nfs_fop_local    *local = NULL;
         fop_lookup_cbk_t        progcbk;
-        int32_t                 spb = 0;
-
-        /*
-         * With native protocol, self-heal failures would be detected during
-         * open.  NFS doesn't issue that open when revalidating cache, so we
-         * have to check for failures here instead.
-         */
-        if (dict_get_int32(xattr, "split-brain", &spb) == 0) {
-                if (spb) {
-                        op_ret = -1;
-                        op_errno = EIO;
-                }
-        }
 
         if (op_ret == 0) {
                 nfs_fix_generation(this,inode);

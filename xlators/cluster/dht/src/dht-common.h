@@ -183,6 +183,7 @@ struct dht_local {
         xlator_t        *link_subvol;
 
         struct dht_rebalance_ rebalance;
+        xlator_t        *first_up_subvol;
 
 };
 typedef struct dht_local dht_local_t;
@@ -227,6 +228,7 @@ struct gf_defrag_info_ {
         uint64_t                     total_data;
         uint64_t                     num_files_lookedup;
         uint64_t                     total_failures;
+        uint64_t                     skipped;
         gf_lock_t                    lock;
         int                          cmd;
         pthread_t                    th;
@@ -394,18 +396,26 @@ typedef enum {
         } while (0)
 
 #define is_greater_time(a, an, b, bn) (((a) < (b)) || (((a) == (b)) && ((an) < (bn))))
-dht_layout_t                            *dht_layout_new (xlator_t *this, int cnt);
-dht_layout_t                            *dht_layout_get (xlator_t *this, inode_t *inode);
-dht_layout_t                            *dht_layout_for_subvol (xlator_t *this, xlator_t *subvol);
-xlator_t *dht_layout_search (xlator_t   *this, dht_layout_t *layout,
-                             const char *name);
-int                                      dht_layout_normalize (xlator_t *this, loc_t *loc, dht_layout_t *layout);
-int dht_layout_anomalies (xlator_t      *this, loc_t *loc, dht_layout_t *layout,
-                          uint32_t      *holes_p, uint32_t *overlaps_p,
-                          uint32_t      *missing_p, uint32_t *down_p,
-                          uint32_t      *misc_p, uint32_t *no_space_p);
-int dht_layout_dir_mismatch (xlator_t   *this, dht_layout_t *layout,
-                             xlator_t   *subvol, loc_t *loc, dict_t *xattr);
+
+dht_layout_t    *dht_layout_new         (xlator_t *this, int cnt);
+dht_layout_t    *dht_layout_get         (xlator_t *this, inode_t *inode);
+dht_layout_t    *dht_layout_for_subvol  (xlator_t *this, xlator_t *subvol);
+xlator_t        *dht_layout_search      (xlator_t *this, dht_layout_t *layout,
+                                         const char *name);
+int             dht_layout_normalize    (xlator_t *this, loc_t *loc,
+                                         dht_layout_t *layout,
+                                         uint32_t *missing_p);
+int             dht_layout_anomalies    (xlator_t *this, loc_t *loc,
+                                         dht_layout_t *layout,
+                                         uint32_t *holes_p,
+                                         uint32_t *overlaps_p,
+                                         uint32_t *missing_p,
+                                         uint32_t *down_p,
+                                         uint32_t *misc_p,
+                                         uint32_t *no_space_p);
+int             dht_layout_dir_mismatch (xlator_t *this, dht_layout_t *layout,
+                                         xlator_t *subvol, loc_t *loc,
+                                         dict_t *xattr);
 
 xlator_t *dht_linkfile_subvol (xlator_t *this, inode_t *inode,
                                struct iatt *buf, dict_t *xattr);
@@ -437,6 +447,7 @@ int dht_iatt_merge (xlator_t                 *this, struct iatt *to, struct iatt
 xlator_t *dht_subvol_get_hashed (xlator_t *this, loc_t *loc);
 xlator_t *dht_subvol_get_cached (xlator_t *this, inode_t *inode);
 xlator_t *dht_subvol_next (xlator_t *this, xlator_t *prev);
+xlator_t *dht_subvol_next_available (xlator_t *this, xlator_t *prev);
 int       dht_subvol_cnt (xlator_t *this, xlator_t *subvol);
 
 int dht_hash_compute (xlator_t *this, int type, const char *name, uint32_t *hash_p);
@@ -461,7 +472,8 @@ dht_layout_sort_volname (dht_layout_t *layout);
 int dht_get_du_info (call_frame_t *frame, xlator_t *this, loc_t *loc);
 
 gf_boolean_t dht_is_subvol_filled (xlator_t *this, xlator_t *subvol);
-xlator_t *dht_free_disk_available_subvol (xlator_t *this, xlator_t *subvol);
+xlator_t *dht_free_disk_available_subvol (xlator_t *this, xlator_t *subvol,
+                                          dht_local_t *layout);
 int       dht_get_du_info_for_subvol (xlator_t *this, int subvol_idx);
 
 int dht_layout_preset (xlator_t *this, xlator_t *subvol, inode_t *inode);
@@ -683,7 +695,14 @@ int32_t dht_setattr (call_frame_t  *frame, xlator_t *this, loc_t *loc,
                      struct iatt   *stbuf, int32_t valid, dict_t *xdata);
 int32_t dht_fsetattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
                       struct iatt  *stbuf, int32_t valid, dict_t *xdata);
+int32_t dht_fallocate(call_frame_t *frame, xlator_t *this, fd_t *fd,
+		      int32_t mode, off_t offset, size_t len, dict_t *xdata);
+int32_t dht_discard(call_frame_t *frame, xlator_t *this, fd_t *fd,
+		    off_t offset, size_t len, dict_t *xdata);
 
+int32_t dht_init (xlator_t *this);
+void    dht_fini (xlator_t *this);
+int     dht_reconfigure (xlator_t *this, dict_t *options);
 int32_t dht_notify (xlator_t *this, int32_t event, void *data, ...);
 
 /* definitions for nufa/switch */
@@ -749,9 +768,19 @@ dht_dir_has_layout (dict_t *xattr, char *name);
 gf_boolean_t
 dht_is_subvol_in_layout (dht_layout_t *layout, xlator_t *xlator);
 xlator_t *
-dht_subvol_with_free_space_inodes (xlator_t *this, xlator_t *subvol);
+dht_subvol_with_free_space_inodes (xlator_t *this, xlator_t *subvol,
+                                   dht_layout_t *layout);
 xlator_t *
-dht_subvol_maxspace_nonzeroinode (xlator_t *this, xlator_t *subvol);
+dht_subvol_maxspace_nonzeroinode (xlator_t *this, xlator_t *subvol,
+                                  dht_layout_t *layout);
 int
 dht_linkfile_attr_heal (call_frame_t *frame, xlator_t *this);
+
+void
+dht_layout_dump (dht_layout_t  *layout, const char *prefix);
+int32_t
+dht_priv_dump (xlator_t *this);
+int32_t
+dht_inodectx_dump (xlator_t *this, inode_t *inode);
+
 #endif/* _DHT_H */

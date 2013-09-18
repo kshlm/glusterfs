@@ -299,7 +299,7 @@ __dht_rebalance_create_dst_file (xlator_t *to, xlator_t *from, loc_t *loc, struc
         /* Create the destination with LINKFILE mode, and linkto xattr,
            if the linkfile already exists, it will just open the file */
         ret = syncop_create (to, loc, O_RDWR, DHT_LINKFILE_MODE, fd,
-                             dict);
+                             dict, &new_stbuf);
         if (ret < 0) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "failed to create %s on %s (%s)",
@@ -598,7 +598,7 @@ migrate_special_files (xlator_t *this, xlator_t *from, xlator_t *to, loc_t *loc,
                         goto out;
                 }
 
-                ret = syncop_symlink (to, loc, link, dict);
+                ret = syncop_symlink (to, loc, link, dict, 0);
                 if (ret) {
                         gf_log (this->name, GF_LOG_WARNING,
                                 "%s: creating symlink failed (%s)",
@@ -612,7 +612,7 @@ migrate_special_files (xlator_t *this, xlator_t *from, xlator_t *to, loc_t *loc,
         ret = syncop_mknod (to, loc, st_mode_from_ia (buf->ia_prot,
                                                       buf->ia_type),
                             makedev (ia_major (buf->ia_rdev),
-                                     ia_minor (buf->ia_rdev)), dict);
+                                     ia_minor (buf->ia_rdev)), dict, 0);
         if (ret) {
                 gf_log (this->name, GF_LOG_WARNING, "%s: mknod failed (%s)",
                         loc->path, strerror (errno));
@@ -620,6 +620,15 @@ migrate_special_files (xlator_t *this, xlator_t *from, xlator_t *to, loc_t *loc,
         }
 
 done:
+        ret = syncop_setattr (to, loc, buf,
+                              (GF_SET_ATTR_UID | GF_SET_ATTR_GID |
+                               GF_SET_ATTR_MODE), NULL, NULL);
+        if (ret) {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "%s: failed to perform setattr on %s (%s)",
+                        loc->path, to->name, strerror (errno));
+        }
+
         ret = syncop_unlink (from, loc);
         if (ret)
                 gf_log (this->name, GF_LOG_WARNING, "%s: unlink failed (%s)",
@@ -823,6 +832,23 @@ dht_migrate_file (xlator_t *this, loc_t *loc, xlator_t *from, xlator_t *to,
                 goto out;
         }
 
+       /* Free up the data blocks on the source node, as the whole
+           file is migrated */
+        ret = syncop_ftruncate (from, src_fd, 0);
+        if (ret) {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "%s: failed to perform truncate on %s (%s)",
+                        loc->path, from->name, strerror (errno));
+        }
+
+        /* remove the 'linkto' xattr from the destination */
+        ret = syncop_fremovexattr (to, dst_fd, conf->link_xattr_name);
+        if (ret) {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "%s: failed to perform removexattr on %s (%s)",
+                        loc->path, to->name, strerror (errno));
+        }
+
         /* Do a stat and check the gfid before unlink */
         ret = syncop_stat (from, loc, &empty_iatt);
         if (ret) {
@@ -841,23 +867,6 @@ dht_migrate_file (xlator_t *this, loc_t *loc, xlator_t *from, xlator_t *to,
                                 loc->path, from->name, strerror (errno));
                         goto out;
                 }
-        }
-
-        /* Free up the data blocks on the source node, as the whole
-           file is migrated */
-        ret = syncop_ftruncate (from, src_fd, 0);
-        if (ret) {
-                gf_log (this->name, GF_LOG_WARNING,
-                        "%s: failed to perform truncate on %s (%s)",
-                        loc->path, from->name, strerror (errno));
-        }
-
-        /* remove the 'linkto' xattr from the destination */
-        ret = syncop_fremovexattr (to, dst_fd, conf->link_xattr_name);
-        if (ret) {
-                gf_log (this->name, GF_LOG_WARNING,
-                        "%s: failed to perform removexattr on %s (%s)",
-                        loc->path, to->name, strerror (errno));
         }
 
         ret = syncop_lookup (this, loc, NULL, NULL, NULL, NULL);
@@ -1101,6 +1110,7 @@ gf_defrag_migrate_data (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
         struct timeval           end            = {0,};
         double                   elapsed        = {0,};
         struct timeval           start          = {0,};
+        int32_t                  err            = 0;
 
         gf_log (this->name, GF_LOG_INFO, "migrate data called on %s",
                 loc->path);
@@ -1258,9 +1268,21 @@ gf_defrag_migrate_data (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
                         ret = syncop_setxattr (this, &entry_loc, migrate_data,
                                                0);
                         if (ret) {
-                                gf_log (this->name, GF_LOG_ERROR, "migrate-data"
-                                        " failed for %s", entry_loc.path);
-                                defrag->total_failures +=1;
+                                err = op_errno;
+                                /* errno is overloaded. See
+                                 * rebalance_task_completion () */
+                                if (err != ENOSPC) {
+                                        gf_log (this->name, GF_LOG_DEBUG,
+                                                "migrate-data skipped for %s"
+                                                " due to space constraints",
+                                                entry_loc.path);
+                                        defrag->skipped +=1;
+                                } else{
+                                        gf_log (this->name, GF_LOG_ERROR,
+                                                "migrate-data failed for %s",
+                                                entry_loc.path);
+                                        defrag->total_failures +=1;
+                                }
                         }
 
                         if (ret == -1) {
@@ -1659,6 +1681,7 @@ gf_defrag_status_get (gf_defrag_info_t *defrag, dict_t *dict)
         uint64_t size   = 0;
         uint64_t lookup = 0;
         uint64_t failures = 0;
+        uint64_t skipped = 0;
         char     *status = "";
         double   elapsed = 0;
         struct timeval end = {0,};
@@ -1675,6 +1698,7 @@ gf_defrag_status_get (gf_defrag_info_t *defrag, dict_t *dict)
         size   = defrag->total_data;
         lookup = defrag->num_files_lookedup;
         failures = defrag->total_failures;
+        skipped = defrag->skipped;
 
         gettimeofday (&end, NULL);
 
@@ -1698,6 +1722,7 @@ gf_defrag_status_get (gf_defrag_info_t *defrag, dict_t *dict)
                 gf_log (THIS->name, GF_LOG_WARNING,
                         "failed to set lookedup file count");
 
+
         ret = dict_set_int32 (dict, "status", defrag->defrag_status);
         if (ret)
                 gf_log (THIS->name, GF_LOG_WARNING,
@@ -1710,6 +1735,14 @@ gf_defrag_status_get (gf_defrag_info_t *defrag, dict_t *dict)
         }
 
         ret = dict_set_uint64 (dict, "failures", failures);
+        if (ret)
+                gf_log (THIS->name, GF_LOG_WARNING,
+                        "failed to set failure count");
+
+        ret = dict_set_uint64 (dict, "skipped", skipped);
+        if (ret)
+                gf_log (THIS->name, GF_LOG_WARNING,
+                        "failed to set skipped file count");
 log:
         switch (defrag->defrag_status) {
         case GF_DEFRAG_STATUS_NOT_STARTED:
@@ -1732,8 +1765,8 @@ log:
         gf_log (THIS->name, GF_LOG_INFO, "Rebalance is %s. Time taken is %.2f "
                 "secs", status, elapsed);
         gf_log (THIS->name, GF_LOG_INFO, "Files migrated: %"PRIu64", size: %"
-                PRIu64", lookups: %"PRIu64", failures: %"PRIu64, files, size,
-                lookup, failures);
+                PRIu64", lookups: %"PRIu64", failures: %"PRIu64", skipped: "
+                "%"PRIu64, files, size, lookup, failures, skipped);
 
 
 out:

@@ -186,7 +186,7 @@ struct rpc_transport {
                                               */
 
         void                      *private;
-        void                      *xl_private;
+        struct _client_t          *xl_private;
         void                      *xl;       /* Used for THIS */
         void                      *mydata;
         pthread_mutex_t            lock;
@@ -196,6 +196,7 @@ struct rpc_transport {
         dict_t                    *options;
         char                      *name;
         void                      *dnscache;
+        void                      *drc_client;
         data_t                    *buf;
         int32_t                  (*init)   (rpc_transport_t *this);
         void                     (*fini)   (rpc_transport_t *this);
@@ -210,7 +211,7 @@ struct rpc_transport {
 
         struct list_head           list;
         int                        bind_insecure;
-	void                      *dl_handle; /* handle of dlopen() */
+        void                      *dl_handle; /* handle of dlopen() */
 };
 
 struct rpc_transport_ops {
@@ -273,9 +274,6 @@ int
 rpc_transport_register_notify (rpc_transport_t *trans, rpc_transport_notify_t,
                                void *mydata);
 
-int
-rpc_transport_unregister_notify (rpc_transport_t *trans);
-
 int32_t
 rpc_transport_get_peername (rpc_transport_t *this, char *hostname, int hostlen);
 
@@ -300,6 +298,10 @@ rpc_transport_pollin_destroy (rpc_transport_pollin_t *pollin);
 int
 rpc_transport_keepalive_options_set (dict_t *options, int32_t interval,
                                      int32_t time);
+
+int
+rpc_transport_unix_options_build (dict_t **options, char *filepath,
+                                  int frame_timeout);
 
 int
 rpc_transport_inet_options_build (dict_t **options, const char *hostname, int port);
