@@ -166,10 +166,16 @@ cli_sync_volume_cmd_cbk (struct rpc_req *req, struct iovec *iov, int count,
 
         args->op_ret = rsp.op_ret;
         args->op_errno = rsp.op_errno;
-        args->errstr = rsp.op_errstr;
-        args->dict = dict_ref (rsp_dict);
+        if (strlen(rsp.op_errstr))
+                args->errstr = gf_strdup (rsp.op_errstr);
+        if (rsp_dict)
+                args->dict = dict_ref (rsp_dict);
 
 out:
+        if (rsp_dict)
+                dict_unref (rsp_dict);
+        free (rsp.op_errstr);
+
         if (ret)
                 args->op_ret = ret;
 
@@ -197,6 +203,8 @@ cli_sync_volume_cmd (int procnum, dict_t *req_dict, dict_t **rsp_dict,
 
         if (op_errstr)
                 *op_errstr = args.errstr;
+        else
+                GF_FREE (args.errstr);
 
         if (rsp_dict)
                 *rsp_dict = args.dict;

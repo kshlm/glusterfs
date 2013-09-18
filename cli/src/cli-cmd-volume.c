@@ -482,6 +482,11 @@ cli_cmd_volume_delete_cbk (struct cli_state *state, struct cli_cmd_word *word,
                 cli_out ("volume delete: %s: success", volname);
 
 out:
+        if (rsp_dict)
+                dict_unref (rsp_dict);
+        if (errstr)
+                GF_FREE (errstr);
+
         return ret;
 }
 
@@ -553,6 +558,11 @@ cli_cmd_volume_start_cbk (struct cli_state *state, struct cli_cmd_word *word,
         else
                 cli_out ("volume start: %s: success", volname);
 out:
+        if (rsp_dict)
+                dict_unref (rsp_dict);
+        if (errstr)
+                GF_FREE (errstr);
+
         return ret;
 }
 
@@ -672,6 +682,11 @@ cli_cmd_volume_stop_cbk (struct cli_state *state, struct cli_cmd_word *word,
                 cli_out ("volume stop: %s: success", volname);
 
 out:
+        if (rsp_dict)
+                dict_unref (rsp_dict);
+        if (errstr)
+                GF_FREE (errstr);
+
         return ret;
 }
 
