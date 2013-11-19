@@ -88,12 +88,16 @@
 
 #define GF_READDIR_SKIP_DIRS       "readdir-filter-directories"
 
+#define BD_XATTR_KEY             "user.glusterfs"
+
 #define XATTR_IS_PATHINFO(x)  (strncmp (x, GF_XATTR_PATHINFO_KEY,       \
                                         strlen (GF_XATTR_PATHINFO_KEY)) == 0)
 #define XATTR_IS_NODE_UUID(x) (strncmp (x, GF_XATTR_NODE_UUID_KEY,      \
                                         strlen (GF_XATTR_NODE_UUID_KEY)) == 0)
 #define XATTR_IS_LOCKINFO(x) (strncmp (x, GF_XATTR_LOCKINFO_KEY,        \
                                        strlen (GF_XATTR_LOCKINFO_KEY)) == 0)
+
+#define XATTR_IS_BD(x) (strncmp (x, BD_XATTR_KEY, strlen (BD_XATTR_KEY)) == 0)
 
 #define GF_XATTR_LINKINFO_KEY   "trusted.distribute.linkinfo"
 #define GFID_XATTR_KEY          "trusted.gfid"
@@ -119,6 +123,7 @@
 
 /* Index xlator related */
 #define GF_XATTROP_INDEX_GFID "glusterfs.xattrop_index_gfid"
+#define GF_BASE_INDICES_HOLDER_GFID "glusterfs.base_indicies_holder_gfid"
 
 #define GF_GFIDLESS_LOOKUP "gfidless-lookup"
 /* replace-brick and pump related internal xattrs */
@@ -127,9 +132,6 @@
 #define RB_PUMP_CMD_COMMIT      "glusterfs.pump.commit"
 #define RB_PUMP_CMD_ABORT       "glusterfs.pump.abort"
 #define RB_PUMP_CMD_STATUS      "glusterfs.pump.status"
-
-#define POSIX_ACL_DEFAULT_XATTR "system.posix_acl_default"
-#define POSIX_ACL_ACCESS_XATTR "system.posix_acl_access"
 
 #define GLUSTERFS_RDMA_INLINE_THRESHOLD       (2048)
 #define GLUSTERFS_RDMA_MAX_HEADER_SIZE        (228) /* (sizeof (rdma_header_t)                 \
@@ -158,6 +160,11 @@
 #define GF_REPLACE_BRICK_TID_KEY "replace-brick-id"
 
 #define UUID_CANONICAL_FORM_LEN  36
+
+/* Adding this here instead of any glusterd*.h files as it is also required by
+ * cli
+ */
+#define DEFAULT_GLUSTERD_SOCKFILE             DATADIR "/run/glusterd.socket"
 
 /* NOTE: add members ONLY at the end (just before _MAXVALUE) */
 typedef enum {
@@ -209,6 +216,7 @@ typedef enum {
         GF_FOP_FREMOVEXATTR,
 	GF_FOP_FALLOCATE,
 	GF_FOP_DISCARD,
+        GF_FOP_ZEROFILL,
         GF_FOP_MAXVALUE,
 } glusterfs_fop_t;
 
@@ -389,7 +397,7 @@ struct _glusterfs_ctx {
         char                fin;
         void               *timer;
         void               *ib;
-        void               *pool;
+        struct call_pool   *pool;
         void               *event_pool;
         void               *iobuf_pool;
         pthread_mutex_t     lock;
@@ -427,7 +435,8 @@ struct _glusterfs_ctx {
 
         int                 daemon_pipe[2];
 
-        struct _clienttable *clienttable;
+        struct client_disconnect *client_disconnect;
+        struct clienttable *clienttable;
 };
 typedef struct _glusterfs_ctx glusterfs_ctx_t;
 

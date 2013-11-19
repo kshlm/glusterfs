@@ -113,8 +113,10 @@ nfs3_fh_to_xlator (struct nfs3_state *nfs3, struct nfs3_fh *fh);
                         xlatorp = nfs3_fh_to_xlator (cst->nfs3state,    \
                                                      &cst->resolvefh);  \
                         uuid_unparse (cst->resolvefh.gfid, gfid);       \
-                        sprintf (buf, "(%s) %s : %s", trans->peerinfo.identifier,\
-                        xlatorp ? xlatorp->name : "ERR", gfid);         \
+                        snprintf (buf, sizeof (buf), "(%s) %s : %s",             \
+                                  trans->peerinfo.identifier,           \
+                                  xlatorp ? xlatorp->name : "ERR",      \
+                                  gfid);                                \
                         gf_log (GF_ACL, GF_LOG_ERROR, "Unable to resolve FH"\
                                 ": %s", buf);                           \
                         nfstat = nfs3_errno_to_nfsstat3 (cst->resolve_errno);\
@@ -138,10 +140,11 @@ nfs3_fh_to_xlator (struct nfs3_state *nfs3, struct nfs3_fh *fh);
 int
 acl3svc_submit_reply (rpcsvc_request_t *req, void *arg, acl3_serializer sfunc)
 {
-        struct iovec            outmsg = {0, };
-        struct iobuf            *iob = NULL;
-        struct nfs3_state       *nfs3 = NULL;
-        int                     ret = -1;
+        struct iovec            outmsg  = {0, };
+        struct iobuf            *iob    = NULL;
+        struct nfs3_state       *nfs3   = NULL;
+        int                     ret     = -1;
+        ssize_t                 msglen  = 0;
         struct iobref           *iobref = NULL;
 
         if (!req)
@@ -166,7 +169,12 @@ acl3svc_submit_reply (rpcsvc_request_t *req, void *arg, acl3_serializer sfunc)
         /* Use the given serializer to translate the give C structure in arg
          * to XDR format which will be written into the buffer in outmsg.
          */
-        outmsg.iov_len = sfunc (outmsg, arg);
+        msglen = sfunc (outmsg, arg);
+        if (msglen < 0) {
+                gf_log (GF_ACL, GF_LOG_ERROR, "Failed to encode message");
+                goto ret;
+        }
+        outmsg.iov_len = msglen;
 
         iobref = iobref_new ();
         if (iobref == NULL) {
@@ -174,7 +182,11 @@ acl3svc_submit_reply (rpcsvc_request_t *req, void *arg, acl3_serializer sfunc)
                 goto ret;
         }
 
-        iobref_add (iobref, iob);
+        ret = iobref_add (iobref, iob);
+        if (ret) {
+                gf_log (GF_ACL, GF_LOG_ERROR, "Failed to add iob to iobref");
+                goto ret;
+        }
 
         /* Then, submit the message for transmission. */
         ret = rpcsvc_submit_message (req, &outmsg, 1, NULL, 0, iobref);
@@ -228,12 +240,15 @@ acl3_getacl_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int                             i = 0;
         getaclreply                     *getaclreply = NULL;
 
+        if (!frame->local) {
+                gf_log (GF_ACL, GF_LOG_ERROR, "Invalid argument,"
+                       " frame->local NULL");
+                return  EINVAL;
+        }
         cs = frame->local;
-        if (cs)
-                getaclreply = &cs->args.getaclreply;
-
+        getaclreply = &cs->args.getaclreply;
         if (op_ret == -1) {
-                stat = nfs3_errno_to_nfsstat3 (op_errno);
+                stat = nfs3_cbk_errno_status (op_ret, op_errno);
                 goto err;
         }
 
@@ -241,9 +256,9 @@ acl3_getacl_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         getaclreply->daclentry.daclentry_val = cs->daclentry;
 
         /* FIXME: use posix_acl_from_xattr() */
-        data = dict_get (dict, "system.posix_acl_access");
+        data = dict_get (dict, POSIX_ACL_ACCESS_XATTR);
         if (data && (p = data_to_bin (data))) {
-                /* POSIX_ACL_XATTR_VERSION */
+                /* POSIX_ACL_VERSION */
                 p++;
                 while ((char *)p < (data->data + data->len)) {
                         getaclreply->aclentry.aclentry_val[i].type = *(*(short **)&p)++;
@@ -255,9 +270,9 @@ acl3_getacl_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
         i = 0;
 
-        data = dict_get (dict, "system.posix_acl_default");
+        data = dict_get (dict, POSIX_ACL_DEFAULT_XATTR);
         if (data && (p = data_to_bin (data))) {
-                /* POSIX_ACL_XATTR_VERSION */
+                /* POSIX_ACL_VERSION */
                 p++;
                 while ((char *)p < (data->data + data->len)) {
                         getaclreply->daclentry.daclentry_val[i].type = *(*(short **)&p)++;
@@ -291,12 +306,17 @@ acl3_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int                             ret = -1;
         nfs_user_t                      nfu = {0, };
 
+        if (!frame->local) {
+                gf_log (GF_ACL, GF_LOG_ERROR, "Invalid argument,"
+                       " frame->local NULL");
+                return EINVAL;
+        }
+
         cs = frame->local;
-        if (cs)
-                getaclreply = &cs->args.getaclreply;
+        getaclreply = &cs->args.getaclreply;
 
         if (op_ret == -1) {
-                stat = nfs3_errno_to_nfsstat3 (op_errno);
+                stat = nfs3_cbk_errno_status (op_ret, op_errno);
                 goto err;
         }
 
@@ -307,7 +327,7 @@ acl3_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         ret = nfs_getxattr (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc, NULL, NULL,
                             acl3_getacl_cbk, cs);
         if (ret == -1) {
-                stat = nfs3_errno_to_nfsstat3 (op_errno);
+                stat = nfs3_cbk_errno_status (op_ret, op_errno);
                 goto err;
         }
         return 0;
@@ -409,7 +429,8 @@ acl3_setacl_cbk (call_frame_t *frame, void *cookie,
         nfs3_call_state_t               *cs = NULL;
         cs = frame->local;
         if (op_ret < 0) {
-                cs->args.setaclreply.status = nfs3_errno_to_nfsstat3 (op_errno);
+                nfsstat3 status = nfs3_cbk_errno_status (op_ret, op_errno);
+                cs->args.setaclreply.status = status;
         }
 
         acl3svc_submit_reply (cs->req, (void *)&cs->args.setaclreply,
@@ -428,17 +449,16 @@ acl3_setacl_resume (void *carg)
 
         if (!carg)
                 return ret;
-
         cs = (nfs3_call_state_t *)carg;
         acl3_check_fh_resolve_status (cs, stat, acl3err);
         nfs_request_user_init (&nfu, cs->req);
         xattr = dict_new();
         if (cs->aclcount)
-        ret = dict_set_static_bin (xattr, "system.posix_acl_access", cs->aclxattr,
+        ret = dict_set_static_bin (xattr, POSIX_ACL_ACCESS_XATTR, cs->aclxattr,
                                    cs->aclcount * 8 + 4);
         if (cs->daclcount)
-        ret = dict_set_static_bin (xattr, "system.posix_acl_default", cs->daclxattr,
-                                   cs->daclcount * 8 + 4);
+        ret = dict_set_static_bin (xattr, POSIX_ACL_DEFAULT_XATTR,
+                                   cs->daclxattr, cs->daclcount * 8 + 4);
 
         ret = nfs_setxattr (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc, xattr,
                             0, NULL, acl3_setacl_cbk, cs);
@@ -470,12 +490,24 @@ acl3svc_setacl (rpcsvc_request_t *req)
         struct nfs3_fh                  fh;
         struct nfs3_fh                 *fhp = NULL;
         setaclargs                      setaclargs;
-        aclentry                        aclentry[NFS_ACL_MAX_ENTRIES];
-        struct aclentry                 daclentry[NFS_ACL_MAX_ENTRIES];
-        int                             *p = NULL, i = 0;
+        aclentry                        *aclentry = NULL;
+        struct aclentry                 *daclentry = NULL;
+        int                             i = 0;
+        struct posix_acl_xattr_header   *bufheader = NULL;
+        struct posix_acl_xattr_entry    *bufentry  = NULL;
 
         if (!req)
                 return ret;
+        aclentry =  GF_CALLOC (NFS_ACL_MAX_ENTRIES, sizeof(*aclentry),
+                               gf_nfs_mt_arr);
+        if (!aclentry) {
+                goto rpcerr;
+        }
+        daclentry = GF_CALLOC (NFS_ACL_MAX_ENTRIES, sizeof(*daclentry),
+                               gf_nfs_mt_arr);
+        if (!daclentry) {
+                goto rpcerr;
+        }
 
         acl3_validate_nfs3_state (req, nfs3, stat, rpcerr, ret);
         nfs = nfs_state (nfs3->nfsx);
@@ -506,19 +538,58 @@ acl3svc_setacl (rpcsvc_request_t *req)
                         (cs->daclcount > NFS_ACL_MAX_ENTRIES))
                 goto acl3err;
         /* FIXME: use posix_acl_to_xattr() */
-        p = (int *)cs->aclxattr;
-        *(*(int **)&p)++ = POSIX_ACL_XATTR_VERSION;
+        /* Populate xattr buffer for user ACL */
+        bufheader = (struct posix_acl_xattr_header *)(cs->aclxattr);
+        bufheader->version = htole32(POSIX_ACL_VERSION);
+        bufentry  = bufheader->entries;
         for (i = 0; i < cs->aclcount; i++) {
-                *(*(short **)&p)++ = aclentry[i].type;
-                *(*(short **)&p)++ = aclentry[i].perm;
-                *(*(int **)&p)++ = aclentry[i].uid;
+                int uaceuid;
+                const struct aclentry *uace = &aclentry[i];
+                switch (uace->type) {
+                    case POSIX_ACL_USER:
+                    case POSIX_ACL_GROUP:
+                        uaceuid = uace->uid;
+                        break;
+                    default:
+                        uaceuid = POSIX_ACL_UNDEFINED_ID;
+                        break;
+                }
+                bufentry->tag  = htole16(uace->type);
+                bufentry->perm = htole16(uace->perm);
+                bufentry->id   = htole32(uaceuid);
+
+                bufentry++;
         }
-        p = (int *)cs->daclxattr;
-        *(*(int **)&p)++ = POSIX_ACL_XATTR_VERSION;
+
+        /* Populate xattr buffer for Default ACL */
+        bufheader = (struct posix_acl_xattr_header *)(cs->aclxattr);
+        bufheader->version = htole32(POSIX_ACL_VERSION);
+        bufentry  = bufheader->entries;
         for (i = 0; i < cs->daclcount; i++) {
-                *(*(short **)&p)++ = daclentry[i].type;
-                *(*(short **)&p)++ = daclentry[i].perm;
-                *(*(int **)&p)++ = daclentry[i].uid;
+                int daceuid;
+                int dacetype;
+                const struct aclentry *dace = &daclentry[i];
+                /*
+                 * For "default ACL", NFSv3 handles the 'type' differently
+                 * i.e. by logical OR'ing 'type' with NFS_ACL_DEFAULT.
+                 * Which the backend File system does not understand and
+                 * that needs to be masked OFF.
+                 */
+                dacetype = (dace->type & ~(NFS_ACL_DEFAULT));
+                switch (dacetype) {
+                    case POSIX_ACL_USER:
+                    case POSIX_ACL_GROUP:
+                        daceuid = dace->uid;
+                        break;
+                    default:
+                        daceuid = POSIX_ACL_UNDEFINED_ID;
+                        break;
+                }
+                bufentry->tag  = htole16(dacetype);
+                bufentry->perm = htole16(dace->perm);
+                bufentry->id   = htole32(daceuid);
+
+                bufentry++;
         }
 
 
@@ -532,16 +603,20 @@ acl3err:
                 acl3svc_submit_reply (cs->req, (void *)&cs->args.setaclreply,
                                       (acl3_serializer)xdr_serialize_setaclreply);
                 nfs3_call_state_wipe (cs);
+                GF_FREE(aclentry);
+                GF_FREE(daclentry);
                 return 0;
         }
 
 rpcerr:
         if (ret < 0)
                 nfs3_call_state_wipe (cs);
-
+        if (aclentry)
+                GF_FREE (aclentry);
+        if (daclentry)
+                GF_FREE (daclentry);
         return ret;
 }
-
 
 
 
@@ -554,7 +629,7 @@ rpcsvc_actor_t  acl3svc_actors[ACL3_PROC_COUNT] = {
 rpcsvc_program_t        acl3prog = {
         .progname       = "ACL3",
         .prognum        = ACL_PROGRAM,
-        .progver        = ACL_V3,
+        .progver        = ACLV3_VERSION,
         .progport       = GF_NFS3_PORT,
         .actors         = acl3svc_actors,
         .numactors      = ACL3_PROC_COUNT,
@@ -569,6 +644,11 @@ acl3svc_init(xlator_t *nfsx)
         dict_t *options = NULL;
         int ret = -1;
         char *portstr = NULL;
+        static gf_boolean_t acl3_inited = _gf_false;
+
+        /* Already inited */
+        if (acl3_inited)
+                return &acl3prog;
 
         nfs = (struct nfs_state*)nfsx->private;
 
@@ -614,13 +694,14 @@ acl3svc_init(xlator_t *nfsx)
                 goto err;
         }
 
-        rpcsvc_create_listeners (nfs->rpcsvc, options, "ACL");
+        ret = rpcsvc_create_listeners (nfs->rpcsvc, options, "ACL");
         if (ret == -1) {
                 gf_log (GF_ACL, GF_LOG_ERROR, "Unable to create listeners");
                 dict_unref (options);
                 goto err;
         }
 
+        acl3_inited = _gf_true;
         return &acl3prog;
 err:
         return NULL;

@@ -66,7 +66,7 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
 	call_pool_t   *pool = NULL;
 	int	       ret = -1;
 
-	xlator_mem_acct_init (THIS, glfs_mt_end);
+	xlator_mem_acct_init (THIS, glfs_mt_end + 1);
 
 	ctx->process_uuid = generate_glusterfs_ctx_id ();
 	if (!ctx->process_uuid) {
@@ -317,6 +317,20 @@ enomem:
 	return -1;
 }
 
+int glfs_setfsuid (uid_t fsuid)
+{
+	return syncopctx_setfsuid (&fsuid);
+}
+
+int glfs_setfsgid (gid_t fsgid)
+{
+	return syncopctx_setfsgid (&fsgid);
+}
+
+int glfs_setfsgroups (size_t size, const gid_t *list)
+{
+	return syncopctx_setfsgroups(size, list);
+}
 
 struct glfs *
 glfs_from_glfd (struct glfs_fd *glfd)
@@ -370,6 +384,9 @@ glfs_fd_destroy (struct glfs_fd *glfd)
 
 	if (glfd->fd)
 		fd_unref (glfd->fd);
+
+	GF_FREE (glfd->readdirbuf);
+
 	GF_FREE (glfd);
 }
 
@@ -475,17 +492,25 @@ int
 glfs_set_logging (struct glfs *fs, const char *logfile, int loglevel)
 {
 	int  ret = 0;
+        char *tmplog = NULL;
 
-	if (logfile) {
-                /* passing ident as NULL means to use default ident for syslog */
-		ret = gf_log_init (fs->ctx, logfile, NULL);
-		if (ret)
-			return ret;
-	}
+        if (!logfile) {
+                ret = gf_set_log_file_path (&fs->ctx->cmd_args);
+                if (ret)
+                        goto out;
+                tmplog = fs->ctx->cmd_args.log_file;
+        } else {
+                tmplog = (char *)logfile;
+        }
+
+        ret = gf_log_init (fs->ctx, tmplog, NULL);
+        if (ret)
+                goto out;
 
 	if (loglevel >= 0)
 		gf_log_set_loglevel (loglevel);
 
+out:
 	return ret;
 }
 
@@ -551,7 +576,7 @@ glfs_init_common (struct glfs *fs)
 	if (ret)
 		return ret;
 
-	ret = pthread_create (&fs->poller, NULL, glfs_poller, fs);
+	ret = gf_thread_create (&fs->poller, NULL, glfs_poller, fs);
 	if (ret)
 		return ret;
 
@@ -595,11 +620,11 @@ glfs_init (struct glfs *fs)
 int
 glfs_fini (struct glfs *fs)
 {
-        int  ret = -1;
-        xlator_t *subvol = NULL;
+        int             ret = -1;
+        int             countdown = 100;
+        xlator_t        *subvol = NULL;
         glusterfs_ctx_t *ctx = NULL;
-        call_pool_t *call_pool = NULL;
-        int countdown = 100;
+        call_pool_t     *call_pool = NULL;
 
         ctx = fs->ctx;
 
@@ -620,6 +645,10 @@ glfs_fini (struct glfs *fs)
         }
         /* leaked frames may exist, we ignore */
 
+        /*We deem glfs_fini as successful if there are no pending frames in the call
+         *pool*/
+        ret = (call_pool->cnt == 0)? 0: -1;
+
         subvol = glfs_active_subvol (fs);
         if (subvol) {
                 /* PARENT_DOWN within glfs_subvol_done() is issued only
@@ -636,6 +665,9 @@ glfs_fini (struct glfs *fs)
         }
 
         glfs_subvol_done (fs, subvol);
+
+        if (ctx->log.logfile)
+                fclose (ctx->log.logfile);
 
         return ret;
 }

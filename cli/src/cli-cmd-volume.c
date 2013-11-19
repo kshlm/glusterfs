@@ -1829,10 +1829,12 @@ struct cli_cmd volume_cmds[] = {
           "list information of all volumes"},
 
         { "volume create <NEW-VOLNAME> [stripe <COUNT>] [replica <COUNT>] "
+          "[transport <tcp|rdma|tcp,rdma>] <NEW-BRICK>"
 #ifdef HAVE_BD_XLATOR
-          "[device vg] "
+          "?<vg_name>"
 #endif
-          "[transport <tcp|rdma|tcp,rdma>] <NEW-BRICK> ... [force]",
+          "... [force]",
+
           cli_cmd_volume_create_cbk,
           "create a new volume of specified type with mentioned bricks"},
 
@@ -1856,7 +1858,7 @@ struct cli_cmd volume_cmds[] = {
           cli_cmd_volume_add_brick_cbk,
           "add brick to volume <VOLNAME>"},
 
-        { "volume remove-brick <VOLNAME> [replica <COUNT>] <BRICK> ... {start|stop|status|commit|force}",
+        { "volume remove-brick <VOLNAME> [replica <COUNT>] <BRICK> ... [start|stop|status|commit|force]",
           cli_cmd_volume_remove_brick_cbk,
           "remove brick from volume <VOLNAME>"},
 
@@ -1914,11 +1916,11 @@ struct cli_cmd volume_cmds[] = {
            "volume top operations"},
 
         { "volume status [all | <VOLNAME> [nfs|shd|<BRICK>]]"
-          " [detail|clients|mem|inode|fd|callpool]",
+          " [detail|clients|mem|inode|fd|callpool|tasks]",
           cli_cmd_volume_status_cbk,
           "display status of all or specified volume(s)/brick"},
 
-        { "volume heal <VOLNAME> [{full | info {healed | heal-failed | split-brain}}]",
+        { "volume heal <VOLNAME> [{full | statistics {heal-count {replica <hostname:brickname>}} |info {healed | heal-failed | split-brain}}]",
           cli_cmd_volume_heal_cbk,
           "self-heal commands on volume specified by <VOLNAME>"},
 

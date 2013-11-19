@@ -69,6 +69,19 @@ out:
         return ret;
 }
 
+int
+rpc_transport_throttle (rpc_transport_t *this, gf_boolean_t onoff)
+{
+        int ret = 0;
+
+        if (!this->ops->throttle)
+                return -ENOSYS;
+
+        ret = this->ops->throttle (this, onoff);
+
+        return ret;
+}
+
 int32_t
 rpc_transport_get_peeraddr (rpc_transport_t *this, char *peeraddr, int addrlen,
                             struct sockaddr_storage *sa, size_t salen)
@@ -282,7 +295,7 @@ rpc_transport_load (glusterfs_ctx_t *ctx, dict_t *options, char *trans_name)
 	}
 
         *VOID(&(trans->reconfigure)) = dlsym (handle, "reconfigure");
-        if (trans->fini == NULL) {
+        if (trans->reconfigure == NULL) {
                 gf_log ("rpc-transport", GF_LOG_DEBUG,
                         "dlsym (gf_rpc_transport_reconfigure) on %s", dlerror());
         }

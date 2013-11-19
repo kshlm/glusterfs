@@ -16,6 +16,7 @@
 
 #include "dht-common.h"
 #include "xlator.h"
+#include <signal.h>
 #include <fnmatch.h>
 
 #define GF_DISK_SECTOR_SIZE             512
@@ -243,7 +244,7 @@ out:
 
 static inline int
 __dht_rebalance_create_dst_file (xlator_t *to, xlator_t *from, loc_t *loc, struct iatt *stbuf,
-                                 dict_t *dict, fd_t **dst_fd)
+                                 dict_t *dict, fd_t **dst_fd, dict_t *xattr)
 {
         xlator_t    *this = NULL;
         int          ret  = -1;
@@ -307,6 +308,12 @@ __dht_rebalance_create_dst_file (xlator_t *to, xlator_t *from, loc_t *loc, struc
                 goto out;
         }
 
+        ret = syncop_fsetxattr (to, fd, xattr, 0);
+        if (ret == -1)
+                gf_log (this->name, GF_LOG_WARNING,
+                        "%s: failed to set xattr on %s (%s)",
+                        loc->path, to->name, strerror (errno));
+
         ret = syncop_ftruncate (to, fd, stbuf->ia_size);
         if (ret < 0)
                 gf_log (this->name, GF_LOG_ERROR,
@@ -340,6 +347,9 @@ __dht_check_free_space (xlator_t *to, xlator_t *from, loc_t *loc,
         int             ret        = -1;
         xlator_t       *this       = NULL;
 
+        uint64_t        src_statfs_blocks = 1;
+        uint64_t        dst_statfs_blocks = 1;
+
         this = THIS;
 
         ret = syncop_statfs (from, loc, &src_statfs);
@@ -363,22 +373,34 @@ __dht_check_free_space (xlator_t *to, xlator_t *from, loc_t *loc,
         if (flag != GF_DHT_MIGRATE_DATA)
                 goto check_avail_space;
 
-        if (((dst_statfs.f_bavail *
-              dst_statfs.f_bsize) / GF_DISK_SECTOR_SIZE) <
-            (((src_statfs.f_bavail * src_statfs.f_bsize) /
-              GF_DISK_SECTOR_SIZE) - stbuf->ia_blocks)) {
-                gf_log (this->name, GF_LOG_WARNING,
-                        "data movement attempted from node (%s) with"
-                        " higher disk space to a node (%s) with "
-                        "lesser disk space (%s)", from->name,
-                        to->name, loc->path);
+        /* Check:
+           During rebalance `migrate-data` - Destination subvol experiences
+           a `reduction` in 'blocks' of free space, at the same time source
+           subvol gains certain 'blocks' of free space. A valid check is
+           necessary here to avoid errorneous move to destination where
+           the space could be scantily available.
+         */
+        if (stbuf) {
+                dst_statfs_blocks = ((dst_statfs.f_bavail *
+                                      dst_statfs.f_bsize) /
+                                     GF_DISK_SECTOR_SIZE);
+                src_statfs_blocks = ((src_statfs.f_bavail *
+                                      src_statfs.f_bsize) /
+                                     GF_DISK_SECTOR_SIZE);
+                if ((dst_statfs_blocks - stbuf->ia_blocks) <
+                    (src_statfs_blocks + stbuf->ia_blocks)) {
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "data movement attempted from node (%s) with"
+                                " higher disk space to a node (%s) with "
+                                "lesser disk space (%s)", from->name,
+                                to->name, loc->path);
 
-                /* this is not a 'failure', but we don't want to
-                   consider this as 'success' too :-/ */
-                ret = 1;
-                goto out;
+                        /* this is not a 'failure', but we don't want to
+                           consider this as 'success' too :-/ */
+                        ret = 1;
+                        goto out;
+                }
         }
-
 check_avail_space:
         if (((dst_statfs.f_bavail * dst_statfs.f_bsize) /
               GF_DISK_SECTOR_SIZE) < stbuf->ia_blocks) {
@@ -708,9 +730,16 @@ dht_migrate_file (xlator_t *this, loc_t *loc, xlator_t *from, xlator_t *to,
                 goto out;
         }
 
+        /* TODO: move all xattr related operations to fd based operations */
+        ret = syncop_listxattr (from, loc, &xattr);
+        if (ret == -1)
+                gf_log (this->name, GF_LOG_WARNING,
+                        "%s: failed to get xattr from %s (%s)",
+                        loc->path, from->name, strerror (errno));
+
         /* create the destination, with required modes/xattr */
         ret = __dht_rebalance_create_dst_file (to, from, loc, &stbuf,
-                                               dict, &dst_fd);
+                                               dict, &dst_fd, xattr);
         if (ret)
                 goto out;
 
@@ -726,6 +755,7 @@ dht_migrate_file (xlator_t *this, loc_t *loc, xlator_t *from, xlator_t *to,
                         loc->path, from->name);
                 goto out;
         }
+
 
         ret = syncop_fstat (from, src_fd, &stbuf);
         if (ret) {
@@ -755,19 +785,6 @@ dht_migrate_file (xlator_t *this, loc_t *loc, xlator_t *from, xlator_t *to,
                 ret = -1;
                 goto out;
         }
-
-        /* TODO: move all xattr related operations to fd based operations */
-        ret = syncop_listxattr (from, loc, &xattr);
-        if (ret == -1)
-                gf_log (this->name, GF_LOG_WARNING,
-                        "%s: failed to get xattr from %s (%s)",
-                        loc->path, from->name, strerror (errno));
-
-        ret = syncop_setxattr (to, loc, xattr, 0);
-        if (ret == -1)
-                gf_log (this->name, GF_LOG_WARNING,
-                        "%s: failed to set xattr on %s (%s)",
-                        loc->path, to->name, strerror (errno));
 
         /* TODO: Sync the locks */
 
@@ -1759,6 +1776,8 @@ log:
                 break;
         case GF_DEFRAG_STATUS_FAILED:
                 status = "failed";
+                break;
+        default:
                 break;
         }
 

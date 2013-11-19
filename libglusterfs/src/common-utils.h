@@ -112,6 +112,7 @@ in_addr_t gf_resolve_ip (const char *hostname, void **dnscache);
 
 void gf_log_dump_graph (FILE *specfp, glusterfs_graph_t *graph);
 void gf_print_trace (int32_t signal, glusterfs_ctx_t *ctx);
+int  gf_set_log_file_path (cmd_args_t *cmd_args);
 
 #define VECTORSIZE(count) (count * (sizeof (struct iovec)))
 
@@ -586,5 +587,8 @@ int gf_get_hostname_from_ip (char *client_ip, char **hostname);
 gf_boolean_t gf_is_local_addr (char *hostname);
 gf_boolean_t gf_is_same_address (char *host1, char *host2);
 void md5_wrapper(const unsigned char *data, size_t len, char *md5);
+
+int gf_thread_create (pthread_t *thread, const pthread_attr_t *attr,
+		      void *(*start_routine)(void *), void *arg);
 
 #endif /* _COMMON_UTILS_H */

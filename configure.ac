@@ -53,8 +53,8 @@ AC_CONFIG_FILES([Makefile
                 xlators/storage/Makefile
                 xlators/storage/posix/Makefile
                 xlators/storage/posix/src/Makefile
-                xlators/storage/bd_map/Makefile
-                xlators/storage/bd_map/src/Makefile
+                xlators/storage/bd/Makefile
+                xlators/storage/bd/src/Makefile
                 xlators/cluster/Makefile
                 xlators/cluster/afr/Makefile
                 xlators/cluster/afr/src/Makefile
@@ -113,6 +113,8 @@ AC_CONFIG_FILES([Makefile
                 xlators/features/marker/src/Makefile
                 xlators/features/read-only/Makefile
                 xlators/features/read-only/src/Makefile
+                xlators/features/compress/Makefile
+                xlators/features/compress/src/Makefile
                 xlators/features/mac-compat/Makefile
                 xlators/features/mac-compat/src/Makefile
                 xlators/features/quiesce/Makefile
@@ -129,6 +131,8 @@ AC_CONFIG_FILES([Makefile
                 xlators/encryption/Makefile
                 xlators/encryption/rot-13/Makefile
                 xlators/encryption/rot-13/src/Makefile
+                xlators/encryption/crypt/Makefile
+                xlators/encryption/crypt/src/Makefile
 		xlators/features/qemu-block/Makefile
 		xlators/features/qemu-block/src/Makefile
                 xlators/system/Makefile
@@ -164,6 +168,8 @@ AC_CONFIG_FILES([Makefile
                 libgfchangelog.pc
                 api/Makefile
                 api/src/Makefile
+                api/examples/Makefile
+                api/examples/setup.py
 		geo-replication/Makefile
 		geo-replication/src/Makefile
 		geo-replication/syncdaemon/Makefile
@@ -300,16 +306,15 @@ if test "x$enable_fuse_client" != "xno"; then
 fi
 
 AC_ARG_ENABLE([bd-xlator],
-                AC_HELP_STRING([--enable-bd-xlator],
-                        [Build BD xlator]))
+              AC_HELP_STRING([--enable-bd-xlator], [Build BD xlator]))
 
 if test "x$enable_bd_xlator" != "xno"; then
   AC_CHECK_LIB([lvm2app],
-                  [lvm_init,lvm_lv_from_name],
-                  [HAVE_BD_LIB="yes"],
-                  [HAVE_BD_LIB="no"])
+               [lvm_init,lvm_lv_from_name],
+               [HAVE_BD_LIB="yes"],
+               [HAVE_BD_LIB="no"])
 
-  if test "x$HAVE_BD_LIB" = "xyes"; then
+if test "x$HAVE_BD_LIB" = "xyes"; then
     # lvm_lv_from_name() has been made public with lvm2-2.02.79
     AC_CHECK_DECLS(
                   [lvm_lv_from_name],
@@ -325,10 +330,10 @@ if test "x$enable_bd_xlator" = "xyes" -a "x$HAVE_BD_LIB" = "xno"; then
 fi
 
 BUILD_BD_XLATOR=no
-if test "x${enable_bd_xlator}" != "xno" -a "x${HAVE_BD_LIB}" = "xyes"; then
+if test "x${enable-bd-xlator}" != "xno" -a "x${HAVE_BD_LIB}" = "xyes"; then
   BUILD_BD_XLATOR=yes
-  AC_DEFINE(HAVE_BD_XLATOR, 1, [define if lvm2app library found and bd
-                  xlator enabled])
+  AC_DEFINE(HAVE_BD_XLATOR, 1, [define if lvm2app library found and bd xlator
+                            enabled])
   if test "x$NEED_LVM_LV_FROM_NAME_DECL" = "xyes"; then
     AC_DEFINE(NEED_LVM_LV_FROM_NAME_DECL, 1, [defined if lvm_lv_from_name()
                   was not found in the lvm2app.h header, but can be linked])
@@ -336,6 +341,26 @@ if test "x${enable_bd_xlator}" != "xno" -a "x${HAVE_BD_LIB}" = "xyes"; then
 fi
 
 AM_CONDITIONAL([ENABLE_BD_XLATOR], [test x$BUILD_BD_XLATOR = xyes])
+
+# start encryption/crypt section
+
+AC_CHECK_HEADERS([openssl/cmac.h], [have_cmac_h=yes], [have_cmac_h=no])
+
+AC_ARG_ENABLE([crypt-xlator],
+	AC_HELP_STRING([--enable-crypt-xlator], [Build crypt encryption xlator]))
+
+if test "x$enable_crypt_xlator" = "xyes" -a "x$have_cmac_h" = "xno"; then
+   echo "Encryption xlator requires OpenSSL with cmac.h"
+   exit 1
+fi
+
+BUILD_CRYPT_XLATOR=no
+if test "x$enable_crypt_xlator" != "xno" -a "x$have_cmac_h" = "xyes"; then
+   BUILD_CRYPT_XLATOR=yes
+   AC_DEFINE(HAVE_CRYPT_XLATOR, 1, [enable building crypt encryption xlator])
+fi
+
+AM_CONDITIONAL([ENABLE_CRYPT_XLATOR], [test x$BUILD_CRYPT_XLATOR = xyes])
 
 AC_SUBST(FUSE_CLIENT_SUBDIR)
 # end FUSE section
@@ -409,7 +434,7 @@ if test "x$enable_ibverbs" != "xno"; then
                [ibv_get_device_list],
                [HAVE_LIBIBVERBS="yes"],
                [HAVE_LIBIBVERBS="no"])
-  AC_CHECK_LIB([rdmacm], [rdma_create_id], [HAVE_RDMACM="yes"], [HAVE_RDMACM="no"]) 
+  AC_CHECK_LIB([rdmacm], [rdma_create_id], [HAVE_RDMACM="yes"], [HAVE_RDMACM="no"])
 fi
 
 if test "x$enable_ibverbs" = "xyes"; then
@@ -482,6 +507,17 @@ AC_SUBST(SYNCDAEMON_COMPILE)
 AC_SUBST(SYNCDAEMON_SUBDIR)
 # end SYNCDAEMON section
 
+# CDC xlator - check if libz is present if so enable HAVE_LIB_Z
+echo -n "checking if libz is present... "
+
+PKG_CHECK_MODULES([ZLIB], [zlib >= 1.2.0],
+                  [echo "yes (features requiring zlib enabled)"  AC_DEFINE(HAVE_LIB_Z, 1, [define if zlib is present])],
+                  [echo "no"] )
+
+AC_SUBST(LIBZ_CFLAGS)
+AC_SUBST(LIBZ_LIBS)
+# end CDC xlator secion
+
 # check for systemtap/dtrace
 BUILD_SYSTEMTAP=no
 AC_MSG_CHECKING([whether to include systemtap tracing support])
@@ -521,11 +557,11 @@ AC_ARG_ENABLE([xml-output],
 BUILD_XML_OUTPUT="yes"
 if test "x$enable_xml_output" != "xno"; then
     #check if libxml is present if so enable HAVE_LIB_XML
-    AM_PATH_XML2([2.6.19])
-
+    m4_ifdef([AM_PATH_XML2],[AM_PATH_XML2([2.6.19])], [no_xml=yes])
     if test "x${no_xml}" = "x"; then
         AC_DEFINE([HAVE_LIB_XML], [1], [Define to 1 if using libxml2.])
     else
+        AC_MSG_WARN([libxml2 devel libraries not found disabling XML support])
         BUILD_XML_OUTPUT="no"
     fi
 else
@@ -567,11 +603,15 @@ if test "x${have_linkat}" = "xyes"; then
 fi
 AC_SUBST(HAVE_LINKAT)
 
+dnl check for Monotonic clock
+AC_CHECK_FUNC([clock_gettime], [has_monotonic_clock=yes], AC_CHECK_LIB([rt], [clock_gettime], , AC_MSG_WARN([System doesn't have monotonic clock using contrib])))
+
 dnl Check for argp
 AC_CHECK_HEADER([argp.h], AC_DEFINE(HAVE_ARGP, 1, [have argp]))
 AC_CONFIG_SUBDIRS(argp-standalone)
+
 BUILD_ARGP_STANDALONE=no
-if test "x${ac_cv_header_argp_h}" = "xno"; then 
+if test "x${ac_cv_header_argp_h}" = "xno"; then
    BUILD_ARGP_STANDALONE=yes
    ARGP_STANDALONE_CPPFLAGS='-I${top_srcdir}/argp-standalone'
    ARGP_STANDALONE_LDADD='${top_builddir}/argp-standalone/libargp.a'
@@ -603,7 +643,7 @@ if test "x${have_posix_fallocate}" = "xyes"; then
 fi
 
 
-# Check the distribution where you are compiling glusterfs on 
+# Check the distribution where you are compiling glusterfs on
 
 GF_DISTRIBUTION=
 AC_CHECK_FILE([/etc/debian_version])
@@ -651,7 +691,6 @@ fi
 
 case $host_os in
      linux*)
-     dnl        GF_LINUX_HOST_OS=1
         GF_HOST_OS="GF_LINUX_HOST_OS"
         GF_CFLAGS="${ARGP_STANDALONE_CPPFLAGS} -O0"
         GF_GLUSTERFS_CFLAGS="${GF_CFLAGS}"
@@ -843,9 +882,10 @@ echo "georeplication       : $BUILD_SYNCDAEMON"
 echo "Linux-AIO            : $BUILD_LIBAIO"
 echo "Enable Debug         : $BUILD_DEBUG"
 echo "systemtap            : $BUILD_SYSTEMTAP"
-echo "Block Device backend : $BUILD_BD_XLATOR"
+echo "Block Device xlator  : $BUILD_BD_XLATOR"
 echo "glupy                : $BUILD_GLUPY"
 echo "Use syslog           : $USE_SYSLOG"
 echo "XML output           : $BUILD_XML_OUTPUT"
 echo "QEMU Block formats   : $BUILD_QEMU_BLOCK"
+echo "Encryption xlator    : $BUILD_CRYPT_XLATOR"
 echo

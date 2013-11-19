@@ -136,11 +136,7 @@ posix_aio_readv_complete (struct posix_aio_cb *paiocb, int res, int res2)
 
 
         /* Hack to notify higher layers of EOF. */
-        if (postbuf.ia_size == 0)
-                op_errno = ENOENT;
-        else if ((offset + iov.iov_len) == postbuf.ia_size)
-                op_errno = ENOENT;
-        else if (offset > postbuf.ia_size)
+        if (!postbuf.ia_size || (offset + iov.iov_len) >= postbuf.ia_size)
                 op_errno = ENOENT;
 
         LOCK (&priv->lock);
@@ -490,8 +486,8 @@ posix_aio_init (xlator_t *this)
                 goto out;
 	}
 
-        ret = pthread_create (&priv->aiothread, NULL,
-                              posix_aio_thread, this);
+        ret = gf_thread_create (&priv->aiothread, NULL,
+				posix_aio_thread, this);
         if (ret != 0) {
                 io_destroy (priv->ctxp);
                 goto out;

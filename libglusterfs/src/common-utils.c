@@ -1125,7 +1125,7 @@ gf_string2int8 (const char *str, int8_t *n)
         if (rv != 0)
                 return rv;
 
-        if (l >= INT8_MIN && l <= INT8_MAX) {
+        if ((l >= INT8_MIN) && (l <= INT8_MAX)) {
                 *n = (int8_t) l;
                 return 0;
         }
@@ -1144,7 +1144,7 @@ gf_string2int16 (const char *str, int16_t *n)
         if (rv != 0)
                 return rv;
 
-        if (l >= INT16_MIN && l <= INT16_MAX) {
+        if ((l >= INT16_MIN) && (l <= INT16_MAX)) {
                 *n = (int16_t) l;
                 return 0;
         }
@@ -1163,7 +1163,7 @@ gf_string2int32 (const char *str, int32_t *n)
         if (rv != 0)
                 return rv;
 
-        if (l >= INT32_MIN && l <= INT32_MAX) {
+        if ((l >= INT32_MIN) && (l <= INT32_MAX)) {
                 *n = (int32_t) l;
                 return 0;
         }
@@ -1182,7 +1182,7 @@ gf_string2int64 (const char *str, int64_t *n)
         if (rv != 0)
                 return rv;
 
-        if (l >= INT64_MIN && l <= INT64_MAX) {
+        if ((l >= INT64_MIN) && (l <= INT64_MAX)) {
                 *n = (int64_t) l;
                 return 0;
         }
@@ -1441,6 +1441,11 @@ gf_string2bytesize (const char *str, uint64_t *n)
                         return -1;
         }
 
+        if ((UINT64_MAX - value) < 0) {
+                errno = ERANGE;
+                return -1;
+        }
+
         *n = (uint64_t) value;
 
         return 0;
@@ -1498,6 +1503,12 @@ gf_string2percent_or_bytesize (const char *str,
 			*is_percent = _gf_true;
                 else
                         return -1;
+        }
+
+        /* Error out if we cannot store the value in uint64 */
+        if ((UINT64_MAX - value) < 0) {
+                errno = ERANGE;
+                return -1;
         }
 
         *n = (uint64_t) value;
@@ -2807,3 +2818,91 @@ out:
 
 }
 
+
+/* Sets log file path from user provided arguments */
+int
+gf_set_log_file_path (cmd_args_t *cmd_args)
+{
+        int   i = 0;
+        int   j = 0;
+        int   ret = 0;
+        char  tmp_str[1024] = {0,};
+
+        if (!cmd_args)
+                goto done;
+
+        if (cmd_args->mount_point) {
+                j = 0;
+                i = 0;
+                if (cmd_args->mount_point[0] == '/')
+                        i = 1;
+                for (; i < strlen (cmd_args->mount_point); i++,j++) {
+                        tmp_str[j] = cmd_args->mount_point[i];
+                        if (cmd_args->mount_point[i] == '/')
+                                tmp_str[j] = '-';
+                }
+
+                ret = gf_asprintf (&cmd_args->log_file,
+                                   DEFAULT_LOG_FILE_DIRECTORY "/%s.log",
+                                   tmp_str);
+                if (ret > 0)
+                        ret = 0;
+                goto done;
+        }
+
+        if (cmd_args->volfile) {
+                j = 0;
+                i = 0;
+                if (cmd_args->volfile[0] == '/')
+                        i = 1;
+                for (; i < strlen (cmd_args->volfile); i++,j++) {
+                        tmp_str[j] = cmd_args->volfile[i];
+                        if (cmd_args->volfile[i] == '/')
+                                tmp_str[j] = '-';
+                }
+                ret = gf_asprintf (&cmd_args->log_file,
+                                   DEFAULT_LOG_FILE_DIRECTORY "/%s.log",
+                                   tmp_str);
+                if (ret > 0)
+                        ret = 0;
+                goto done;
+        }
+
+        if (cmd_args->volfile_server) {
+
+                ret = gf_asprintf (&cmd_args->log_file,
+                                   DEFAULT_LOG_FILE_DIRECTORY "/%s-%s-%d.log",
+                                   cmd_args->volfile_server,
+                                   cmd_args->volfile_id, getpid());
+                if (ret > 0)
+                        ret = 0;
+        }
+done:
+        return ret;
+}
+
+int
+gf_thread_create (pthread_t *thread, const pthread_attr_t *attr,
+		  void *(*start_routine)(void *), void *arg)
+{
+	sigset_t set, old;
+	int ret;
+
+	sigemptyset (&set);
+
+	sigfillset (&set);
+	sigdelset (&set, SIGSEGV);
+	sigdelset (&set, SIGBUS);
+	sigdelset (&set, SIGILL);
+	sigdelset (&set, SIGSYS);
+	sigdelset (&set, SIGFPE);
+	sigdelset (&set, SIGABRT);
+
+	pthread_sigmask (SIG_BLOCK, &set, &old);
+
+	ret = pthread_create (thread, attr, start_routine, arg);
+
+	pthread_sigmask (SIG_SETMASK, &old, NULL);
+
+	return ret;
+}

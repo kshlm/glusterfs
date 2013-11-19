@@ -2,19 +2,10 @@
   Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -265,6 +256,20 @@ nfs3_errno_to_nfsstat3 (int errnum)
         return stat;
 }
 
+/*
+ * Special case: If op_ret is -1, it's very unusual op_errno being
+ * 0 which means something came wrong from upper layer(s). If it
+ * happens by any means, then set NFS3 status to NFS3ERR_SERVERFAULT.
+ */
+inline nfsstat3
+nfs3_cbk_errno_status (int32_t op_ret, int32_t op_errno)
+{
+        if ((op_ret == -1) && (op_errno == 0)) {
+                return NFS3ERR_SERVERFAULT;
+        }
+
+        return nfs3_errno_to_nfsstat3 (op_errno);
+}
 
 void
 nfs3_fill_lookup3res_error (lookup3res *res, nfsstat3 stat,
@@ -283,6 +288,9 @@ fattr3
 nfs3_stat_to_fattr3 (struct iatt *buf)
 {
         fattr3          fa = {0, };
+
+        if (buf == NULL)
+                goto out;
 
         if (IA_ISDIR (buf->ia_type))
                 fa.type = NF3DIR;
@@ -353,6 +361,7 @@ nfs3_stat_to_fattr3 (struct iatt *buf)
         fa.mtime.seconds = buf->ia_mtime;
         fa.mtime.nseconds = buf->ia_mtime_nsec;
 
+out:
         return fa;
 }
 
@@ -496,7 +505,7 @@ nfs3_fill_fsinfo3res (struct nfs3_state *nfs3, fsinfo3res *res,
         resok.wtpref = nfs3->writesize;
         resok.wtmult = GF_NFS3_WTMULT;
         resok.dtpref = nfs3->readdirsize;
-        resok.maxfilesize = GF_NFS3_MAXFILE;
+        resok.maxfilesize = GF_NFS3_MAXFILESIZE;
         resok.time_delta = tdelta;
         resok.properties = GF_NFS3_FS_PROP;
 
@@ -1607,13 +1616,14 @@ err:
 
 void
 nfs3_stat_to_errstr (uint32_t xid, char *op, nfsstat3 stat, int pstat,
-                     char *errstr)
+                     char *errstr, size_t len)
 {
         if ((!op) || (!errstr))
                 return;
 
-        sprintf (errstr, "XID: %x, %s: NFS: %d(%s), POSIX: %d(%s)", xid, op,
-                 stat, nfsstat3_strerror (stat), pstat, strerror (pstat));
+        snprintf (errstr, len, "XID: %x, %s: NFS: %d(%s), POSIX: %d(%s)",
+                  xid, op,stat, nfsstat3_strerror (stat), pstat,
+                  strerror (pstat));
 }
 
 void
@@ -1621,10 +1631,10 @@ nfs3_log_common_call (uint32_t xid, char *op, struct nfs3_fh *fh)
 {
         char    fhstr[1024];
 
-	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
-		return;
+        if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+                return;
 
-        nfs3_fh_to_str (fh, fhstr);
+        nfs3_fh_to_str (fh, fhstr, sizeof (fhstr));
         gf_log (GF_NFS3, GF_LOG_DEBUG, "XID: %x, %s: args: %s", xid, op,
                 fhstr);
 }
@@ -1636,9 +1646,9 @@ nfs3_log_fh_entry_call (uint32_t xid, char *op, struct nfs3_fh *fh,
 {
         char    fhstr[1024];
 
-	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
-		return;
-        nfs3_fh_to_str (fh, fhstr);
+        if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+                return;
+        nfs3_fh_to_str (fh, fhstr, sizeof (fhstr));
         gf_log (GF_NFS3, GF_LOG_DEBUG, "XID: %x, %s: args: %s, name: %s", xid,
                 op, fhstr, name);
 }
@@ -1651,10 +1661,10 @@ nfs3_log_rename_call (uint32_t xid, struct nfs3_fh *src, char *sname,
         char    sfhstr[1024];
         char    dfhstr[1024];
 
-	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
-		return;
-        nfs3_fh_to_str (src, sfhstr);
-        nfs3_fh_to_str (dst, dfhstr);
+        if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+                return;
+        nfs3_fh_to_str (src, sfhstr, sizeof (sfhstr));
+        nfs3_fh_to_str (dst, dfhstr, sizeof (dfhstr));
         gf_log (GF_NFS3, GF_LOG_DEBUG, "XID: %x, RENAME: args: Src: %s, "
                 "name: %s, Dst: %s, name: %s", xid, sfhstr, sname, dfhstr,
                 dname);
@@ -1672,9 +1682,9 @@ nfs3_log_create_call (uint32_t xid, struct nfs3_fh *fh, char *name,
         char    unchkd[] = "UNCHECKED";
         char    guarded[] = "GUARDED";
 
-	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
-		return;
-        nfs3_fh_to_str (fh, fhstr);
+        if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+                return;
+        nfs3_fh_to_str (fh, fhstr, sizeof (fhstr));
         if (mode == EXCLUSIVE)
                 modestr = exclmode;
         else if (mode == GUARDED)
@@ -1697,9 +1707,9 @@ nfs3_log_mknod_call (uint32_t xid, struct nfs3_fh *fh, char *name, int type)
         char    sock[] = "SOCK";
         char    fifo[] = "FIFO";
 
-	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
-		return;
-        nfs3_fh_to_str (fh, fhstr);
+        if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+                return;
+        nfs3_fh_to_str (fh, fhstr, sizeof (fhstr));
         if (type == NF3CHR)
                 modestr = chr;
         else if (type == NF3BLK)
@@ -1720,9 +1730,9 @@ nfs3_log_symlink_call (uint32_t xid, struct nfs3_fh *fh, char *name, char *tgt)
 {
         char    fhstr[1024];
 
-	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
-		return;
-        nfs3_fh_to_str (fh, fhstr);
+        if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+                return;
+        nfs3_fh_to_str (fh, fhstr, sizeof (fhstr));
         gf_log (GF_NFS3, GF_LOG_DEBUG, "XID: %x, SYMLINK: args: %s, name: %s,"
                 " target: %s", xid, fhstr, name, tgt);
 }
@@ -1735,10 +1745,10 @@ nfs3_log_link_call (uint32_t xid, struct nfs3_fh *fh, char *name,
         char    dfhstr[1024];
         char    tfhstr[1024];
 
-	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
-		return;
-        nfs3_fh_to_str (fh, dfhstr);
-        nfs3_fh_to_str (tgt, tfhstr);
+        if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+                return;
+        nfs3_fh_to_str (fh, dfhstr, sizeof (dfhstr));
+        nfs3_fh_to_str (tgt, tfhstr, sizeof (tfhstr));
         gf_log (GF_NFS3, GF_LOG_DEBUG, "XID: %x, LINK: args: %s, name: %s,"
                 " target: %s", xid, dfhstr, name, tfhstr);
 }
@@ -1750,9 +1760,9 @@ nfs3_log_rw_call (uint32_t xid, char *op, struct nfs3_fh *fh, offset3 offt,
 {
         char    fhstr[1024];
 
-	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
-		return;
-        nfs3_fh_to_str (fh, fhstr);
+        if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+                return;
+        nfs3_fh_to_str (fh, fhstr, sizeof (fhstr));
         if (stablewrite == -1)
                 gf_log (GF_NFS3, GF_LOG_DEBUG, "XID: %x, %s: args: %s, offset:"
                         " %"PRIu64",  count: %"PRIu32, xid, op, fhstr, offt,
@@ -3383,11 +3393,11 @@ void
 nfs3_log_common_res (uint32_t xid, int op, nfsstat3 stat, int pstat)
 {
         char    errstr[1024];
-	int	ll = nfs3_loglevel (op, stat);
+        int     ll = nfs3_loglevel (op, stat);
 
-	if (THIS->ctx->log.loglevel < ll)
-		return;
-        nfs3_stat_to_errstr (xid, nfs3op_strings[op].str, stat, pstat, errstr);
+        if (THIS->ctx->log.loglevel < ll)
+                return;
+        nfs3_stat_to_errstr (xid, nfs3op_strings[op].str, stat, pstat, errstr, sizeof (errstr));
         gf_log (GF_NFS3, ll, "%s", errstr);
 }
 
@@ -3395,14 +3405,14 @@ void
 nfs3_log_readlink_res (uint32_t xid, nfsstat3 stat, int pstat, char *linkpath)
 {
         char    errstr[1024];
-	int	ll = nfs3_loglevel (NFS3_READLINK, stat);
+        int     ll = nfs3_loglevel (NFS3_READLINK, stat);
 
-	if (THIS->ctx->log.loglevel < ll)
-		return;
+        if (THIS->ctx->log.loglevel < ll)
+                return;
 
-        nfs3_stat_to_errstr (xid, "READLINK", stat, pstat, errstr);
+        nfs3_stat_to_errstr (xid, "READLINK", stat, pstat, errstr, sizeof (errstr));
         gf_log (GF_NFS3, ll, "%s, target: %s",
-		errstr, linkpath);
+                errstr, linkpath);
 
 }
 
@@ -3411,12 +3421,12 @@ nfs3_log_read_res (uint32_t xid, nfsstat3 stat, int pstat, count3 count,
                    int is_eof, struct iovec *vec, int32_t veccount)
 {
         char    errstr[1024];
-	int	ll = GF_LOG_DEBUG;
+        int     ll = GF_LOG_DEBUG;
 
 	ll = nfs3_loglevel (NFS3_READ, stat);
-	if (THIS->ctx->log.loglevel < ll)
-		return;
-        nfs3_stat_to_errstr (xid, "READ", stat, pstat, errstr);
+        if (THIS->ctx->log.loglevel < ll)
+                return;
+        nfs3_stat_to_errstr (xid, "READ", stat, pstat, errstr, sizeof (errstr));
         if (vec)
                 gf_log (GF_NFS3, ll, "%s, count: %"PRIu32", is_eof:"
                         " %d, vector: count: %d, len: %zd", errstr, count,
@@ -3432,12 +3442,12 @@ nfs3_log_write_res (uint32_t xid, nfsstat3 stat, int pstat, count3 count,
                     int stable, uint64_t wverf)
 {
         char    errstr[1024];
-	int	ll = nfs3_loglevel (NFS3_WRITE, stat);
+        int     ll = nfs3_loglevel (NFS3_WRITE, stat);
 
-	if (THIS->ctx->log.loglevel < ll)
-		return;
+        if (THIS->ctx->log.loglevel < ll)
+                 return;
 
-        nfs3_stat_to_errstr (xid, "WRITE", stat, pstat, errstr);
+        nfs3_stat_to_errstr (xid, "WRITE", stat, pstat, errstr, sizeof (errstr));
         gf_log (GF_NFS3, ll, "%s, count: %"PRIu32", %s,wverf: %"PRIu64
                 , errstr, count, (stable == UNSTABLE)?"UNSTABLE":"STABLE",
                 wverf);
@@ -3450,12 +3460,12 @@ nfs3_log_newfh_res (uint32_t xid, int op, nfsstat3 stat, int pstat,
 {
         char    errstr[1024];
         char    fhstr[1024];
-	int	ll = nfs3_loglevel (op, stat);
+        int     ll = nfs3_loglevel (op, stat);
 
-	if (THIS->ctx->log.loglevel < ll)
-		return;
-        nfs3_stat_to_errstr (xid, nfs3op_strings[op].str, stat, pstat, errstr);
-        nfs3_fh_to_str (newfh, fhstr);
+        if (THIS->ctx->log.loglevel < ll)
+                return;
+        nfs3_stat_to_errstr (xid, nfs3op_strings[op].str, stat, pstat, errstr, sizeof (errstr));
+        nfs3_fh_to_str (newfh, fhstr, sizeof (fhstr));
 
         gf_log (GF_NFS3, nfs3_loglevel (op, stat), "%s, %s", errstr, fhstr);
 }
@@ -3466,11 +3476,11 @@ nfs3_log_readdir_res (uint32_t xid, nfsstat3 stat, int pstat, uint64_t cverf,
                       count3 count, int is_eof)
 {
         char    errstr[1024];
-	int	ll = nfs3_loglevel (NFS3_READDIR, stat);
+        int     ll = nfs3_loglevel (NFS3_READDIR, stat);
 
-	if (THIS->ctx->log.loglevel < ll)
-		return;
-        nfs3_stat_to_errstr (xid, "READDIR", stat, pstat, errstr);
+        if (THIS->ctx->log.loglevel < ll)
+                return;
+        nfs3_stat_to_errstr (xid, "READDIR", stat, pstat, errstr, sizeof (errstr));
         gf_log (GF_NFS3, ll, "%s, count: %"PRIu32", cverf: %"PRIu64
                 ", is_eof: %d", errstr, count, cverf, is_eof);
 }
@@ -3483,9 +3493,9 @@ nfs3_log_readdirp_res (uint32_t xid, nfsstat3 stat, int pstat, uint64_t cverf,
         char    errstr[1024];
 	int	ll = nfs3_loglevel (NFS3_READDIRP, stat);
 
-	if (THIS->ctx->log.loglevel < ll)
-		return;
-        nfs3_stat_to_errstr (xid, "READDIRPLUS", stat, pstat, errstr);
+        if (THIS->ctx->log.loglevel < ll)
+                return;
+        nfs3_stat_to_errstr (xid, "READDIRPLUS", stat, pstat, errstr, sizeof (errstr));
         gf_log (GF_NFS3, ll, "%s, dircount: %"PRIu32", maxcount: %"
                 PRIu32", cverf: %"PRIu64", is_eof: %d", errstr, dircount,
                 maxcount, cverf, is_eof);
@@ -3498,9 +3508,9 @@ nfs3_log_commit_res (uint32_t xid, nfsstat3 stat, int pstat, uint64_t wverf)
         char    errstr[1024];
 	int	ll = nfs3_loglevel (NFS3_COMMIT, stat);
 
-	if (THIS->ctx->log.loglevel < ll)
-		return;
-        nfs3_stat_to_errstr (xid, "COMMIT", stat, pstat, errstr);
+        if (THIS->ctx->log.loglevel < ll)
+                return;
+        nfs3_stat_to_errstr (xid, "COMMIT", stat, pstat, errstr, sizeof (errstr));
         gf_log (GF_NFS3, ll, "%s, wverf: %"PRIu64, errstr, wverf);
 }
 
@@ -3511,10 +3521,10 @@ nfs3_log_readdir_call (uint32_t xid, struct nfs3_fh *fh, count3 dircount,
 {
         char    fhstr[1024];
 
-	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
-		return;
+        if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+                return;
 
-        nfs3_fh_to_str (fh, fhstr);
+        nfs3_fh_to_str (fh, fhstr, sizeof (fhstr));
 
         if (maxcount == 0)
                 gf_log (GF_NFS3, GF_LOG_DEBUG, "XID: %x, READDIR: args: %s,"

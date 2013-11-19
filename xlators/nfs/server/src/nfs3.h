@@ -2,19 +2,10 @@
   Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _NFS3_H_
@@ -48,16 +39,39 @@
 
 
 /* Static values used for FSINFO
-FIXME: This should be configurable */
-#define GF_NFS3_RTMAX      (64 * GF_UNIT_KB)
-#define GF_NFS3_RTPREF     (64 * GF_UNIT_KB)
-#define GF_NFS3_RTMULT     (4 * GF_UNIT_KB)
-#define GF_NFS3_WTMAX      (64 * GF_UNIT_KB)
-#define GF_NFS3_WTPREF     (64 * GF_UNIT_KB)
-#define GF_NFS3_WTMULT     (4 * GF_UNIT_KB)
-#define GF_NFS3_DTMIN      (4 * GF_UNIT_KB)
-#define GF_NFS3_DTPREF     (64 * GF_UNIT_KB)
-#define GF_NFS3_MAXFILE    (1 * GF_UNIT_PB)
+ * To change the maximum rsize and wsize supported by the NFS client, adjust
+ * GF_NFS3_FILE_IO_SIZE_MAX. The Gluster NFS server defaults to 1MB(1048576)
+ * (same as kernel NFS server). For slower network, rsize/wsize can be trimmed
+ * to 16/32/64-KB. rsize and wsize can be tuned through nfs.read-size and
+ * nfs.write-size respectively.
+ *
+ * NB: For Kernel-NFS, NFS_MAX_FILE_IO_SIZE is 1048576U (1MB).
+ */
+#define GF_NFS3_FILE_IO_SIZE_MAX     (1  * GF_UNIT_MB) /* 1048576 */
+#define GF_NFS3_FILE_IO_SIZE_MIN     (4  * GF_UNIT_KB) /* 4096 */
+
+#define GF_NFS3_FILE_IO_SIZE_DEF     GF_NFS3_FILE_IO_SIZE_MAX
+
+#define GF_NFS3_RTMAX          GF_NFS3_FILE_IO_SIZE_MAX
+#define GF_NFS3_RTMIN          GF_NFS3_FILE_IO_SIZE_MIN
+#define GF_NFS3_RTPREF         GF_NFS3_FILE_IO_SIZE_DEF
+#define GF_NFS3_RTMULT         GF_NFS3_FILE_IO_SIZE_MIN
+
+#define GF_NFS3_WTMAX          GF_NFS3_FILE_IO_SIZE_MAX
+#define GF_NFS3_WTMIN          GF_NFS3_FILE_IO_SIZE_MIN
+#define GF_NFS3_WTPREF         GF_NFS3_FILE_IO_SIZE_DEF
+#define GF_NFS3_WTMULT         GF_NFS3_FILE_IO_SIZE_MIN
+
+/* This can be tuned through nfs.readdir-size */
+#define GF_NFS3_DTMAX          GF_NFS3_FILE_IO_SIZE_MAX
+#define GF_NFS3_DTMIN          GF_NFS3_FILE_IO_SIZE_MIN
+#define GF_NFS3_DTPREF         GF_NFS3_FILE_IO_SIZE_DEF
+
+#define GF_NFS3_MAXFILESIZE    (1 * GF_UNIT_PB)
+
+#define GF_NFS3_IO_SIZE        4096 /* 4-KB */
+#define GF_NFS3_IO_SHIFT       12   /* 2^12 = 4KB */
+
 /* FIXME: Handle time resolutions */
 #define GF_NFS3_TIMEDELTA_SECS     {1,0}
 #define GF_NFS3_TIMEDELTA_NSECS    {0,1}
@@ -120,14 +134,14 @@ typedef struct nfs3_state {
         uint64_t                serverstart;
 
         /* NFSv3 Protocol configurables */
-        size_t                  readsize;
-        size_t                  writesize;
-        size_t                  readdirsize;
+        uint64_t                readsize;
+        uint64_t                writesize;
+        uint64_t                readdirsize;
 
         /* Size of the iobufs used, depends on the sizes of the three params
          * above.
          */
-        size_t                  iobsize;
+        uint64_t                iobsize;
 
         unsigned int            memfactor;
 
@@ -263,9 +277,9 @@ struct inode_op_queue {
         pthread_mutex_t         qlock;
 };
 
-
-
-
 extern rpcsvc_program_t *
 nfs3svc_init (xlator_t *nfsx);
+
+extern int
+nfs3_reconfigure_state (xlator_t *nfsx, dict_t *options);
 #endif

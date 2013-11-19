@@ -1124,75 +1124,6 @@ out:
 }
 
 int
-glusterfs_handle_bd_op (rpcsvc_request_t *req)
-{
-        int32_t                  ret        = -1;
-        gd1_mgmt_brick_op_req    xlator_req = {0,};
-        dict_t                   *input     = NULL;
-        xlator_t                 *xlator    = NULL;
-        xlator_t                 *any       = NULL;
-        dict_t                   *output    = NULL;
-        char                     *xname     = NULL;
-        glusterfs_ctx_t          *ctx       = NULL;
-        glusterfs_graph_t        *active    = NULL;
-        xlator_t                 *this      = NULL;
-        char                     *error     = NULL;
-
-        GF_ASSERT (req);
-        this = THIS;
-        GF_ASSERT (this);
-
-        ret = xdr_to_generic (req->msg[0], &xlator_req,
-                              (xdrproc_t)xdr_gd1_mgmt_brick_op_req);
-        if (ret < 0) {
-                /* failed to decode msg */
-                req->rpc_err = GARBAGE_ARGS;
-                goto out;
-        }
-
-        ctx = glusterfsd_ctx;
-        active = ctx->active;
-        any = active->first;
-        input = dict_new ();
-        ret = dict_unserialize (xlator_req.input.input_val,
-                                xlator_req.input.input_len,
-                                &input);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "failed to "
-                        "unserialize req-buffer to dictionary");
-                goto out;
-        } else {
-                input->extra_stdfree = xlator_req.input.input_val;
-        }
-
-        /* FIXME, hardcoded */
-        xlator = xlator_search_by_xl_type (any, "storage/bd_map");
-        if (!xlator) {
-                        gf_log (this->name, GF_LOG_ERROR, "xlator %s is not "
-                                "loaded", xname);
-                        goto out;
-        }
-        output = dict_new ();
-        XLATOR_NOTIFY (xlator, GF_EVENT_TRANSLATOR_OP, input, output);
-out:
-        if (ret < 0) {
-                int retval;
-                retval = dict_get_str (output, "error", &error);
-        }
-        glusterfs_xlator_op_response_send (req, ret, error, output);
-        if (input)
-                dict_unref (input);
-        if (output)
-                dict_unref (output);
-        if (xlator_req.name)
-                /* malloced by xdr */
-                free (xlator_req.name);
-
-        return 0;
-}
-
-int
 glusterfs_handle_rpc_msg (rpcsvc_request_t *req)
 {
         int ret = -1;
@@ -1256,9 +1187,6 @@ rpcsvc_actor_t glusterfs_actors[] = {
         [GLUSTERD_BRICK_XLATOR_DEFRAG] = {"TRANSLATOR DEFRAG", GLUSTERD_BRICK_XLATOR_DEFRAG, glusterfs_handle_defrag,              NULL, 0, DRC_NA},
         [GLUSTERD_NODE_PROFILE]        = {"NFS PROFILE",       GLUSTERD_NODE_PROFILE,        glusterfs_handle_nfs_profile,         NULL, 0, DRC_NA},
         [GLUSTERD_NODE_STATUS]         = {"NFS STATUS",        GLUSTERD_NODE_STATUS,         glusterfs_handle_node_status,         NULL, 0, DRC_NA},
-#ifdef HAVE_BD_XLATOR
-        [GLUSTERD_BRICK_BD_OP]         = {"BD OP",             GLUSTERD_BRICK_BD_OP,         glusterfs_handle_bd_op,               NULL, 0, DRC_NA}
-#endif
 };
 
 struct rpcsvc_program glusterfs_mop_prog = {
@@ -1330,187 +1258,7 @@ out:
 static char *oldvolfile = NULL;
 static int oldvollen = 0;
 
-static int
-xlator_equal_rec (xlator_t *xl1, xlator_t *xl2)
-{
-        xlator_list_t *trav1 = NULL;
-        xlator_list_t *trav2 = NULL;
-        int            ret   = 0;
 
-        if (xl1 == NULL || xl2 == NULL) {
-                gf_log ("xlator", GF_LOG_DEBUG, "invalid argument");
-                return -1;
-        }
-
-        trav1 = xl1->children;
-        trav2 = xl2->children;
-
-        while (trav1 && trav2) {
-                ret = xlator_equal_rec (trav1->xlator, trav2->xlator);
-                if (ret) {
-                        gf_log ("glusterfsd-mgmt", GF_LOG_DEBUG,
-                                "xlators children not equal");
-                        goto out;
-                }
-
-                trav1 = trav1->next;
-                trav2 = trav2->next;
-        }
-
-        if (trav1 || trav2) {
-                ret = -1;
-                goto out;
-        }
-
-        if (strcmp (xl1->name, xl2->name)) {
-                ret = -1;
-                goto out;
-        }
-
-	/* type could have changed even if xlator names match,
-	   e.g cluster/distrubte and cluster/nufa share the same
-	   xlator name
-	*/
-        if (strcmp (xl1->type, xl2->type)) {
-                ret = -1;
-                goto out;
-        }
-out :
-        return ret;
-}
-
-static gf_boolean_t
-is_graph_topology_equal (glusterfs_graph_t *graph1,
-                                glusterfs_graph_t *graph2)
-{
-        xlator_t    *trav1    = NULL;
-        xlator_t    *trav2    = NULL;
-        gf_boolean_t ret      = _gf_true;
-
-        trav1 = graph1->first;
-        trav2 = graph2->first;
-
-        ret = xlator_equal_rec (trav1, trav2);
-
-        if (ret) {
-                gf_log ("glusterfsd-mgmt", GF_LOG_DEBUG,
-                        "graphs are not equal");
-                ret = _gf_false;
-                goto out;
-        }
-
-        ret = _gf_true;
-        gf_log ("glusterfsd-mgmt", GF_LOG_DEBUG,
-                "graphs are equal");
-
-out:
-        return ret;
-}
-
-/* Function has 3types of return value 0, -ve , 1
- *   return 0          =======> reconfiguration of options has succeeded
- *   return 1          =======> the graph has to be reconstructed and all the xlators should be inited
- *   return -1(or -ve) =======> Some Internal Error occurred during the operation
- */
-static int
-glusterfs_volfile_reconfigure (FILE *newvolfile_fp)
-{
-        glusterfs_graph_t *oldvolfile_graph = NULL;
-        glusterfs_graph_t *newvolfile_graph = NULL;
-        int                oldvolfile_fd    = -1;
-        FILE              *oldvolfile_fp    = NULL;
-        glusterfs_ctx_t   *ctx              = NULL;
-        char               template[PATH_MAX] = {0};
-
-        int ret = -1;
-
-        strcpy (template, "/tmp/tmp.XXXXXX");
-        oldvolfile_fd = mkstemp (template);
-        if (oldvolfile_fd == -1) {
-                gf_log ("glusterfsd-mgmt", GF_LOG_ERROR, "Unable to create "
-                        "temporary file: %s (%s)", template,
-                        strerror (errno));
-                goto out;
-        }
-
-        ret = unlink (template);
-        if (ret < 0) {
-                gf_log ("glusterfsd-mgmt", GF_LOG_WARNING, "Unable to delete "
-                        "file: %s", template);
-        }
-
-        oldvolfile_fp = fdopen (oldvolfile_fd, "w+b");
-        if (!oldvolfile_fp) {
-                gf_log ("glusterfsd-mgmt", GF_LOG_CRITICAL, "Failed to create "
-                        "temporary volfile");
-                goto out;
-        }
-
-        if (!oldvollen) {
-                ret = 1; // Has to call INIT for the whole graph
-                goto out;
-        }
-        fwrite (oldvolfile, oldvollen, 1, oldvolfile_fp);
-        fflush (oldvolfile_fp);
-        if (ferror (oldvolfile_fp)) {
-                goto out;
-        }
-
-
-        oldvolfile_graph = glusterfs_graph_construct (oldvolfile_fp);
-        if (!oldvolfile_graph) {
-                goto out;
-        }
-
-        newvolfile_graph = glusterfs_graph_construct (newvolfile_fp);
-        if (!newvolfile_graph) {
-                goto out;
-        }
-
-        if (!is_graph_topology_equal (oldvolfile_graph,
-                                      newvolfile_graph)) {
-
-                ret = 1;
-                gf_log ("glusterfsd-mgmt", GF_LOG_DEBUG,
-                        "Graph topology not equal(should call INIT)");
-                goto out;
-        }
-
-        gf_log ("glusterfsd-mgmt", GF_LOG_DEBUG,
-                "Only options have changed in the new "
-                "graph");
-
-        ctx = glusterfsd_ctx;
-
-        oldvolfile_graph = ctx->active;
-
-        if (!oldvolfile_graph) {
-                gf_log ("glusterfsd-mgmt", GF_LOG_ERROR,
-                        "glusterfs_ctx->active is NULL");
-                goto out;
-        }
-
-        /* */
-        ret = glusterfs_graph_reconfigure (oldvolfile_graph,
-                                           newvolfile_graph);
-        if (ret) {
-                gf_log ("glusterfsd-mgmt", GF_LOG_DEBUG,
-                        "Could not reconfigure new options in old graph");
-                goto out;
-        }
-
-        ret = 0;
-out:
-        if (oldvolfile_fp) {
-                fclose (oldvolfile_fp);
-
-        } else if (-1 != oldvolfile_fd) {
-            close (oldvolfile_fd);
-
-        }
-
-        return ret;
-}
 
 int
 mgmt_getspec_cbk (struct rpc_req *req, struct iovec *iov, int count,
@@ -1576,7 +1324,7 @@ mgmt_getspec_cbk (struct rpc_req *req, struct iovec *iov, int count,
         *  return -1(or -ve) =======> Some Internal Error occurred during the operation
         */
 
-        ret = glusterfs_volfile_reconfigure (tmpfp);
+        ret = glusterfs_volfile_reconfigure (oldvollen, tmpfp, ctx, oldvolfile);
         if (ret == 0) {
                 gf_log ("glusterfsd-mgmt", GF_LOG_DEBUG,
                         "No need to re-load volfile, reconfigure done");
@@ -1609,6 +1357,7 @@ mgmt_getspec_cbk (struct rpc_req *req, struct iovec *iov, int count,
                 volfilebuf = GF_REALLOC (oldvolfile, size);
         else
                 volfilebuf = GF_CALLOC (1, size, gf_common_mt_char);
+
         if (!volfilebuf) {
                 ret = -1;
                 goto out;

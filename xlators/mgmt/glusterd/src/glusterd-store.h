@@ -56,17 +56,21 @@ typedef enum glusterd_store_ver_ac_{
 #define GLUSTERD_STORE_KEY_DEFRAG_OP      "rebalance_op"
 #define GLUSTERD_STORE_KEY_USERNAME       "username"
 #define GLUSTERD_STORE_KEY_PASSWORD       "password"
+#define GLUSTERD_STORE_KEY_VOL_OP_VERSION "op-version"
+#define GLUSTERD_STORE_KEY_VOL_CLIENT_OP_VERSION "client-op-version"
 
 #define GLUSTERD_STORE_KEY_BRICK_HOSTNAME "hostname"
 #define GLUSTERD_STORE_KEY_BRICK_PATH     "path"
 #define GLUSTERD_STORE_KEY_BRICK_PORT     "listen-port"
 #define GLUSTERD_STORE_KEY_BRICK_RDMA_PORT "rdma.listen-port"
 #define GLUSTERD_STORE_KEY_BRICK_DECOMMISSIONED "decommissioned"
+#define GLUSTERD_STORE_KEY_BRICK_VGNAME "vg"
 
 #define GLUSTERD_STORE_KEY_PEER_UUID      "uuid"
 #define GLUSTERD_STORE_KEY_PEER_HOSTNAME  "hostname"
 #define GLUSTERD_STORE_KEY_PEER_STATE     "state"
-#define GLUSTERD_STORE_KEY_VOL_BACKEND    "backend"
+
+#define GLUSTERD_STORE_KEY_VOL_CAPS       "caps"
 
 #define glusterd_for_each_entry(entry, dir) \
         do {\

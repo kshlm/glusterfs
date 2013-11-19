@@ -388,7 +388,8 @@ init (xlator_t *this)
                 i++;
         }
 
-        ret = gf_asprintf (&priv->sh_domain, "%s-self-heal", this->name);
+        ret = gf_asprintf (&priv->sh_domain, AFR_SH_DATA_DOMAIN_FMT,
+                           this->name);
         if (-1 == ret) {
                 ret = -ENOMEM;
                 goto out;
@@ -438,15 +439,18 @@ init (xlator_t *this)
         if (!priv->shd.timer)
                 goto out;
 
-        priv->shd.healed = eh_new (AFR_EH_HEALED_LIMIT, _gf_false);
+        priv->shd.healed = eh_new (AFR_EH_HEALED_LIMIT, _gf_false,
+                                   _destroy_shd_event_data);
         if (!priv->shd.healed)
                 goto out;
 
-        priv->shd.heal_failed = eh_new (AFR_EH_HEAL_FAIL_LIMIT, _gf_false);
+        priv->shd.heal_failed = eh_new (AFR_EH_HEAL_FAIL_LIMIT, _gf_false,
+                                        _destroy_shd_event_data);
         if (!priv->shd.heal_failed)
                 goto out;
 
-        priv->shd.split_brain = eh_new (AFR_EH_SPLIT_BRAIN_LIMIT, _gf_false);
+        priv->shd.split_brain = eh_new (AFR_EH_SPLIT_BRAIN_LIMIT, _gf_false,
+                                        _destroy_shd_event_data);
         if (!priv->shd.split_brain)
                 goto out;
 
@@ -456,7 +460,9 @@ init (xlator_t *this)
         priv->root_inode = inode_ref (this->itable->root);
         GF_OPTION_INIT ("node-uuid", priv->shd.node_uuid, str, out);
         GF_OPTION_INIT ("heal-timeout", priv->shd.timeout, int32, out);
-
+        ret = afr_initialise_statistics (this);
+        if (ret)
+                goto out;
         ret = 0;
 out:
         return ret;
@@ -493,6 +499,7 @@ struct xlator_fops fops = {
         .fentrylk    = afr_fentrylk,
 	.fallocate   = afr_fallocate,
 	.discard     = afr_discard,
+        .zerofill    = afr_zerofill,
 
         /* inode read */
         .access      = afr_access,

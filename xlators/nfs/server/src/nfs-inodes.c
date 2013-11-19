@@ -2,19 +2,10 @@
   Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -57,10 +48,10 @@ nfl_inodes_init (struct nfs_fop_local *nfl, inode_t *inode, inode_t *parent,
                 nfl->newparent = inode_ref (newparent);
 
         if (name)
-                strcpy (nfl->path, name);
+                strncpy (nfl->path, name, NFS_NAME_MAX);
 
         if (newname)
-                strcpy (nfl->newpath, newname);
+                strncpy (nfl->newpath, newname, NFS_NAME_MAX);
 
         return;
 }

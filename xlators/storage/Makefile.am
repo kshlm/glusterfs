@@ -1,6 +1,7 @@
 SUBDIRS = posix
 
 if ENABLE_BD_XLATOR
-SUBDIRS += bd_map
+SUBDIRS += bd
 endif
+
 CLEANFILES =

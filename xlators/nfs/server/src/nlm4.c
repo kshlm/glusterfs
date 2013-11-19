@@ -2,19 +2,10 @@
   Copyright (c) 2012 Gluster, Inc. <http://www.gluster.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -149,8 +140,10 @@ nfs3_fh_to_xlator (struct nfs3_state *nfs3, struct nfs3_fh *fh);
                         xlatorp = nfs3_fh_to_xlator (cst->nfs3state,    \
                                                      &cst->resolvefh);  \
                         uuid_unparse (cst->resolvefh.gfid, gfid);       \
-                        sprintf (buf, "(%s) %s : %s", trans->peerinfo.identifier,\
-                        xlatorp ? xlatorp->name : "ERR", gfid);         \
+                        snprintf (buf, sizeof (buf), "(%s) %s : %s",             \
+                                  trans->peerinfo.identifier,           \
+                                  xlatorp ? xlatorp->name : "ERR",      \
+                                  gfid);                                \
                         gf_log (GF_NLM, GF_LOG_ERROR, "Unable to resolve FH"\
                                 ": %s", buf);                           \
                         nfstat = nlm4_errno_to_nlm4stat (cst->resolve_errno);\
@@ -235,7 +228,7 @@ nlm_is_oh_same_lkowner (gf_lkowner_t *a, netobj *b)
                 !memcmp (a->data, b->n_bytes, a->len));
 }
 
-nfsstat3
+nlm4_stats
 nlm4_errno_to_nlm4stat (int errnum)
 {
         nlm4_stats        stat = nlm4_denied;
@@ -434,10 +427,11 @@ ret:
 int
 nlm4svc_submit_reply (rpcsvc_request_t *req, void *arg, nlm4_serializer sfunc)
 {
-        struct iovec            outmsg = {0, };
-        struct iobuf            *iob = NULL;
-        struct nfs3_state       *nfs3 = NULL;
-        int                     ret = -1;
+        struct iovec            outmsg  = {0, };
+        struct iobuf            *iob    = NULL;
+        struct nfs3_state       *nfs3   = NULL;
+        int                     ret     = -1;
+        ssize_t                 msglen  = 0;
         struct iobref           *iobref = NULL;
 
         if (!req)
@@ -462,7 +456,12 @@ nlm4svc_submit_reply (rpcsvc_request_t *req, void *arg, nlm4_serializer sfunc)
         /* Use the given serializer to translate the give C structure in arg
          * to XDR format which will be written into the buffer in outmsg.
          */
-        outmsg.iov_len = sfunc (outmsg, arg);
+        msglen = sfunc (outmsg, arg);
+        if (msglen < 0) {
+                gf_log (GF_NLM, GF_LOG_ERROR, "Failed to encode message");
+                goto ret;
+        }
+        outmsg.iov_len = msglen;
 
         iobref = iobref_new ();
         if (iobref == NULL) {
@@ -470,7 +469,11 @@ nlm4svc_submit_reply (rpcsvc_request_t *req, void *arg, nlm4_serializer sfunc)
                 goto ret;
         }
 
-        iobref_add (iobref, iob);
+        ret = iobref_add (iobref, iob);
+        if (ret) {
+                gf_log (GF_NLM, GF_LOG_ERROR, "Failed to add iob to iobref");
+                goto ret;
+        }
 
         /* Then, submit the message for transmission. */
         ret = rpcsvc_submit_message (req, &outmsg, 1, NULL, 0, iobref);
@@ -1094,7 +1097,11 @@ nlm4svc_send_granted (nfs3_call_state_t *cs)
                 goto ret;
         }
 
-        iobref_add (iobref, iobuf);
+        ret = iobref_add (iobref, iobuf);
+        if (ret) {
+                gf_log (GF_NLM, GF_LOG_ERROR, "Failed to add iob to iobref");
+                goto ret;
+        }
 
         ret = rpc_clnt_submit (rpc_clnt, &nlm4clntprog, NLM4_GRANTED,
                                nlm4svc_send_granted_cbk, &outmsg, 1,
@@ -1814,7 +1821,7 @@ nlm4_add_share_to_inode (nlm_share_t *share)
         inode = share->inode;
         ret = inode_ctx_get (inode, this, &ctx);
 
-        if (ret || !head) {
+        if (ret == -1) {
                 ictx = GF_CALLOC (1, sizeof (struct nfs_inode_ctx),
                                   gf_nfs_mt_inode_ctx);
                 if (!ictx ) {
@@ -2349,9 +2356,14 @@ nlm4svc_init(xlator_t *nfsx)
         int ret = -1;
         char *portstr = NULL;
         pthread_t thr;
-        struct timeval timeout = {0,};
+        struct timespec timeout = {0,};
         FILE   *pidfile = NULL;
         pid_t   pid     = -1;
+        static gf_boolean_t nlm4_inited = _gf_false;
+
+        /* Already inited */
+        if (nlm4_inited)
+                return &nlm4prog;
 
         nfs = (struct nfs_state*)nfsx->private;
 
@@ -2397,7 +2409,7 @@ nlm4svc_init(xlator_t *nfsx)
                 goto err;
         }
 
-        rpcsvc_create_listeners (nfs->rpcsvc, options, "NLM");
+        ret = rpcsvc_create_listeners (nfs->rpcsvc, options, "NLM");
         if (ret == -1) {
                 gf_log (GF_NLM, GF_LOG_ERROR, "Unable to create listeners");
                 dict_unref (options);
@@ -2453,7 +2465,10 @@ nlm4svc_init(xlator_t *nfsx)
         pthread_create (&thr, NULL, nsm_thread, (void*)NULL);
 
         timeout.tv_sec = nlm_grace_period;
+        timeout.tv_nsec = 0;
+
         gf_timer_call_after (nfsx->ctx, timeout, nlm_grace_period_over, NULL);
+        nlm4_inited = _gf_true;
         return &nlm4prog;
 err:
         return NULL;

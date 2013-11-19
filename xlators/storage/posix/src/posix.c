@@ -24,6 +24,7 @@
 #include <ftw.h>
 #include <sys/stat.h>
 #include <signal.h>
+#include <sys/uio.h>
 
 #ifndef GF_BSD_HOST_OS
 #include <alloca.h>
@@ -51,6 +52,7 @@
 #include "glusterfs3-xdr.h"
 #include "hashfn.h"
 #include "posix-aio.h"
+#include "glusterfs-acl.h"
 
 extern char *marker_xattrs[];
 #define ALIGN_SIZE 4096
@@ -615,6 +617,166 @@ out:
         return ret;
 }
 
+char*
+_page_aligned_alloc (size_t size, char **aligned_buf)
+{
+        char            *alloc_buf = NULL;
+        char            *buf = NULL;
+
+        alloc_buf = GF_CALLOC (1, (size + ALIGN_SIZE), gf_posix_mt_char);
+        if (!alloc_buf)
+                goto out;
+        /* page aligned buffer */
+        buf = GF_ALIGN_BUF (alloc_buf, ALIGN_SIZE);
+        *aligned_buf = buf;
+out:
+        return alloc_buf;
+}
+
+static int32_t
+_posix_do_zerofill(int fd, off_t offset, off_t len, int o_direct)
+{
+        off_t               num_vect            = 0;
+        off_t               num_loop            = 1;
+        off_t               idx                 = 0;
+        int32_t             op_ret              = -1;
+        int32_t             vect_size           = VECTOR_SIZE;
+        off_t               remain              = 0;
+        off_t               extra               = 0;
+        struct iovec       *vector              = NULL;
+        char               *iov_base            = NULL;
+        char               *alloc_buf           = NULL;
+
+        if (len == 0)
+                return 0;
+        if (len < VECTOR_SIZE)
+                vect_size = len;
+
+        num_vect = len / (vect_size);
+        remain = len % vect_size ;
+        if (num_vect > MAX_NO_VECT) {
+                extra = num_vect % MAX_NO_VECT;
+                num_loop = num_vect / MAX_NO_VECT;
+                num_vect = MAX_NO_VECT;
+        }
+
+        vector = GF_CALLOC (num_vect, sizeof(struct iovec),
+                             gf_common_mt_iovec);
+        if (!vector)
+                  return -1;
+        if (o_direct) {
+                alloc_buf = _page_aligned_alloc(vect_size, &iov_base);
+                if (!alloc_buf) {
+                        gf_log ("_posix_do_zerofill", GF_LOG_DEBUG,
+                                 "memory alloc failed, vect_size %d: %s",
+                                  vect_size, strerror(errno));
+                        GF_FREE(vector);
+                        return -1;
+                }
+        } else {
+                iov_base = GF_CALLOC (vect_size, sizeof(char),
+                                        gf_common_mt_char);
+                if (!iov_base) {
+                        GF_FREE(vector);
+                        return -1;
+                 }
+        }
+
+        for (idx = 0; idx < num_vect; idx++) {
+                vector[idx].iov_base = iov_base;
+                vector[idx].iov_len  = vect_size;
+        }
+        lseek(fd, offset, SEEK_SET);
+        for (idx = 0; idx < num_loop; idx++) {
+                op_ret = writev(fd, vector, num_vect);
+                if (op_ret < 0)
+                        goto err;
+        }
+        if (extra) {
+                op_ret = writev(fd, vector, extra);
+                if (op_ret < 0)
+                        goto err;
+        }
+        if (remain) {
+                vector[0].iov_len = remain;
+                op_ret = writev(fd, vector , 1);
+                if (op_ret < 0)
+                        goto err;
+        }
+err:
+        if (o_direct)
+                GF_FREE(alloc_buf);
+        else
+                GF_FREE(iov_base);
+        GF_FREE(vector);
+        return op_ret;
+}
+
+static int32_t
+posix_do_zerofill(call_frame_t *frame, xlator_t *this, fd_t *fd,
+                  off_t offset, off_t len, struct iatt *statpre,
+                  struct iatt *statpost)
+{
+        struct posix_fd *pfd       = NULL;
+        int32_t          ret       = -1;
+
+        DECLARE_OLD_FS_ID_VAR;
+
+        SET_FS_ID (frame->root->uid, frame->root->gid);
+
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (fd, out);
+
+        ret = posix_fd_ctx_get (fd, this, &pfd);
+        if (ret < 0) {
+                gf_log (this->name, GF_LOG_DEBUG,
+                        "pfd is NULL from fd=%p", fd);
+                goto out;
+        }
+
+        ret = posix_fdstat (this, pfd->fd, statpre);
+        if (ret == -1) {
+                ret = -errno;
+                gf_log (this->name, GF_LOG_ERROR,
+                        "pre-operation fstat failed on fd = %p: %s", fd,
+                        strerror (errno));
+                goto out;
+        }
+        ret = _posix_do_zerofill(pfd->fd, offset, len, pfd->flags & O_DIRECT);
+        if (ret < 0) {
+                ret = -errno;
+                gf_log(this->name, GF_LOG_ERROR,
+                       "zerofill failed on fd %d length %ld %s",
+                        pfd->fd, len, strerror(errno));
+                goto out;
+        }
+        if (pfd->flags & (O_SYNC|O_DSYNC)) {
+                ret = fsync (pfd->fd);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "fsync() in writev on fd %d failed: %s",
+                        pfd->fd, strerror (errno));
+                        ret = -errno;
+                        goto out;
+                }
+        }
+
+        ret = posix_fdstat (this, pfd->fd, statpost);
+        if (ret == -1) {
+                ret = -errno;
+                gf_log (this->name, GF_LOG_ERROR,
+                        "post operation fstat failed on fd=%p: %s", fd,
+                        strerror (errno));
+                goto out;
+        }
+
+out:
+        SET_TO_OLD_FS_ID ();
+
+        return ret;
+}
+
 static int32_t
 _posix_fallocate(call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t keep_size,
 		off_t offset, size_t len, dict_t *xdata)
@@ -660,6 +822,28 @@ posix_discard(call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
 err:
 	STACK_UNWIND_STRICT(discard, frame, -1, -ret, NULL, NULL, NULL);
 	return 0;
+
+}
+
+static int32_t
+posix_zerofill(call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
+                off_t len, dict_t *xdata)
+{
+        int32_t ret                      =  0;
+        struct  iatt statpre             = {0,};
+        struct  iatt statpost            = {0,};
+
+        ret = posix_do_zerofill(frame, this, fd, offset, len,
+                                 &statpre, &statpost);
+        if (ret < 0)
+                goto err;
+
+        STACK_UNWIND_STRICT(zerofill, frame, 0, 0, &statpre, &statpost, NULL);
+        return 0;
+
+err:
+        STACK_UNWIND_STRICT(zerofill, frame, -1, -ret, NULL, NULL, NULL);
+        return 0;
 
 }
 
@@ -2071,11 +2255,7 @@ posix_readv (call_frame_t *frame, xlator_t *this,
         }
 
         /* Hack to notify higher layers of EOF. */
-        if (stbuf.ia_size == 0)
-                op_errno = ENOENT;
-        else if ((offset + vec.iov_len) == stbuf.ia_size)
-                op_errno = ENOENT;
-        else if (offset > stbuf.ia_size)
+        if (!stbuf.ia_size || (offset + vec.iov_len) >= stbuf.ia_size)
                 op_errno = ENOENT;
 
         op_ret = vec.iov_len;
@@ -2118,22 +2298,6 @@ __posix_pwritev (int fd, struct iovec *vector, int count, off_t offset)
 
 err:
         return op_ret;
-}
-
-char*
-_page_aligned_alloc (size_t size, char **aligned_buf)
-{
-        char            *alloc_buf = NULL;
-        char            *buf = NULL;
-
-        alloc_buf = GF_CALLOC (1, (size + ALIGN_SIZE), gf_posix_mt_char);
-        if (!alloc_buf)
-                goto out;
-        /* page aligned buffer */
-        buf = GF_ALIGN_BUF (alloc_buf, ALIGN_SIZE);
-        *aligned_buf = buf;
-out:
-        return alloc_buf;
 }
 
 int32_t
@@ -2763,8 +2927,9 @@ posix_getxattr (call_frame_t *frame, xlator_t *this,
 		if (ret < 0) {
 			op_ret = -1;
 			op_errno = -ret;
-			gf_log (this->name, GF_LOG_WARNING,
-				"Failed to get rea filename (%s, %s): %s",
+			gf_log (this->name, (op_errno == ENOENT) ?
+                                GF_LOG_DEBUG : GF_LOG_WARNING,
+				"Failed to get real filename (%s, %s): %s",
 				loc->path, name, strerror (op_errno));
 			goto out;
 		}
@@ -2878,7 +3043,8 @@ posix_getxattr (call_frame_t *frame, xlator_t *this,
                                                      "supported (try remounting"
                                                      " brick with 'user_xattr' "
                                                      "flag)");
-                        } else if (op_errno == ENOATTR) {
+                        } else if (op_errno == ENOATTR ||
+                                        op_errno == ENODATA) {
                                 gf_log (this->name, GF_LOG_DEBUG,
                                         "No such attribute:%s for file %s",
                                         key, real_path);
@@ -4650,7 +4816,7 @@ init (xlator_t *this)
                 }
         }
 
-        size = sys_lgetxattr (dir_data->data, "system.posix_acl_access",
+        size = sys_lgetxattr (dir_data->data, POSIX_ACL_ACCESS_XATTR,
                               NULL, 0);
         if ((size < 0) && (errno == ENOTSUP))
                 gf_log (this->name, GF_LOG_WARNING,
@@ -4855,7 +5021,7 @@ init (xlator_t *this)
 	pthread_cond_init (&_private->fsync_cond, NULL);
 	INIT_LIST_HEAD (&_private->fsyncs);
 
-	ret = pthread_create (&_private->fsyncer, NULL, posix_fsyncer, this);
+	ret = gf_thread_create (&_private->fsyncer, NULL, posix_fsyncer, this);
 	if (ret) {
 		gf_log (this->name, GF_LOG_ERROR, "fsyncer thread"
 			" creation failed (%s)", strerror (errno));
@@ -4939,6 +5105,7 @@ struct xlator_fops fops = {
         .fsetattr    = posix_fsetattr,
 	.fallocate   = _posix_fallocate,
 	.discard     = posix_discard,
+        .zerofill    = posix_zerofill,
 };
 
 struct xlator_cbks cbks = {

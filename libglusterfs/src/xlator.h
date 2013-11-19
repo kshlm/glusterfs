@@ -66,6 +66,7 @@ typedef int32_t (*event_notify_fn_t) (xlator_t *this, int32_t event, void *data,
 #include "globals.h"
 #include "iatt.h"
 #include "options.h"
+#include "client_t.h"
 
 
 struct _loc {
@@ -433,6 +434,14 @@ typedef int32_t (*fop_discard_cbk_t) (call_frame_t *frame,
                                       struct iatt *preop_stbuf,
                                       struct iatt *postop_stbuf, dict_t *xdata);
 
+typedef int32_t (*fop_zerofill_cbk_t) (call_frame_t *frame,
+                                      void *cookie,
+                                      xlator_t *this,
+                                      int32_t op_ret,
+                                      int32_t op_errno,
+                                      struct iatt *preop_stbuf,
+                                      struct iatt *postop_stbuf, dict_t *xdata);
+
 typedef int32_t (*fop_lookup_t) (call_frame_t *frame,
                                  xlator_t *this,
                                  loc_t *loc,
@@ -664,6 +673,12 @@ typedef int32_t (*fop_discard_t) (call_frame_t *frame,
 				  off_t offset,
 				  size_t len,
                                   dict_t *xdata);
+typedef int32_t (*fop_zerofill_t) (call_frame_t *frame,
+                                  xlator_t *this,
+                                  fd_t *fd,
+                                  off_t offset,
+                                  off_t len,
+                                  dict_t *xdata);
 
 struct xlator_fops {
         fop_lookup_t         lookup;
@@ -710,6 +725,7 @@ struct xlator_fops {
         fop_getspec_t        getspec;
 	fop_fallocate_t	     fallocate;
 	fop_discard_t	     discard;
+        fop_zerofill_t       zerofill;
 
         /* these entries are used for a typechecking hack in STACK_WIND _only_ */
         fop_lookup_cbk_t         lookup_cbk;
@@ -756,6 +772,7 @@ struct xlator_fops {
         fop_getspec_cbk_t        getspec_cbk;
 	fop_fallocate_cbk_t	 fallocate_cbk;
 	fop_discard_cbk_t	 discard_cbk;
+        fop_zerofill_cbk_t       zerofill_cbk;
 };
 
 typedef int32_t (*cbk_forget_t) (xlator_t *this,
@@ -766,11 +783,15 @@ typedef int32_t (*cbk_release_t) (xlator_t *this,
 
 typedef int32_t (*cbk_invalidate_t)(xlator_t *this, inode_t *inode);
 
+typedef int32_t (*cbk_client_t)(xlator_t *this, client_t *client);
+
 struct xlator_cbks {
-        cbk_forget_t    forget;
-        cbk_release_t   release;
-        cbk_release_t   releasedir;
-	cbk_invalidate_t invalidate;
+        cbk_forget_t             forget;
+        cbk_release_t            release;
+        cbk_release_t            releasedir;
+	cbk_invalidate_t         invalidate;
+        cbk_client_t             client_destroy;
+        cbk_client_t             client_disconnect;
 };
 
 typedef int32_t (*dumpop_priv_t) (xlator_t *this);
@@ -912,7 +933,6 @@ void xlator_foreach_depth_first (xlator_t *this,
 				 void *data);
 
 xlator_t *xlator_search_by_name (xlator_t *any, const char *name);
-xlator_t *xlator_search_by_xl_type (xlator_t *any, const char *type);
 
 void inode_destroy_notify (inode_t *inode, const char *xlname);
 
@@ -932,5 +952,9 @@ enum gf_hdsk_event_notify_op {
         GF_EN_DEFRAG_STATUS,
         GF_EN_MAX,
 };
-
+gf_boolean_t
+is_graph_topology_equal (glusterfs_graph_t *graph1, glusterfs_graph_t *graph2);
+int
+glusterfs_volfile_reconfigure (int oldvollen, FILE *newvolfile_fp,
+                               glusterfs_ctx_t *ctx, const char *oldvolfile);
 #endif /* _XLATOR_H */

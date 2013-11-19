@@ -45,6 +45,7 @@
 #include "timer.h"
 #include "glusterfs3-xdr.h"
 #include "hashfn.h"
+#include "glusterfs-acl.h"
 #include <fnmatch.h>
 
 char *marker_xattrs[] = {"trusted.glusterfs.quota.*",
@@ -884,8 +885,8 @@ posix_spawn_janitor_thread (xlator_t *this)
         LOCK (&priv->lock);
         {
                 if (!priv->janitor_present) {
-                        ret = pthread_create (&priv->janitor, NULL,
-                                              posix_janitor_thread_proc, this);
+                        ret = gf_thread_create (&priv->janitor, NULL,
+						posix_janitor_thread_proc, this);
 
                         if (ret < 0) {
                                 gf_log (this->name, GF_LOG_ERROR,
@@ -982,17 +983,17 @@ posix_acl_xattr_set (xlator_t *this, const char *path, dict_t *xattr_req)
         if (sys_lstat (path, &stat) != 0)
                 goto out;
 
-        data = dict_get (xattr_req, "system.posix_acl_access");
+        data = dict_get (xattr_req, POSIX_ACL_ACCESS_XATTR);
         if (data) {
-                ret = sys_lsetxattr (path, "system.posix_acl_access",
+                ret = sys_lsetxattr (path, POSIX_ACL_ACCESS_XATTR,
                                      data->data, data->len, 0);
                 if (ret != 0)
                         goto out;
         }
 
-        data = dict_get (xattr_req, "system.posix_acl_default");
+        data = dict_get (xattr_req, POSIX_ACL_DEFAULT_XATTR);
         if (data) {
-                ret = sys_lsetxattr (path, "system.posix_acl_default",
+                ret = sys_lsetxattr (path, POSIX_ACL_DEFAULT_XATTR,
                                      data->data, data->len, 0);
                 if (ret != 0)
                         goto out;
@@ -1013,8 +1014,8 @@ _handle_entry_create_keyvalue_pair (dict_t *d, char *k, data_t *v,
 
         if (!strcmp (GFID_XATTR_KEY, k) ||
             !strcmp ("gfid-req", k) ||
-            !strcmp ("system.posix_acl_default", k) ||
-            !strcmp ("system.posix_acl_access", k) ||
+            !strcmp (POSIX_ACL_DEFAULT_XATTR, k) ||
+            !strcmp (POSIX_ACL_ACCESS_XATTR, k) ||
             ZR_FILE_CONTENT_REQUEST(k)) {
                 return 0;
         }
@@ -1227,8 +1228,8 @@ posix_spawn_health_check_thread (xlator_t *xl)
                 if (priv->health_check_interval == 0)
                         goto unlock;
 
-                ret = pthread_create (&priv->health_check, NULL,
-                                      posix_health_check_thread_proc, xl);
+                ret = gf_thread_create (&priv->health_check, NULL,
+					posix_health_check_thread_proc, xl);
                 if (ret < 0) {
                         priv->health_check_interval = 0;
                         priv->health_check_active = _gf_false;

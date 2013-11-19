@@ -176,7 +176,9 @@ int glfs_set_volfile_server (glfs_t *fs, const char *transport,
   @fs: The 'virtual mount' object to be configured with the logging parameters.
 
   @logfile: The logfile to be used for logging. Will be created if it does not
-            already exist (provided system permissions allow.)
+            already exist (provided system permissions allow). If NULL, a new
+            logfile will be created in default log directory associated with
+            the glusterfs installation.
 
   @loglevel: Numerical value specifying the degree of verbosity. Higher the
              value, more verbose the logging.
@@ -269,6 +271,32 @@ int glfs_fini (glfs_t *fs);
 struct glfs_fd;
 typedef struct glfs_fd glfs_fd_t;
 
+/*
+ * PER THREAD IDENTITY MODIFIERS
+ *
+ * The following operations enable to set a per thread identity context
+ * for the glfs APIs to perform operations as. The calls here are kept as close
+ * to POSIX equivalents as possible.
+ *
+ * NOTES:
+ *
+ *  - setgroups is a per thread setting, hence this is named as fsgroups to be
+ *    close in naming to the fs(u/g)id APIs
+ *  - Typical mode of operation is to set the IDs as required, with the
+ *    supplementary groups being optionally set, make the glfs call and post the
+ *    glfs operation set them back to eu/gid or uid/gid as appropriate to the
+ *    caller
+ *  - The groups once set, need to be unset by setting the size to 0 (in which
+ *    case the list argument is a do not care)
+ *  - Once a process for a thread of operation choses to set the IDs, all glfs
+ *    calls made from that thread would default to the IDs set for the thread.
+ *    As a result use these APIs with care and ensure that the set IDs are
+ *    reverted to global process defaults as required.
+ *
+ */
+int glfs_setfsuid (uid_t fsuid);
+int glfs_setfsgid (gid_t fsgid);
+int glfs_setfsgroups (size_t size, const gid_t *list);
 
 /*
   SYNOPSIS
@@ -440,11 +468,30 @@ int glfs_link (glfs_t *fs, const char *oldpath, const char *newpath);
 
 glfs_fd_t *glfs_opendir (glfs_t *fs, const char *path);
 
+/*
+ * @glfs_readdir_r and @glfs_readdirplus_r ARE thread safe AND re-entrant,
+ * but the interface has ambiguity about the size of @dirent to be allocated
+ * before calling the APIs. 512 byte buffer (for @dirent) is sufficient for
+ * all known systems which are tested againt glusterfs/gfapi, but may be
+ * insufficient in the future.
+ */
+
 int glfs_readdir_r (glfs_fd_t *fd, struct dirent *dirent,
 		    struct dirent **result);
 
 int glfs_readdirplus_r (glfs_fd_t *fd, struct stat *stat, struct dirent *dirent,
 			struct dirent **result);
+
+/*
+ * @glfs_readdir and @glfs_readdirplus are NEITHER thread safe NOR re-entrant
+ * when called on the same directory handle. However they ARE thread safe
+ * AND re-entrant when called on different directory handles (which may be
+ * referring to the same directory too.)
+ */
+
+struct dirent *glfs_readdir (glfs_fd_t *fd);
+
+struct dirent *glfs_readdirplus (glfs_fd_t *fd, struct stat *stat);
 
 long glfs_telldir (glfs_fd_t *fd);
 
@@ -505,8 +552,14 @@ int glfs_fallocate(glfs_fd_t *fd, int keep_size, off_t offset, size_t len);
 
 int glfs_discard(glfs_fd_t *fd, off_t offset, size_t len);
 
+
 int glfs_discard_async (glfs_fd_t *fd, off_t length, size_t lent,
 			glfs_io_cbk fn, void *data);
+
+int glfs_zerofill(glfs_fd_t *fd, off_t offset, off_t len);
+
+int glfs_zerofill_async (glfs_fd_t *fd, off_t length, off_t len,
+                        glfs_io_cbk fn, void *data);
 
 char *glfs_getcwd (glfs_t *fs, char *buf, size_t size);
 

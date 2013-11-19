@@ -335,7 +335,7 @@ glusterd_add_volume_detail_to_dict (glusterd_volinfo_t *volinfo,
         char                    *volume_id_str  = NULL;
         struct args_pack        pack = {0,};
         xlator_t                *this = NULL;
-
+        int                     caps = 0;
 
         GF_ASSERT (volinfo);
         GF_ASSERT (volumes);
@@ -400,10 +400,71 @@ glusterd_add_volume_detail_to_dict (glusterd_volinfo_t *volinfo,
                 goto out;
 
 #ifdef HAVE_BD_XLATOR
-        snprintf (key, 256, "volume%d.backend", count);
-        ret = dict_set_int32 (volumes, key, volinfo->backend);
-        if (ret)
-                goto out;
+        if (volinfo->caps) {
+                caps = 0;
+                snprintf (key, 256, "volume%d.xlator0", count);
+                buf = GF_MALLOC (256, gf_common_mt_char);
+                if (!buf) {
+                        ret = ENOMEM;
+                        goto out;
+                }
+                if (volinfo->caps & CAPS_BD)
+                        snprintf (buf, 256, "BD");
+                ret = dict_set_dynstr (volumes, key, buf);
+                if (ret) {
+                        GF_FREE (buf);
+                        goto out;
+                }
+
+                if (volinfo->caps & CAPS_THIN) {
+                        snprintf (key, 256, "volume%d.xlator0.caps%d", count,
+                                  caps++);
+                        buf = GF_MALLOC (256, gf_common_mt_char);
+                        if (!buf) {
+                                ret = ENOMEM;
+                                goto out;
+                        }
+                        snprintf (buf, 256, "thin");
+                        ret = dict_set_dynstr (volumes, key, buf);
+                        if (ret) {
+                                GF_FREE (buf);
+                                goto out;
+                        }
+                }
+
+                if (volinfo->caps & CAPS_OFFLOAD_COPY) {
+                        snprintf (key, 256, "volume%d.xlator0.caps%d", count,
+                                  caps++);
+                        buf = GF_MALLOC (256, gf_common_mt_char);
+                        if (!buf) {
+                                ret = ENOMEM;
+                                goto out;
+                        }
+                        snprintf (buf, 256, "offload_copy");
+                        ret = dict_set_dynstr (volumes, key, buf);
+                        if (ret) {
+                                GF_FREE (buf);
+                                goto out;
+                        }
+                }
+
+                if (volinfo->caps & CAPS_OFFLOAD_SNAPSHOT) {
+                        snprintf (key, 256, "volume%d.xlator0.caps%d", count,
+                                  caps++);
+                        buf = GF_MALLOC (256, gf_common_mt_char);
+                        if (!buf) {
+                                ret = ENOMEM;
+                                goto out;
+                        }
+                        snprintf (buf, 256, "offload_snapshot");
+                        ret = dict_set_dynstr (volumes, key, buf);
+                        if (ret)  {
+                                GF_FREE (buf);
+                                goto out;
+                        }
+                }
+
+        }
 #endif
 
         list_for_each_entry (brickinfo, &volinfo->bricks, brick_list) {
@@ -425,6 +486,16 @@ glusterd_add_volume_detail_to_dict (glusterd_volinfo_t *volinfo,
                 if (ret)
                         goto out;
 
+#ifdef HAVE_BD_XLATOR
+                if (volinfo->caps & CAPS_BD) {
+                        snprintf (key, 256, "volume%d.vg%d", count, i);
+                        snprintf (brick, 1024, "%s", brickinfo->vg);
+                        buf = gf_strdup (brick);
+                        ret = dict_set_dynstr (volumes, key, buf);
+                        if (ret)
+                                goto out;
+                }
+#endif
                 i++;
         }
 
@@ -1107,79 +1178,6 @@ glusterd_handle_cli_get_volume (rpcsvc_request_t *req)
         return glusterd_big_locked_handler (req,
                                             __glusterd_handle_cli_get_volume);
 }
-
-#ifdef HAVE_BD_XLATOR
-int
-__glusterd_handle_cli_bd_op (rpcsvc_request_t *req)
-{
-        int32_t          ret        = -1;
-        gf_cli_req       cli_req    = { {0,} };
-        dict_t           *dict      = NULL;
-        char             *volname   = NULL;
-        char             op_errstr[2048] = {0,};
-        glusterd_op_t    cli_op     = GD_OP_BD_OP;
-
-        GF_ASSERT (req);
-
-        ret = xdr_to_generic (req->msg[0], &cli_req, (xdrproc_t)xdr_gf_cli_req);
-        if (ret < 0) {
-                /* failed to decode msg */
-                req->rpc_err = GARBAGE_ARGS;
-                goto out;
-        }
-
-        gf_log ("glusterd", GF_LOG_DEBUG, "Received bd op req");
-
-        if (cli_req.dict.dict_len) {
-                /* Unserialize the dictionary */
-                dict  = dict_new ();
-
-                ret = dict_unserialize (cli_req.dict.dict_val,
-                                        cli_req.dict.dict_len,
-                                        &dict);
-                if (ret < 0) {
-                        gf_log ("glusterd", GF_LOG_ERROR,
-                                "failed to "
-                                "unserialize req-buffer to dictionary");
-                        goto out;
-                } else {
-                        dict->extra_stdfree = cli_req.dict.dict_val;
-                }
-        }
-
-        ret = dict_get_str (dict, "volname", &volname);
-        if (ret) {
-                gf_log (THIS->name, GF_LOG_ERROR,
-                                "failed to get volname");
-                goto out;
-        }
-
-        ret = glusterd_op_begin (req, GD_OP_BD_OP, dict, op_errstr,
-                                 sizeof (op_errstr));
-out:
-        if (ret && dict)
-                dict_unref (dict);
-
-        glusterd_friend_sm ();
-        glusterd_op_sm ();
-
-        if (ret) {
-                if (op_errstr[0] == '\0')
-                        snprintf (op_errstr, sizeof (op_errstr),
-                                  "Operation failed");
-                ret = glusterd_op_send_cli_response (cli_op, ret, 0,
-                                req, NULL, op_errstr);
-        }
-
-        return ret;
-}
-
-int
-glusterd_handle_cli_bd_op (rpcsvc_request_t *req)
-{
-        return glusterd_big_locked_handler (req, __glusterd_handle_cli_bd_op);
-}
-#endif
 
 int
 __glusterd_handle_cli_uuid_reset (rpcsvc_request_t *req)
@@ -3059,9 +3057,13 @@ glusterd_xfer_friend_add_resp (rpcsvc_request_t *req, char *myhostname,
 }
 
 static void
-get_probe_error_str (int op_ret, int op_errno, char *errstr, size_t len,
-                     char *hostname, int port)
+set_probe_error_str (int op_ret, int op_errno, char *op_errstr, char *errstr,
+                     size_t len, char *hostname, int port)
 {
+        if ((op_errstr) && (strcmp (op_errstr, ""))) {
+                snprintf (errstr, len, "%s", op_errstr);
+                return;
+        }
 
         if (!op_ret) {
                 switch (op_errno) {
@@ -3141,11 +3143,8 @@ glusterd_xfer_cli_probe_resp (rpcsvc_request_t *req, int32_t op_ret,
         GF_ASSERT (req);
         GF_ASSERT (this);
 
-        if (op_errstr == NULL)
-                (void) get_probe_error_str (op_ret, op_errno, errstr,
-                                            sizeof (errstr), hostname, port);
-        else
-                snprintf (errstr, sizeof (errstr), "%s", op_errstr);
+        (void) set_probe_error_str (op_ret, op_errno, op_errstr, errstr,
+                                    sizeof (errstr), hostname, port);
 
         if (dict) {
                 ret = dict_get_str (dict, "cmd-str", &cmd_str);
@@ -3174,9 +3173,14 @@ glusterd_xfer_cli_probe_resp (rpcsvc_request_t *req, int32_t op_ret,
 }
 
 static void
-get_deprobe_error_str (int op_ret, int op_errno, char *errstr, size_t len,
-                       char *hostname)
+set_deprobe_error_str (int op_ret, int op_errno, char *op_errstr, char *errstr,
+                       size_t len, char *hostname)
 {
+        if ((op_errstr) && (strcmp (op_errstr, ""))) {
+                snprintf (errstr, len, "%s", op_errstr);
+                return;
+        }
+
         if (op_ret) {
                 switch (op_errno) {
                         case GF_DEPROBE_LOCALHOST:
@@ -3228,8 +3232,8 @@ glusterd_xfer_cli_deprobe_resp (rpcsvc_request_t *req, int32_t op_ret,
 
         GF_ASSERT (req);
 
-        (void) get_deprobe_error_str (op_ret, op_errno, errstr, sizeof (errstr),
-                                      hostname);
+        (void) set_deprobe_error_str (op_ret, op_errno, op_errstr, errstr,
+                                      sizeof (errstr), hostname);
 
         if (dict) {
                 ret = dict_get_str (dict, "cmd-str", &cmd_str);
@@ -3932,9 +3936,6 @@ rpcsvc_actor_t gd_svc_cli_actors[] = {
         [GLUSTER_CLI_STATEDUMP_VOLUME]   = {"STATEDUMP_VOLUME",   GLUSTER_CLI_STATEDUMP_VOLUME, glusterd_handle_cli_statedump_volume,  NULL, 0, DRC_NA},
         [GLUSTER_CLI_LIST_VOLUME]        = {"LIST_VOLUME",        GLUSTER_CLI_LIST_VOLUME,      glusterd_handle_cli_list_volume,       NULL, 0, DRC_NA},
         [GLUSTER_CLI_CLRLOCKS_VOLUME]    = {"CLEARLOCKS_VOLUME",  GLUSTER_CLI_CLRLOCKS_VOLUME,  glusterd_handle_cli_clearlocks_volume, NULL, 0, DRC_NA},
-#ifdef HAVE_BD_XLATOR
-        [GLUSTER_CLI_BD_OP]              = {"BD_OP",              GLUSTER_CLI_BD_OP,            glusterd_handle_cli_bd_op,             NULL, 0, DRC_NA},
-#endif
         [GLUSTER_CLI_COPY_FILE]     = {"COPY_FILE", GLUSTER_CLI_COPY_FILE, glusterd_handle_copy_file, NULL, 0, DRC_NA},
         [GLUSTER_CLI_SYS_EXEC]      = {"SYS_EXEC", GLUSTER_CLI_SYS_EXEC, glusterd_handle_sys_exec, NULL, 0, DRC_NA},
 };
@@ -3945,5 +3946,26 @@ struct rpcsvc_program gd_svc_cli_prog = {
         .progver   = GLUSTER_CLI_VERSION,
         .numactors = GLUSTER_CLI_MAXVALUE,
         .actors    = gd_svc_cli_actors,
+	.synctask  = _gf_true,
+};
+
+/* This is a minimal RPC prog, which contains only the readonly RPC procs from
+ * the cli rpcsvc
+ */
+rpcsvc_actor_t gd_svc_cli_actors_ro[] = {
+        [GLUSTER_CLI_LIST_FRIENDS]       = { "LIST_FRIENDS",      GLUSTER_CLI_LIST_FRIENDS,     glusterd_handle_cli_list_friends,      NULL, 0, DRC_NA},
+        [GLUSTER_CLI_UUID_GET]           = { "UUID_GET",          GLUSTER_CLI_UUID_GET,         glusterd_handle_cli_uuid_get,          NULL, 0, DRC_NA},
+        [GLUSTER_CLI_GET_VOLUME]         = { "GET_VOLUME",        GLUSTER_CLI_GET_VOLUME,       glusterd_handle_cli_get_volume,        NULL, 0, DRC_NA},
+        [GLUSTER_CLI_GETWD]              = { "GETWD",             GLUSTER_CLI_GETWD,            glusterd_handle_getwd,                 NULL, 1, DRC_NA},
+        [GLUSTER_CLI_STATUS_VOLUME]      = {"STATUS_VOLUME",      GLUSTER_CLI_STATUS_VOLUME,    glusterd_handle_status_volume,         NULL, 0, DRC_NA},
+        [GLUSTER_CLI_LIST_VOLUME]        = {"LIST_VOLUME",        GLUSTER_CLI_LIST_VOLUME,      glusterd_handle_cli_list_volume,       NULL, 0, DRC_NA},
+};
+
+struct rpcsvc_program gd_svc_cli_prog_ro = {
+        .progname  = "GlusterD svc cli read-only",
+        .prognum   = GLUSTER_CLI_PROGRAM,
+        .progver   = GLUSTER_CLI_VERSION,
+        .numactors = GLUSTER_CLI_MAXVALUE,
+        .actors    = gd_svc_cli_actors_ro,
 	.synctask  = _gf_true,
 };

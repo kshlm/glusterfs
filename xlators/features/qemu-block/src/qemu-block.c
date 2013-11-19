@@ -108,42 +108,76 @@ qb_iatt_fixup (xlator_t *this, inode_t *inode, struct iatt *iatt)
 int
 qb_format_extract (xlator_t *this, char *format, inode_t *inode)
 {
-	char       *s = NULL;
+	char       *s, *save;
 	uint64_t    size = 0;
 	char        fmt[QB_XATTR_VAL_MAX+1] = {0, };
 	qb_inode_t *qb_inode = NULL;
+	char *formatstr = NULL;
+	uuid_t gfid = {0,};
+	char gfid_str[64] = {0,};
+	int ret;
 
-	strncpy (fmt, format, QB_XATTR_VAL_MAX);
-	s = strchr (fmt, ':');
+	strncpy(fmt, format, QB_XATTR_VAL_MAX);
+
+	s = strtok_r(fmt, ":", &save);
 	if (!s)
 		goto invalid;
-	if (s == fmt)
-		goto invalid;
+	formatstr = gf_strdup(s);
 
-	*s = 0; s++;
-	if (!*s || strchr (s, ':'))
+	s = strtok_r(NULL, ":", &save);
+	if (!s)
 		goto invalid;
-
 	if (gf_string2bytesize (s, &size))
 		goto invalid;
-
 	if (!size)
 		goto invalid;
+
+	s = strtok_r(NULL, "\0", &save);
+	if (s && !strncmp(s, "<gfid:", strlen("<gfid:"))) {
+		/*
+		 * Check for valid gfid backing image specifier.
+		 */
+		if (strlen(s) + 1 > sizeof(gfid_str))
+			goto invalid;
+		ret = sscanf(s, "<gfid:%[^>]s", gfid_str);
+		if (ret == 1) {
+			ret = uuid_parse(gfid_str, gfid);
+			if (ret < 0)
+				goto invalid;
+		}
+	}
 
 	qb_inode = qb_inode_ctx_get (this, inode);
 	if (!qb_inode)
 		qb_inode = GF_CALLOC (1, sizeof (*qb_inode),
 				      gf_qb_mt_qb_inode_t);
-	if (!qb_inode)
+	if (!qb_inode) {
+		GF_FREE(formatstr);
 		return ENOMEM;
+	}
 
-	strncpy (qb_inode->fmt, fmt, QB_XATTR_VAL_MAX);
+	strncpy(qb_inode->fmt, formatstr, QB_XATTR_VAL_MAX);
 	qb_inode->size = size;
-	qb_inode->size_str = s;
+
+	/*
+	 * If a backing gfid was not specified, interpret any remaining bytes
+	 * associated with a backing image as a filename local to the parent
+	 * directory. The format processing will validate further.
+	 */
+	if (!uuid_is_null(gfid))
+		uuid_copy(qb_inode->backing_gfid, gfid);
+	else if (s)
+		qb_inode->backing_fname = gf_strdup(s);
 
 	inode_ctx_set (inode, this, (void *)&qb_inode);
+
+	GF_FREE(formatstr);
+
 	return 0;
+
 invalid:
+	GF_FREE(formatstr);
+
 	gf_log (this->name, GF_LOG_WARNING,
 		"invalid format '%s' in inode %s", format,
 		uuid_utoa (inode->gfid));
@@ -170,6 +204,7 @@ qb_local_init (call_frame_t *frame)
 	qb_local = GF_CALLOC (1, sizeof (*qb_local), gf_qb_mt_qb_local_t);
 	if (!qb_local)
 		return -1;
+	INIT_LIST_HEAD(&qb_local->list);
 
 	qb_local->frame = frame;
 	frame->local = qb_local;
@@ -190,6 +225,15 @@ qb_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 	if (op_ret == -1)
 		goto out;
+
+	/*
+	 * Cache the root inode for dealing with backing images. The format
+	 * coroutine and the gluster qemu backend driver both use the root inode
+	 * table to verify and/or redirect I/O to the backing image via
+	 * anonymous fd's.
+	 */
+	if (!conf->root_inode && __is_root_gfid(inode->gfid))
+		conf->root_inode = inode_ref(inode);
 
 	if (!xdata)
 		goto out;
@@ -249,6 +293,7 @@ qb_setxattr_format (call_frame_t *frame, xlator_t *this, call_stub_t *stub,
 	int op_errno = 0;
 	qb_local_t *qb_local = NULL;
 	data_t *data = NULL;
+	qb_inode_t *qb_inode;
 
 	if (!(data = dict_get (xattr, "trusted.glusterfs.block-format"))) {
 		QB_STUB_RESUME (stub);
@@ -264,12 +309,15 @@ qb_setxattr_format (call_frame_t *frame, xlator_t *this, call_stub_t *stub,
 		QB_STUB_UNWIND (stub, -1, op_errno);
 		return 0;
 	}
+	qb_inode = qb_inode_ctx_get(this, inode);
 
 	qb_local = frame->local;
 
 	qb_local->stub = stub;
 	qb_local->inode = inode_ref (inode);
-	strncpy (qb_local->fmt, format, QB_XATTR_VAL_MAX);
+
+	snprintf(qb_local->fmt, QB_XATTR_VAL_MAX, "%s:%lu", qb_inode->fmt,
+		 qb_inode->size);
 
 	qb_coroutine (frame, qb_format_and_resume);
 
@@ -982,6 +1030,7 @@ init (xlator_t *this)
 {
         qb_conf_t *conf    = NULL;
         int32_t    ret     = -1;
+	static int bdrv_inited = 0;
 
         if (!this->children || this->children->next) {
                 gf_log (this->name, GF_LOG_ERROR,
@@ -1018,7 +1067,10 @@ init (xlator_t *this)
 
 	cur_mon = (void *) 1;
 
-	bdrv_init ();
+	if (!bdrv_inited) {
+		bdrv_init ();
+		bdrv_inited = 1;
+	}
 
 out:
         if (ret)
@@ -1037,6 +1089,8 @@ fini (xlator_t *this)
 
         this->private = NULL;
 
+	if (conf->root_inode)
+		inode_unref(conf->root_inode);
         GF_FREE (conf);
 
 	return;

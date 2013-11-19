@@ -594,6 +594,8 @@ get_server_xlator (char *xlator)
                 subvol = GF_XLATOR_MARKER;
         if (strcmp (xlator, "io-stats") == 0)
                 subvol = GF_XLATOR_IO_STATS;
+        if (strcmp (xlator, "bd") == 0)
+                subvol = GF_XLATOR_BD;
 
         return subvol;
 }
@@ -1419,8 +1421,6 @@ server_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
         char     *password                = NULL;
         char     index_basepath[PATH_MAX] = {0};
         char     key[1024]                = {0};
-        char     *vgname                  = NULL;
-        char     *vg                      = NULL;
         glusterd_brickinfo_t *brickinfo   = NULL;
         char changelog_basepath[PATH_MAX] = {0,};
 
@@ -1441,47 +1441,43 @@ server_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
                 }
         }
 
-        if (volinfo->backend == GD_VOL_BK_BD) {
-                xl = volgen_graph_add (graph, "storage/bd_map", volname);
+        xl = volgen_graph_add (graph, "storage/posix", volname);
+        if (!xl)
+                return -1;
+
+        ret = xlator_set_option (xl, "directory", path);
+        if (ret)
+                return -1;
+
+        ret = xlator_set_option (xl, "volume-id",
+                                 uuid_utoa (volinfo->volume_id));
+        if (ret)
+                return -1;
+
+        ret = check_and_add_debug_xl (graph, set_dict, volname,
+                                      "posix");
+        if (ret)
+                return -1;
+#ifdef HAVE_BD_XLATOR
+        if (*brickinfo->vg != '\0') {
+                /* Now add BD v2 xlator if volume is BD type */
+                xl = volgen_graph_add (graph, "storage/bd", volname);
                 if (!xl)
                         return -1;
 
                 ret = xlator_set_option (xl, "device", "vg");
                 if (ret)
                         return -1;
-
-                vg = gf_strdup (path);
-                vgname = strrchr (vg, '/');
-                if (strchr(vg, '/') != vgname) {
-                        gf_log ("glusterd", GF_LOG_ERROR,
-                                  "invalid vg specified %s", path);
-                        GF_FREE (vg);
-                        goto out;
-                }
-                vgname++;
-                ret = xlator_set_option (xl, "export", vgname);
-                GF_FREE (vg);
-                if (ret)
-                        return -1;
-        } else {
-                xl = volgen_graph_add (graph, "storage/posix", volname);
-                if (!xl)
-                        return -1;
-
-                ret = xlator_set_option (xl, "directory", path);
+                ret = xlator_set_option (xl, "export", brickinfo->vg);
                 if (ret)
                         return -1;
 
-                ret = xlator_set_option (xl, "volume-id",
-                                 uuid_utoa (volinfo->volume_id));
+                ret = check_and_add_debug_xl (graph, set_dict, volname, "bd");
                 if (ret)
                         return -1;
 
-                ret = check_and_add_debug_xl (graph, set_dict, volname,
-                                                "posix");
-                if (ret)
-                        return -1;
         }
+#endif
 
         xl = volgen_graph_add (graph, "features/changelog", volname);
         if (!xl)
@@ -1631,6 +1627,18 @@ server_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
                         ret = -1;
                         goto out;
                 }
+        }
+
+        /* Check for compress volume option, and add it to the graph on server side */
+        if (dict_get_str_boolean (set_dict, "features.compress", 0)) {
+                xl = volgen_graph_add (graph, "features/cdc", volname);
+                if (!xl) {
+                        ret = -1;
+                        goto out;
+                }
+                ret = dict_set_str (set_dict, "compress.mode", "server");
+                if (ret)
+                        goto out;
         }
 
         xl = volgen_graph_add_as (graph, "debug/io-stats", path);
@@ -2444,6 +2452,29 @@ out:
         return ret;
 }
 
+static int client_graph_set_perf_options(volgen_graph_t *graph,
+					 glusterd_volinfo_t *volinfo,
+					 dict_t *set_dict)
+{
+	data_t *tmp_data = NULL;
+	char *volname = NULL;
+
+	/*
+	 * Logic to make sure NFS doesn't have performance translators by
+	 * default for a volume
+	 */
+	volname = volinfo->volname;
+	tmp_data = dict_get (set_dict, "nfs-volume-file");
+	if (!tmp_data)
+		return volgen_graph_set_options_generic(graph, set_dict,
+							volname,
+							&perfxl_option_handler);
+	else
+		return volgen_graph_set_options_generic(graph, set_dict,
+							volname,
+							&nfsperfxl_option_handler);
+}
+
 static int
 client_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
                       dict_t *set_dict, void *param)
@@ -2451,7 +2482,6 @@ client_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
         int       ret      = 0;
         xlator_t *xl       = NULL;
         char     *volname  = NULL;
-        data_t   *tmp_data = NULL;
 
         volname = volinfo->volname;
         ret = volgen_graph_build_clients (graph, volinfo, set_dict, param);
@@ -2461,6 +2491,31 @@ client_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
         ret = volume_volgen_graph_build_clusters (graph, volinfo);
         if (ret == -1)
                 goto out;
+
+        /* Check for compress volume option, and add it to the graph on client side */
+        if (dict_get_str_boolean (set_dict, "features.compress", 0)) {
+                xl = volgen_graph_add (graph, "features/cdc", volname);
+                if (!xl) {
+                        ret = -1;
+                        goto out;
+                }
+                ret = dict_set_str (set_dict, "compress.mode", "client");
+                if (ret)
+                        goto out;
+
+        }
+
+        ret = glusterd_volinfo_get_boolean (volinfo, "features.encryption");
+        if (ret == -1)
+                goto out;
+        if (ret) {
+                xl = volgen_graph_add (graph, "encryption/crypt", volname);
+
+                if (!xl) {
+                        ret = -1;
+                        goto out;
+                }
+        }
 
         ret = glusterd_volinfo_get_boolean (volinfo, VKEY_FEATURES_QUOTA);
         if (ret == -1)
@@ -2487,16 +2542,7 @@ client_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
                 }
         }
 
-        /* Logic to make sure NFS doesn't have performance translators by
-           default for a volume */
-        tmp_data = dict_get (set_dict, "nfs-volume-file");
-        if (!tmp_data)
-                ret = volgen_graph_set_options_generic (graph, set_dict, volinfo,
-                                                        &perfxl_option_handler);
-        else
-                ret = volgen_graph_set_options_generic (graph, set_dict, volname,
-                                                        &nfsperfxl_option_handler);
-
+	ret = client_graph_set_perf_options(graph, volinfo, set_dict);
         if (ret)
                 goto out;
 
@@ -3390,6 +3436,54 @@ glusterd_create_shd_volfile ()
 out:
         if (mod_dict)
                 dict_unref (mod_dict);
+        return ret;
+}
+
+int
+glusterd_check_nfs_topology_identical (gf_boolean_t *identical)
+{
+        char            nfsvol[PATH_MAX]        = {0,};
+        char            tmpnfsvol[PATH_MAX]     = {0,};
+        glusterd_conf_t *conf                   = NULL;
+        xlator_t        *this                   = THIS;
+        int             ret                     = -1;
+        int             tmpclean                = 0;
+        int             tmpfd                   = -1;
+
+        if ((!identical) || (!this) || (!this->private))
+                goto out;
+
+        conf = (glusterd_conf_t *) this->private;
+
+        /* Fetch the original NFS volfile */
+        glusterd_get_nodesvc_volfile ("nfs", conf->workdir,
+                                      nfsvol, sizeof (nfsvol));
+
+        /* Create the temporary NFS volfile */
+        snprintf (tmpnfsvol, sizeof (tmpnfsvol), "/tmp/gnfs-XXXXXX");
+        tmpfd = mkstemp (tmpnfsvol);
+        if (tmpfd < 0) {
+                gf_log (this->name, GF_LOG_WARNING,
+                                    "Unable to create temp file %s: (%s)",
+                                    tmpnfsvol, strerror (errno));
+                goto out;
+        }
+
+        tmpclean = 1; /* SET the flag to unlink() tmpfile */
+
+        ret = glusterd_create_global_volfile (build_nfs_graph,
+                                              tmpnfsvol, NULL);
+        if (ret)
+                goto out;
+
+        /* Compare the topology of volfiles */
+        ret = glusterd_check_topology_identical (nfsvol, tmpnfsvol,
+                                                 identical);
+out:
+        if (tmpfd >= 0)
+                close (tmpfd);
+        if (tmpclean)
+                unlink (tmpnfsvol);
         return ret;
 }
 

@@ -4107,6 +4107,191 @@ err:
 }
 
 int32_t
+stripe_zerofill_cbk(call_frame_t *frame, void *cookie, xlator_t *this,
+                   int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
+                   struct iatt *postbuf, dict_t *xdata)
+{
+        int32_t         callcnt    = 0;
+        stripe_local_t *local      = NULL;
+        stripe_local_t *mlocal     = NULL;
+        call_frame_t   *prev       = NULL;
+        call_frame_t   *mframe     = NULL;
+
+        if (!this || !frame || !frame->local || !cookie) {
+                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
+                goto out;
+        }
+
+        prev  = cookie;
+        local = frame->local;
+        mframe = local->orig_frame;
+        mlocal = mframe->local;
+
+        LOCK(&frame->lock);
+        {
+                callcnt = ++mlocal->call_count;
+
+                if (op_ret == 0) {
+                        mlocal->post_buf = *postbuf;
+                        mlocal->pre_buf = *prebuf;
+
+                        mlocal->prebuf_blocks  += prebuf->ia_blocks;
+                        mlocal->postbuf_blocks += postbuf->ia_blocks;
+
+                        correct_file_size(prebuf, mlocal->fctx, prev);
+                        correct_file_size(postbuf, mlocal->fctx, prev);
+
+                        if (mlocal->prebuf_size < prebuf->ia_size)
+                                mlocal->prebuf_size = prebuf->ia_size;
+                        if (mlocal->postbuf_size < postbuf->ia_size)
+                                mlocal->postbuf_size = postbuf->ia_size;
+                }
+
+                /* return the first failure */
+                if (mlocal->op_ret == 0) {
+                        mlocal->op_ret = op_ret;
+                        mlocal->op_errno = op_errno;
+                }
+        }
+        UNLOCK (&frame->lock);
+
+        if ((callcnt == mlocal->wind_count) && mlocal->unwind) {
+                mlocal->pre_buf.ia_size = mlocal->prebuf_size;
+                mlocal->pre_buf.ia_blocks = mlocal->prebuf_blocks;
+                mlocal->post_buf.ia_size = mlocal->postbuf_size;
+                mlocal->post_buf.ia_blocks = mlocal->postbuf_blocks;
+
+                STRIPE_STACK_UNWIND (zerofill, mframe, mlocal->op_ret,
+                                     mlocal->op_errno, &mlocal->pre_buf,
+                                     &mlocal->post_buf, NULL);
+        }
+out:
+        STRIPE_STACK_DESTROY(frame);
+        return 0;
+}
+
+int32_t
+stripe_zerofill(call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
+               off_t len, dict_t *xdata)
+{
+        stripe_local_t   *local            = NULL;
+        stripe_fd_ctx_t  *fctx             = NULL;
+        int32_t           op_errno         = 1;
+        int32_t           idx              = 0;
+        int32_t           offset_offset    = 0;
+        int32_t           remaining_size   = 0;
+        off_t             fill_size        = 0;
+        uint64_t          stripe_size      = 0;
+        uint64_t          tmp_fctx         = 0;
+        off_t             dest_offset      = 0;
+        call_frame_t     *fframe           = NULL;
+        stripe_local_t   *flocal           = NULL;
+
+        VALIDATE_OR_GOTO (frame, err);
+        VALIDATE_OR_GOTO (this, err);
+        VALIDATE_OR_GOTO (fd, err);
+        VALIDATE_OR_GOTO (fd->inode, err);
+
+        inode_ctx_get (fd->inode, this, &tmp_fctx);
+        if (!tmp_fctx) {
+                op_errno = EINVAL;
+                goto err;
+        }
+        fctx = (stripe_fd_ctx_t *)(long)tmp_fctx;
+        stripe_size = fctx->stripe_size;
+
+        STRIPE_VALIDATE_FCTX (fctx, err);
+
+        remaining_size = len;
+
+        local = mem_get0 (this->local_pool);
+        if (!local) {
+                op_errno = ENOMEM;
+                goto err;
+        }
+        fctx = (stripe_fd_ctx_t *)(long)tmp_fctx;
+        stripe_size = fctx->stripe_size;
+
+        STRIPE_VALIDATE_FCTX (fctx, err);
+
+        remaining_size = len;
+
+        local = mem_get0 (this->local_pool);
+        if (!local) {
+                op_errno = ENOMEM;
+                goto err;
+        }
+        fctx = (stripe_fd_ctx_t *)(long)tmp_fctx;
+        stripe_size = fctx->stripe_size;
+
+        STRIPE_VALIDATE_FCTX (fctx, err);
+
+        remaining_size = len;
+
+        local = mem_get0 (this->local_pool);
+        if (!local) {
+                op_errno = ENOMEM;
+                goto err;
+        }
+        frame->local = local;
+        local->stripe_size = stripe_size;
+        local->fctx = fctx;
+
+        if (!stripe_size) {
+                gf_log (this->name, GF_LOG_DEBUG,
+                        "Wrong stripe size for the file");
+                op_errno = EINVAL;
+                goto err;
+        }
+
+        while (1) {
+                fframe = copy_frame(frame);
+                flocal = mem_get0(this->local_pool);
+                if (!flocal) {
+                        op_errno = ENOMEM;
+                        goto err;
+                }
+                flocal->orig_frame = frame;
+                fframe->local = flocal;
+
+                idx = (((offset + offset_offset) /
+                        local->stripe_size) % fctx->stripe_count);
+
+                fill_size = (local->stripe_size -
+                             ((offset + offset_offset) % local->stripe_size));
+                if (fill_size > remaining_size)
+                        fill_size = remaining_size;
+
+                remaining_size -= fill_size;
+
+                local->wind_count++;
+                if (remaining_size == 0)
+                        local->unwind = 1;
+
+                dest_offset = offset + offset_offset;
+                if (fctx->stripe_coalesce)
+                        dest_offset = coalesced_offset(dest_offset,
+                                                       local->stripe_size,
+                                                       fctx->stripe_count);
+
+                STACK_WIND(fframe, stripe_zerofill_cbk, fctx->xl_array[idx],
+                           fctx->xl_array[idx]->fops->zerofill, fd,
+                           dest_offset, fill_size, xdata);
+                offset_offset += fill_size;
+                if (remaining_size == 0)
+                        break;
+        }
+
+        return 0;
+err:
+        if (fframe)
+                STRIPE_STACK_DESTROY(fframe);
+
+        STRIPE_STACK_UNWIND (zerofill, frame, -1, op_errno, NULL, NULL, NULL);
+        return 0;
+}
+
+int32_t
 stripe_release (xlator_t *this, fd_t *fd)
 {
 	return 0;
@@ -4280,6 +4465,37 @@ stripe_setxattr_cbk (call_frame_t *frame, void *cookie,
         return 0;
 }
 
+#ifdef HAVE_BD_XLATOR
+int
+stripe_is_bd (dict_t *this, char *key, data_t *value, void *data)
+{
+        gf_boolean_t *is_bd = data;
+
+        if (data == NULL)
+                return 0;
+
+        if (XATTR_IS_BD (key))
+            *is_bd = _gf_true;
+
+        return 0;
+}
+
+inline gf_boolean_t
+stripe_setxattr_is_bd (dict_t *dict)
+{
+        gf_boolean_t is_bd = _gf_false;
+
+        if (dict == NULL)
+                goto out;
+
+        dict_foreach (dict, stripe_is_bd, &is_bd);
+out:
+        return is_bd;
+}
+#else
+#define stripe_setxattr_is_bd(dict) _gf_false
+#endif
+
 int
 stripe_setxattr (call_frame_t *frame, xlator_t *this,
                  loc_t *loc, dict_t *dict, int flags, dict_t *xdata)
@@ -4289,6 +4505,7 @@ stripe_setxattr (call_frame_t *frame, xlator_t *this,
         stripe_private_t *priv     = NULL;
         stripe_local_t   *local    = NULL;
         int               i        = 0;
+        gf_boolean_t      is_bd    = _gf_false;
 
         VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (this, err);
@@ -4311,11 +4528,15 @@ stripe_setxattr (call_frame_t *frame, xlator_t *this,
         local->wind_count = priv->child_count;
         local->op_ret = local->op_errno = 0;
 
+        is_bd = stripe_setxattr_is_bd (dict);
+
         /**
          * Set xattrs for directories on all subvolumes. Additionally
-         * this power is only given to a special client.
+         * this power is only given to a special client. Bd xlator
+         * also needs xattrs for regular files (ie LVs)
          */
-        if ((frame->root->pid == GF_CLIENT_PID_GSYNCD) && IA_ISDIR (loc->inode->ia_type)) {
+        if (((frame->root->pid == GF_CLIENT_PID_GSYNCD) &&
+             IA_ISDIR (loc->inode->ia_type)) || is_bd) {
                 for (i = 0; i < priv->child_count; i++, trav = trav->next) {
                         STACK_WIND (frame, stripe_setxattr_cbk,
                                     trav->xlator, trav->xlator->fops->setxattr,
@@ -4346,21 +4567,21 @@ stripe_fsetxattr_cbk (call_frame_t *frame, void *cookie,
 
 
 int
-stripe_is_lockinfo (dict_t *this,
-                    char *key,
-                    data_t *value,
-                    void *data)
+stripe_is_special_key (dict_t *this,
+                       char *key,
+                       data_t *value,
+                       void *data)
 {
-        gf_boolean_t *is_lockinfo = NULL;
+        gf_boolean_t *is_special = NULL;
 
         if (data == NULL) {
                 goto out;
         }
 
-        is_lockinfo = data;
+        is_special = data;
 
-        if (XATTR_IS_LOCKINFO (key))
-                *is_lockinfo = _gf_true;
+        if (XATTR_IS_LOCKINFO (key) || XATTR_IS_BD (key))
+                *is_special = _gf_true;
 
 out:
         return 0;
@@ -4437,7 +4658,7 @@ stripe_fsetxattr_is_special (dict_t *dict)
                 goto out;
         }
 
-        dict_foreach (dict, stripe_is_lockinfo, &is_spl);
+        dict_foreach (dict, stripe_is_special_key, &is_spl);
 
 out:
         return is_spl;
@@ -5558,6 +5779,7 @@ struct xlator_fops fops = {
         .readdirp       = stripe_readdirp,
 	.fallocate	= stripe_fallocate,
 	.discard	= stripe_discard,
+        .zerofill       = stripe_zerofill,
 };
 
 struct xlator_cbks cbks = {

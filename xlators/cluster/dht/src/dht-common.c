@@ -22,6 +22,7 @@
 #include "dht-common.h"
 #include "defaults.h"
 #include "byte-order.h"
+#include "glusterfs-acl.h"
 
 #include <sys/time.h>
 #include <libgen.h>
@@ -154,7 +155,6 @@ dht_discover_complete (xlator_t *this, call_frame_t *discover_frame)
         int              ret = -1;
         dht_layout_t    *layout = NULL;
         dht_conf_t      *conf = NULL;
-        uint32_t         missing = 0;
 
         local = discover_frame->local;
         layout = local->layout;
@@ -191,33 +191,20 @@ dht_discover_complete (xlator_t *this, call_frame_t *discover_frame)
                         goto out;
                 }
         } else {
-                ret = dht_layout_normalize (this, &local->loc, layout,
-                                            &missing);
-                if (ret < 0) {
+                ret = dht_layout_normalize (this, &local->loc, layout);
+                if ((ret < 0) || ((ret > 0) && (local->op_ret != 0))) {
+                        /* either the layout is incorrect or the directory is
+                         * not found even in one subvolume.
+                         */
                         gf_log (this->name, GF_LOG_DEBUG,
-                                "normalizing failed on %s (internal error)",
-                                local->loc.path);
-                        op_errno = EIO;
-                        goto out;
-                }
-                if (missing == conf->subvolume_cnt) {
-                        gf_log (this->name, GF_LOG_DEBUG,
-                                "normalizing failed on %s, ENOENT errors: %u)",
-                                local->loc.path, missing);
-                        op_errno = ENOENT;
-                        goto out;
-                }
-                if (ret != 0) {
-                        gf_log (this->name, GF_LOG_WARNING,
                                 "normalizing failed on %s "
-                                "(overlaps/holes present)", local->loc.path);
-                        /* We may need to do the lookup again */
-                        /* in discover call, parent is not know, and basename
-                         * of entry is also not available. Without which we
-                         * cannot build a layout correctly to heal it. Hence
-                         * returning ESTALE */
-                        op_errno = ESTALE;
-                        goto out;
+                                "(overlaps/holes present: %s, "
+                                "ENOENT errors: %d)", local->loc.path,
+                                (ret < 0) ? "yes" : "no", (ret > 0) ? ret : 0);
+                        if ((ret > 0) && (ret == conf->subvolume_cnt)) {
+                                op_errno = ESTALE;
+                                goto out;
+                        }
                 }
 
                 if (local->inode)
@@ -421,7 +408,6 @@ dht_lookup_dir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         dht_layout_t *layout                  = NULL;
         int           ret                     = -1;
         int           is_dir                  = 0;
-        uint32_t      missing                 = 0;
 
         GF_VALIDATE_OR_GOTO ("dht", frame, out);
         GF_VALIDATE_OR_GOTO ("dht", this, out);
@@ -455,7 +441,7 @@ dht_lookup_dir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                         op_ret, op_errno, xattr);
 
                 if (op_ret == -1) {
-                        local->op_errno = ENOENT;
+                        local->op_errno = op_errno;
                         gf_log (this->name, GF_LOG_DEBUG,
                                 "lookup of %s on %s returned error (%s)",
                                 local->loc.path, prev->this->name,
@@ -502,16 +488,9 @@ unlock:
                 }
 
                 if (local->op_ret == 0) {
-                        ret = dht_layout_normalize (this, &local->loc, layout,
-                                                    &missing);
+                        ret = dht_layout_normalize (this, &local->loc, layout);
 
-                        /*
-                         * Arguably, we shouldn't do self-heal just because
-                         * bricks are missing as long as there are no other
-                         * anomalies.  For now, though, just preserve the
-                         * existing behavior.
-                         */
-                        if ((ret != 0) || (missing != 0)) {
+                        if (ret != 0) {
                                 gf_log (this->name, GF_LOG_DEBUG,
                                         "fixing assignment on %s",
                                         local->loc.path);
@@ -5194,8 +5173,8 @@ unlock:
                  * not need to handle CHILD_DOWN event here.
                  */
                 if (conf->defrag) {
-                        ret = pthread_create (&conf->defrag->th, NULL,
-                                              gf_defrag_start, this);
+                        ret = gf_thread_create (&conf->defrag->th, NULL,
+						gf_defrag_start, this);
                         if (ret) {
                                 conf->defrag = NULL;
                                 GF_FREE (conf->defrag);

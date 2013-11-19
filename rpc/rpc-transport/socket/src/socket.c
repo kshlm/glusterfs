@@ -2423,7 +2423,7 @@ socket_spawn (rpc_transport_t *this)
         gf_log (this->name, GF_LOG_TRACE,
                 "spawning %p with gen %u", this, priv->ot_gen);
 
-        if (pthread_create(&priv->thread,NULL,socket_poller,this) != 0) {
+        if (gf_thread_create(&priv->thread,NULL,socket_poller,this) != 0) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "could not create poll thread");
         }
@@ -2467,7 +2467,7 @@ socket_server_event_handler (int fd, int idx, void *data,
                                 goto unlock;
                         }
 
-                        if (priv->nodelay) {
+                        if (priv->nodelay && (new_sockaddr.ss_family != AF_UNIX)) {
                                 ret = __socket_nodelay (new_sock);
                                 if (ret == -1) {
                                         gf_log (this->name, GF_LOG_WARNING,
@@ -2751,7 +2751,7 @@ socket_connect (rpc_transport_t *this, int port)
                         }
                 }
 
-                if (priv->nodelay) {
+                if (priv->nodelay && (sa_family != AF_UNIX)) {
                         ret = __socket_nodelay (priv->sock);
 
                         if (ret == -1) {
@@ -2965,7 +2965,7 @@ socket_listen (rpc_transport_t *this)
                         }
                 }
 
-                if (priv->nodelay) {
+                if (priv->nodelay && (sa_family != AF_UNIX)) {
                         ret = __socket_nodelay (priv->sock);
                         if (ret == -1) {
                                 gf_log (this->name, GF_LOG_ERROR,
@@ -3261,6 +3261,25 @@ out:
 }
 
 
+static int
+socket_throttle (rpc_transport_t *this, gf_boolean_t onoff)
+{
+        socket_private_t *priv = NULL;
+
+        priv = this->private;
+
+        /* The way we implement throttling is by taking off
+           POLLIN event from the polled flags. This way we
+           never get called with the POLLIN event and therefore
+           will never read() any more data until throttling
+           is turned off.
+        */
+        priv->idx = event_select_on (this->ctx->event_pool, priv->sock,
+                                     priv->idx, (int) !onoff, -1);
+        return 0;
+}
+
+
 struct rpc_transport_ops tops = {
         .listen             = socket_listen,
         .connect            = socket_connect,
@@ -3271,6 +3290,7 @@ struct rpc_transport_ops tops = {
         .get_peeraddr       = socket_getpeeraddr,
         .get_myname         = socket_getmyname,
         .get_myaddr         = socket_getmyaddr,
+	.throttle           = socket_throttle,
 };
 
 int

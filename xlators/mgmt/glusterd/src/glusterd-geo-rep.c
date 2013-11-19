@@ -42,11 +42,18 @@ glusterd_gsync_read_frm_status (char *path, char *buf, size_t blen);
 struct gsync_config_opt_vals_ gsync_confopt_vals[] = {
         {.op_name        = "change_detector",
          .no_of_pos_vals = 2,
+         .case_sensitive = _gf_true,
          .values         = {"xsync", "changelog"},
         },
         {.op_name        = "special_sync_mode",
          .no_of_pos_vals = 2,
+         .case_sensitive = _gf_true,
          .values         = {"partial", "recover"}
+        },
+        {.op_name        = "log-level",
+         .no_of_pos_vals = 5,
+         .case_sensitive = _gf_false,
+         .values         = {"critical", "error", "warning", "info", "debug"}
         },
         {.op_name = NULL,
         },
@@ -894,8 +901,13 @@ gsync_verify_config_options (dict_t *dict, char **op_errstr, char *volname)
                 if (op_match) {
                         val_match = _gf_false;
                         for (i = 0; i < conf_vals->no_of_pos_vals; i++) {
-                                if (!strcmp (conf_vals->values[i], op_value))
-                                        val_match = _gf_true;
+                                if(conf_vals->case_sensitive){
+                                        if (!strcmp (conf_vals->values[i], op_value))
+                                                val_match = _gf_true;
+                                } else {
+                                        if (!strcasecmp (conf_vals->values[i], op_value))
+                                                val_match = _gf_true;
+                                }
                         }
 
                         if (!val_match) {
@@ -928,7 +940,7 @@ _get_status_mst_slv (dict_t *this, char *key, data_t *value, void *data)
         char                          *slave_buf = NULL;
         char                          *slave_ip  = NULL;
         char                          *slave_vol = NULL;
-        char                         **errmsg    = NULL;
+        char                          *errmsg    = NULL;
         char                           conf_path[PATH_MAX] = "";
         int                           ret = -1;
         glusterd_conf_t              *priv = NULL;
@@ -950,10 +962,14 @@ _get_status_mst_slv (dict_t *this, char *key, data_t *value, void *data)
                 return 0;
         slave++;
 
-        ret = glusterd_get_slave_info (slave, &slave_ip, &slave_vol, errmsg);
+        ret = glusterd_get_slave_info (slave, &slave_ip, &slave_vol, &errmsg);
         if (ret) {
-                gf_log ("", GF_LOG_ERROR,
-                        "Unable to fetch slave details.");
+                if (errmsg)
+                        gf_log ("", GF_LOG_ERROR, "Unable to fetch "
+                                "slave details. Error: %s", errmsg);
+                else
+                        gf_log ("", GF_LOG_ERROR,
+                                "Unable to fetch slave details.");
                 ret = -1;
                 goto out;
         }
@@ -1767,7 +1783,6 @@ glusterd_mountbroker_check (char **slave_ip, char **op_errstr)
 
         GF_ASSERT (slave_ip);
         GF_ASSERT (*slave_ip);
-        GF_ASSERT (op_errstr);
 
         /* Checking if hostname has user specified */
         host = strstr (*slave_ip, "@");
@@ -1786,7 +1801,8 @@ glusterd_mountbroker_check (char **slave_ip, char **op_errstr)
                         errmsg[ret] = '\0';
                         gf_log ("", GF_LOG_ERROR, "%s", errmsg);
                         ret = -1;
-                        *op_errstr = gf_strdup (errmsg);
+                        if (op_errstr)
+                                *op_errstr = gf_strdup (errmsg);
                         goto out;
                 }
 
@@ -1799,7 +1815,8 @@ glusterd_mountbroker_check (char **slave_ip, char **op_errstr)
                                         "Non-root username (%s@%s) not allowed.",
                                         username, tmp);
                         errmsg[ret] = '\0';
-                        *op_errstr = gf_strdup (errmsg);
+                        if (op_errstr)
+                                *op_errstr = gf_strdup (errmsg);
                         gf_log ("", GF_LOG_ERROR,
                                 "Non-Root username not allowed.");
                         ret = -1;

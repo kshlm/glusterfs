@@ -15,7 +15,6 @@
 #include "call-stub.h"
 #include "block/block_int.h"
 #include "monitor/monitor.h"
-#include "coroutine-synctask.h"
 
 /* QB_XATTR_KEY_FMT is the on-disk xattr stored in the inode which
    indicates that the file must be "interpreted" by the block format
@@ -36,15 +35,16 @@
 
 #define QB_XATTR_KEY_MAX 64
 
-#define QB_XATTR_VAL_MAX 32
+#define QB_XATTR_VAL_MAX 64
 
 
 typedef struct qb_inode {
 	char fmt[QB_XATTR_VAL_MAX]; /* this is only the format, not "format:size" */
 	size_t size; /* virtual size in bytes */
-	char *size_str; /* pointer into fmt[] after ":" where size begins */
 	BlockDriverState *bs;
 	int refcnt;
+	uuid_t backing_gfid;
+	char *backing_fname;
 } qb_inode_t;
 
 
@@ -53,11 +53,11 @@ typedef struct qb_conf {
 	struct syncenv *env;
 	char qb_xattr_key[QB_XATTR_KEY_MAX];
 	char *default_password;
+	inode_t *root_inode;
 } qb_conf_t;
 
 
 typedef struct qb_local {
-	CoroutineSynctask  cs;
 	call_frame_t      *frame; /* backpointer */
 	call_stub_t       *stub;
 	inode_t           *inode;
@@ -65,12 +65,14 @@ typedef struct qb_local {
 	char               fmt[QB_XATTR_VAL_MAX+1];
 	char               name[256];
 	synctask_fn_t      synctask_fn;
+	struct list_head   list;
 } qb_local_t;
 
 void qb_local_free (xlator_t *this, qb_local_t *local);
 int qb_coroutine (call_frame_t *frame, synctask_fn_t fn);
 inode_t *qb_inode_from_filename (const char *filename);
 int qb_inode_to_filename (inode_t *inode, char *filename, int size);
+int qb_format_extract (xlator_t *this, char *format, inode_t *inode);
 
 qb_inode_t *qb_inode_ctx_get (xlator_t *this, inode_t *inode);
 

@@ -2,9 +2,6 @@
 
 . $(dirname $0)/../include.rc
 
-cleanup;
-
-
 function execute()
 {
         cmd=$1
@@ -14,11 +11,10 @@ function execute()
 
 function bd_cleanup()
 {
-        execute vgremove -f ${VG}
+        execute vgremove -f ${V0}
         execute pvremove ${ld}
         execute losetup -d ${ld}
         execute rm ${BD_DISK}
-        execute $CLI volume delete ${V0}
         cleanup
 }
 
@@ -31,8 +27,9 @@ function check()
         fi
 }
 
-VG=__bd_vg
 SIZE=256 #in MB
+
+bd_cleanup;
 
 ## Configure environment needed for BD backend volumes
 ## Create a file with configured size and
@@ -56,23 +53,28 @@ function configure()
     check losetup ${BD_DISK}
     execute pvcreate -f ${ld}
     check pvcreate ${ld}
-    execute vgcreate ${VG} ${ld}
-    check vgcreate ${VG}
+    execute vgcreate ${V0} ${ld}
+    check vgcreate ${V0}
+    execute lvcreate --thin ${V0}/pool --size 128M
 }
 
 function volinfo_field()
 {
     local vol=$1;
     local field=$2;
-
     $CLI volume info $vol | grep "^$field: " | sed 's/.*: //';
+}
+
+function volume_type()
+{
+        getfattr -n volume.type $M0/. --only-values --absolute-names -e text
 }
 
 TEST glusterd
 TEST pidof glusterd
 configure
 
-TEST $CLI volume create $V0 device vg ${H0}:/${VG}
+TEST $CLI volume create $V0 ${H0}:/$B0/$V0?${V0}
 EXPECT "$V0" volinfo_field $V0 'Volume Name';
 EXPECT 'Created' volinfo_field $V0 'Status';
 
@@ -80,38 +82,50 @@ EXPECT 'Created' volinfo_field $V0 'Status';
 TEST $CLI volume start $V0;
 EXPECT 'Started' volinfo_field $V0 'Status'
 
-TEST glusterfs --volfile-server=$H0 --volfile-id=$V0 $M0
+TEST glusterfs --volfile-id=/$V0 --volfile-server=$H0 $M0
+EXPECT '1' volume_type
 
-## Create file (LV)
-TEST touch $M0/$VG/lv1
-TEST stat /dev/$VG/lv1
+## Create posix file
+TEST touch $M0/posix
 
-TEST rm $M0/$VG/lv1;
-TEST ! stat $M0/$VG/lv1;
+TEST touch $M0/lv
+gfid=`getfattr -n glusterfs.gfid.string $M0/lv --only-values --absolute-names`
+TEST setfattr -n user.glusterfs.bd -v "lv:4MB" $M0/lv
+# Check if LV is created
+TEST stat /dev/$V0/${gfid}
 
-TEST touch $M0/$VG/lv1
-TEST truncate -s64M $M0/$VG/lv1
+## Create filesystem
+sleep 1
+TEST mkfs.ext4 -qF $M0/lv
+# Cloning
+TEST touch $M0/lv_clone
+gfid=`getfattr -n glusterfs.gfid.string $M0/lv_clone --only-values --absolute-names`
+TEST setfattr -n clone -v ${gfid} $M0/lv
+TEST stat /dev/$V0/${gfid}
 
-TEST ln $M0/$VG/lv1 $M0/$VG/lv2
-TEST stat /dev/$VG/lv2
+sleep 1
+## Check mounting
+TEST mount -o loop $M0/lv $M1
+umount $M1
 
-rm $M0/$VG/lv1
-rm $M0/$VG/lv2
+# Snapshot
+TEST touch $M0/lv_sn
+gfid=`getfattr -n glusterfs.gfid.string $M0/lv_sn --only-values --absolute-names`
+TEST setfattr -n snapshot -v ${gfid} $M0/lv
+TEST stat /dev/$V0/${gfid}
 
-TEST $CLI bd create $V0:/$VG/lv1 4MB
-TEST stat /dev/$VG/lv1
+# Merge
+sleep 1
+TEST setfattr -n merge -v "$M0/lv_sn" $M0/lv_sn
+TEST ! stat $M0/lv_sn
+TEST ! stat /dev/$V0/${gfid}
 
-TEST $CLI bd clone $V0:/$VG/lv1 lv2
-TEST stat /dev/$VG/lv2
-TEST $CLI bd delete  $V0:/$VG/lv2
 
-TEST $CLI bd snapshot $V0:/$VG/lv1 lv2 1
-TEST stat /dev/$VG/lv2
-rm $M0/$VG/lv2
-rm $M0/$VG/lv1
+rm $M0/* -f
 
 TEST umount $M0
 TEST $CLI volume stop ${V0}
+EXPECT 'Stopped' volinfo_field $V0 'Status';
 TEST $CLI volume delete ${V0}
 
 bd_cleanup

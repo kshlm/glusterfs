@@ -1,14 +1,13 @@
-
 if ENABLE_BD_XLATOR
-xlator_LTLIBRARIES = bd_map.la
+xlator_LTLIBRARIES = bd.la
 xlatordir = $(libdir)/glusterfs/$(PACKAGE_VERSION)/xlator/storage
 
-bd_map_la_LDFLAGS = -module -avoid-version
+bd_la_LDFLAGS = -module -avoid-version
 LIBBD = -llvm2app -lrt
-bd_map_la_SOURCES = bd_map.c bd_map_help.c
-bd_map_la_LIBADD = $(top_builddir)/libglusterfs/src/libglusterfs.la $(LIBBD)
+bd_la_SOURCES = bd.c bd-helper.c bd-aio.c
+bd_la_LIBADD = $(top_builddir)/libglusterfs/src/libglusterfs.la $(LIBBD) $(LIBAIO)
 
-noinst_HEADERS = bd_map.h bd_map_help.h
+noinst_HEADERS = bd.h bd-aio.h
 
 AM_CPPFLAGS = $(GF_CPPFLAGS) -I$(top_srcdir)/libglusterfs/src \
             -I$(top_srcdir)/rpc/xdr/src \

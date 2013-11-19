@@ -19,6 +19,7 @@
 #include "globals.h"
 #include "xlator.h"
 #include "mem-pool.h"
+#include "syncop.h"
 
 const char *gf_fop_list[GF_FOP_MAXVALUE] = {
         [GF_FOP_NULL]        = "NULL",
@@ -69,6 +70,7 @@ const char *gf_fop_list[GF_FOP_MAXVALUE] = {
         [GF_FOP_FREMOVEXATTR]= "FREMOVEXATTR",
 	[GF_FOP_FALLOCATE]   = "FALLOCATE",
 	[GF_FOP_DISCARD]     = "DISCARD",
+        [GF_FOP_ZEROFILL]     = "ZEROFILL",
 };
 /* THIS */
 
@@ -164,6 +166,54 @@ glusterfs_this_set (xlator_t *this)
         return 0;
 }
 
+/* SYNCOPCTX */
+static pthread_key_t syncopctx_key;
+
+static void
+syncopctx_key_destroy (void *ptr)
+{
+	struct syncopctx *opctx = ptr;
+
+	if (opctx) {
+		if (opctx->groups)
+			GF_FREE (opctx->groups);
+
+		GF_FREE (opctx);
+	}
+
+	return;
+}
+
+void *
+syncopctx_getctx ()
+{
+	void *opctx = NULL;
+
+	opctx = pthread_getspecific (syncopctx_key);
+
+	return opctx;
+}
+
+int
+syncopctx_setctx (void *ctx)
+{
+	int ret = 0;
+
+	ret = pthread_setspecific (syncopctx_key, ctx);
+
+	return ret;
+}
+
+static int
+syncopctx_init (void)
+{
+	int ret;
+
+	ret = pthread_key_create (&syncopctx_key, syncopctx_key_destroy);
+
+	return ret;
+}
+
 /* SYNCTASK */
 
 int
@@ -175,7 +225,6 @@ synctask_init ()
 
         return ret;
 }
-
 
 void *
 synctask_get ()
@@ -298,6 +347,13 @@ glusterfs_globals_init (glusterfs_ctx_t *ctx)
         if (ret) {
                 gf_log ("", GF_LOG_CRITICAL,
                         "ERROR: glusterfs synctask init failed");
+                goto out;
+        }
+
+        ret = syncopctx_init ();
+        if (ret) {
+                gf_log ("", GF_LOG_CRITICAL,
+                        "ERROR: glusterfs syncopctx init failed");
                 goto out;
         }
 out:

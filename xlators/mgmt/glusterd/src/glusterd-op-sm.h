@@ -32,6 +32,8 @@
 #include "protocol-common.h"
 
 #define GD_VOLUME_NAME_MAX 256
+#define GD_OP_PROTECTED    (0x02)
+#define GD_OP_UNPROTECTED  (0x04)
 
 typedef enum glusterd_op_sm_state_ {
         GD_OP_STATE_DEFAULT = 0,
@@ -162,6 +164,12 @@ typedef struct glusterd_gsync_status_temp {
         glusterd_volinfo_t *volinfo;
         char *node;
 }glusterd_gsync_status_temp_t;
+
+typedef enum cli_cmd_type_ {
+        PER_REPLICA,
+        ALL_REPLICA,
+ } cli_cmd_type;
+
 int
 glusterd_op_sm_new_event (glusterd_op_sm_event_type_t event_type,
                           glusterd_op_sm_event_t **new_event);
@@ -278,4 +286,7 @@ glusterd_check_gsync_running (glusterd_volinfo_t *volinfo, gf_boolean_t *flag);
 int
 glusterd_defrag_volume_node_rsp (dict_t *req_dict, dict_t *rsp_dict,
                                  dict_t *op_ctx);
+int
+glusterd_is_valid_vg (glusterd_brickinfo_t *brick, int check_tag, char *msg);
+
 #endif

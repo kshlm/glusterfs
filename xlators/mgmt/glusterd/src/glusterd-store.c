@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2007-2012 Red Hat, Inc. <http://www.redhat.com>
+   Copyright (c) 2007-2013 Red Hat, Inc. <http://www.redhat.com>
    This file is part of GlusterFS.
 
    This file is licensed to you under your choice of the GNU Lesser
@@ -241,6 +241,11 @@ glusterd_store_brickinfo_write (int fd, glusterd_brickinfo_t *brickinfo)
         if (ret)
                 goto out;
 
+        if (!brickinfo->vg[0])
+                goto out;
+
+        ret = gf_store_save_value (fd, GLUSTERD_STORE_KEY_BRICK_VGNAME,
+                                         brickinfo->vg);
 out:
         gf_log (THIS->name, GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
@@ -571,9 +576,19 @@ glusterd_volume_exclude_options_write (int fd, glusterd_volinfo_t *volinfo)
                         goto out;
         }
 
-        if (volinfo->backend == GD_VOL_BK_BD)  {
-                snprintf (buf, sizeof (buf), "%d", volinfo->backend);
-                ret = gf_store_save_value (fd, GLUSTERD_STORE_KEY_VOL_BACKEND,
+        snprintf (buf, sizeof (buf), "%d", volinfo->op_version);
+        ret = gf_store_save_value (fd, GLUSTERD_STORE_KEY_VOL_OP_VERSION, buf);
+        if (ret)
+                goto out;
+
+        snprintf (buf, sizeof (buf), "%d", volinfo->client_op_version);
+        ret = gf_store_save_value (fd, GLUSTERD_STORE_KEY_VOL_CLIENT_OP_VERSION,
+                                   buf);
+        if (ret)
+                goto out;
+        if (volinfo->caps) {
+                snprintf (buf, sizeof (buf), "%d", volinfo->caps);
+                ret = gf_store_save_value (fd, GLUSTERD_STORE_KEY_VOL_CAPS,
                                            buf);
                 if (ret)
                         goto out;
@@ -1502,7 +1517,7 @@ glusterd_store_retrieve_bricks (glusterd_volinfo_t *volinfo)
                                     strlen (GLUSTERD_STORE_KEY_BRICK_PORT))) {
                                 gf_string2int (value, &brickinfo->port);
 
-                                if (brickinfo->port < GF_IANA_PRIV_PORTS_START){
+                                if (brickinfo->port < priv->base_port) {
                                         /* This is required to adhere to the
                                            IANA standards */
                                         brickinfo->port = 0;
@@ -1518,8 +1533,7 @@ glusterd_store_retrieve_bricks (glusterd_volinfo_t *volinfo)
                                     strlen (GLUSTERD_STORE_KEY_BRICK_RDMA_PORT))) {
                                 gf_string2int (value, &brickinfo->rdma_port);
 
-                                if (brickinfo->rdma_port <
-                                    GF_IANA_PRIV_PORTS_START){
+                                if (brickinfo->rdma_port < priv->base_port) {
                                         /* This is required to adhere to the
                                            IANA standards */
                                         brickinfo->rdma_port = 0;
@@ -1536,6 +1550,11 @@ glusterd_store_retrieve_bricks (glusterd_volinfo_t *volinfo)
                         } else if (!strncmp (key, GLUSTERD_STORE_KEY_BRICK_DECOMMISSIONED,
                                              strlen (GLUSTERD_STORE_KEY_BRICK_DECOMMISSIONED))) {
                                 gf_string2int (value, &brickinfo->decommissioned);
+                        } else if (!strncmp (key,
+                                    GLUSTERD_STORE_KEY_BRICK_VGNAME,
+                                    strlen (GLUSTERD_STORE_KEY_BRICK_VGNAME))) {
+                                strncpy (brickinfo->vg, value,
+                                         sizeof (brickinfo->vg));
                         } else {
                                 gf_log ("", GF_LOG_ERROR, "Unknown key: %s",
                                         key);
@@ -1765,7 +1784,6 @@ glusterd_store_retrieve_volume (char    *volname)
         gf_store_op_errno_t       op_errno              = GD_STORE_SUCCESS;
 
         ret = glusterd_volinfo_new (&volinfo);
-
         if (ret)
                 goto out;
 
@@ -1778,12 +1796,10 @@ glusterd_store_retrieve_volume (char    *volname)
                   GLUSTERD_VOLUME_INFO_FILE);
 
         ret = gf_store_handle_retrieve (path, &volinfo->shandle);
-
         if (ret)
                 goto out;
 
         ret = gf_store_iter_new (volinfo->shandle, &iter);
-
         if (ret)
                 goto out;
 
@@ -1851,9 +1867,15 @@ glusterd_store_retrieve_volume (char    *volname)
                         gf_log ("", GF_LOG_DEBUG, "Parsed as "GEOREP" "
                                 " slave:key=%s,value:%s", key, value);
 
-                } else if (!strncmp (key, GLUSTERD_STORE_KEY_VOL_BACKEND,
-                                     strlen (GLUSTERD_STORE_KEY_VOL_BACKEND))) {
-                        volinfo->backend = atoi (value);
+                } else if (!strncmp (key, GLUSTERD_STORE_KEY_VOL_OP_VERSION,
+                                strlen (GLUSTERD_STORE_KEY_VOL_OP_VERSION))) {
+                        volinfo->op_version = atoi (value);
+                } else if (!strncmp (key, GLUSTERD_STORE_KEY_VOL_CLIENT_OP_VERSION,
+                                strlen (GLUSTERD_STORE_KEY_VOL_CLIENT_OP_VERSION))) {
+                        volinfo->client_op_version = atoi (value);
+                } else if (!strncmp (key, GLUSTERD_STORE_KEY_VOL_CAPS,
+                                     strlen (GLUSTERD_STORE_KEY_VOL_CAPS))) {
+                        volinfo->caps = atoi (value);
                 } else {
 
                         if (is_key_glusterd_hooks_friendly (key)) {
@@ -1932,6 +1954,9 @@ glusterd_store_retrieve_volume (char    *volname)
                 volinfo->subvol_count = (volinfo->brick_count /
                                          volinfo->dist_leaf_count);
 
+                /* Only calculate volume op-versions if they are not found */
+                if (!volinfo->op_version && !volinfo->client_op_version)
+                        gd_update_volume_op_versions (volinfo);
         }
 
         if (op_errno != GD_STORE_EOF)
@@ -1950,7 +1975,6 @@ glusterd_store_retrieve_volume (char    *volname)
         if (ret)
                 goto out;
 
-        gd_update_volume_op_versions (volinfo);
 
         list_add_tail (&volinfo->vol_list, &priv->volumes);
 
