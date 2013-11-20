@@ -111,7 +111,7 @@ cli_sync_cmd_submit (void *req, struct syncargs *args, rpc_clnt_prog_t *prog,
 {
         int        ret = -1;
         gf_timer_t *timer = NULL;
-        struct timeval time = {0,};
+        struct timespec time = {0,};
 
         __yawn (args);
         ret = _cli_sync_cmd_submit (req, args, prog, procnum, cbkfn, xdrproc);
