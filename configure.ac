@@ -254,6 +254,7 @@ AC_CHECK_LIB([pthread], [pthread_mutex_init], , AC_MSG_ERROR([Posix threads libr
 
 AC_CHECK_FUNC([dlopen], [has_dlopen=yes], AC_CHECK_LIB([dl], [dlopen], , AC_MSG_ERROR([Dynamic linking library required to build glusterfs])))
 
+AC_CHECK_FUNC([gettext], [has_gettext=yes], AC_CHECK_LIB([intl], [gettext], , AC_MSG_ERROR([gettext support is required to build glusterfs])))
 
 AC_CHECK_HEADERS([sys/xattr.h])
 
@@ -801,6 +802,12 @@ AM_PATH_PYTHON()
 if echo $PYTHON_VERSION | grep ^2; then
   have_python2=yes
 fi
+saved_CFLAGS=$CFLAGS
+saved_CPPFLAGS=$CPPFLAGS
+saved_LDFLAGS=$LDFLAGS
+CFLAGS=`${PYTHON}-config --cflags`
+CPPFLAGS=$CFLAGS
+LDFLAGS="-L`${PYTHON}-config --prefix`/lib `${PYTHON}-config --ldflags`"
 AC_CHECK_HEADERS([python$PYTHON_VERSION/Python.h],[have_Python_h=yes],[])
 AC_ARG_ENABLE([glupy],
               AS_HELP_STRING([--enable-glupy],
@@ -809,6 +816,9 @@ case x$enable_glupy in
    xyes)
       if test "x$have_python2" = "xyes" -a "x$have_Python_h" = "xyes"; then
          BUILD_GLUPY=yes
+         saved_CFLAGS="$saved_CFLAGS $CFLAGS"
+         saved_CPPFLAGS="$saved_CPPFLAGS $CPPFLAGS"
+         saved_LDFLAGS="$saved_LDFLAGS $LDFLAGS"
       else
          AC_MSG_ERROR([glupy requires python-devel/python-dev package and python2.x])
       fi
@@ -818,6 +828,9 @@ case x$enable_glupy in
    *)
       if test "x$have_python2" = "xyes" -a "x$have_Python_h" = "xyes"; then
          BUILD_GLUPY=yes
+         saved_CFLAGS="$saved_CFLAGS $CFLAGS"
+         saved_CPPFLAGS="$saved_CPPFLAGS $CPPFLAGS"
+         saved_LDFLAGS="$saved_LDFLAGS $LDFLAGS"
       else
          AC_MSG_WARN([
         ---------------------------------------------------------------------------------
@@ -826,6 +839,9 @@ case x$enable_glupy in
       fi
       ;;
 esac
+CFLAGS=$saved_CFLAGS
+CPPFLAGS=$saved_CPPFLAGS
+LDFLAGS=$saved_LDFLAGS
 
 if test "x$BUILD_GLUPY" = "xyes"; then
    BUILD_PYTHON_INC=`$PYTHON -c "from distutils import sysconfig; print sysconfig.get_python_inc()"`
