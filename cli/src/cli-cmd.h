@@ -110,7 +110,7 @@ int cli_cmd_lock ();
 int cli_cmd_unlock ();
 
 int
-cli_cmd_submit (void *req, call_frame_t *frame,
+cli_cmd_submit (struct rpc_clnt *rpc, void *req, call_frame_t *frame,
                 rpc_clnt_prog_t *prog,
                 int procnum, struct iobref *iobref,
                 xlator_t *this, fop_cbk_fn_t cbkfn, xdrproc_t xdrproc);
@@ -119,7 +119,10 @@ gf_answer_t
 cli_cmd_get_confirmation (struct cli_state *state, const char *question);
 int cli_cmd_sent_status_get (int *status);
 
-#ifdef HAVE_BD_XLATOR
-int cli_cmd_bd_register (struct cli_state *state);
-#endif
+gf_boolean_t
+_limits_set_on_volume (char *volname);
+
+gf_boolean_t
+_quota_aux_mount_online (char *volname);
+
 #endif /* __CLI_CMD_H__ */

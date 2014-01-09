@@ -141,20 +141,18 @@ __glusterd_defrag_notify (struct rpc_clnt *rpc, void *mydata,
                 }
                 UNLOCK (&defrag->lock);
 
-                if (!glusterd_is_service_running (pidfile, NULL)) {
+                if (!gf_is_service_running (pidfile, NULL)) {
                         if (volinfo->rebal.defrag_status ==
                                                 GF_DEFRAG_STATUS_STARTED) {
                                 volinfo->rebal.defrag_status =
                                                    GF_DEFRAG_STATUS_FAILED;
-                        } else {
-                                volinfo->rebal.defrag_cmd = 0;
                         }
                  }
 
                 glusterd_store_perform_node_state_store (volinfo);
 
                 if (defrag->rpc) {
-                        rpc_clnt_unref (defrag->rpc);
+                        glusterd_rpc_clnt_unref (priv, defrag->rpc);
                         defrag->rpc = NULL;
                 }
                 if (defrag->cbk_fn)
@@ -166,6 +164,9 @@ __glusterd_defrag_notify (struct rpc_clnt *rpc, void *mydata,
                         rpc->conn.trans->name);
                 break;
         }
+        case RPC_CLNT_DESTROY:
+                glusterd_volinfo_unref (volinfo);
+                break;
         default:
                 gf_log ("", GF_LOG_TRACE,
                         "got some other RPC event %d", event);
@@ -197,7 +198,6 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
         char                   sockfile[PATH_MAX] = {0,};
         char                   pidfile[PATH_MAX] = {0,};
         char                   logfile[PATH_MAX] = {0,};
-        dict_t                 *options = NULL;
         char                   valgrind_logfile[PATH_MAX] = {0,};
 
         priv    = THIS->private;
@@ -219,6 +219,7 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
 
         defrag->cmd = cmd;
 
+        volinfo->rebal.defrag_cmd = cmd;
         volinfo->rebal.op = op;
 
         LOCK_INIT (&defrag->lock);
@@ -287,26 +288,10 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
 
         sleep (5);
 
-        /* Setting frame-timeout to 10mins (600seconds).
-         * Unix domain sockets ensures that the connection is reliable. The
-         * default timeout of 30mins used for unreliable network connections is
-         * too long for unix domain socket connections.
-         */
-        ret = rpc_transport_unix_options_build (&options, sockfile, 600);
-        if (ret) {
-                gf_log (THIS->name, GF_LOG_ERROR, "Unix options build failed");
-                goto out;
-        }
+        ret = glusterd_rebalance_rpc_create (volinfo);
 
-        synclock_unlock (&priv->big_lock);
-        ret = glusterd_rpc_create (&defrag->rpc, options,
-                                   glusterd_defrag_notify, volinfo);
-        synclock_lock (&priv->big_lock);
-        if (ret) {
-                gf_log (THIS->name, GF_LOG_ERROR, "RPC create failed");
-                goto out;
-        }
-
+        //FIXME: this cbk is passed as NULL in all occurrences. May be
+        //we never needed it.
         if (cbk)
                 defrag->cbk_fn = cbk;
 
@@ -317,28 +302,23 @@ out:
 
 
 int
-glusterd_rebalance_rpc_create (glusterd_volinfo_t *volinfo,
-                               glusterd_conf_t *priv, int cmd)
+glusterd_rebalance_rpc_create (glusterd_volinfo_t *volinfo)
 {
         dict_t                  *options = NULL;
         char                     sockfile[PATH_MAX] = {0,};
         int                      ret = -1;
-        glusterd_defrag_info_t  *defrag =  NULL;
+        glusterd_defrag_info_t  *defrag = volinfo->rebal.defrag;
+        glusterd_conf_t         *priv = THIS->private;
 
-        if (!volinfo->rebal.defrag)
-                volinfo->rebal.defrag =
-                        GF_CALLOC (1, sizeof (*volinfo->rebal.defrag),
-                                   gf_gld_mt_defrag_info);
-
-        if (!volinfo->rebal.defrag)
+        //rebalance process is not started
+        if (!defrag)
                 goto out;
 
-        defrag = volinfo->rebal.defrag;
-
-        defrag->cmd = cmd;
-
-        LOCK_INIT (&defrag->lock);
-
+        //rpc obj for rebalance process already in place.
+        if (defrag->rpc) {
+                ret = 0;
+                goto out;
+        }
         GLUSTERD_GET_DEFRAG_SOCK_FILE (sockfile, volinfo, priv);
 
         /* Setting frame-timeout to 10mins (600seconds).
@@ -352,6 +332,7 @@ glusterd_rebalance_rpc_create (glusterd_volinfo_t *volinfo,
                 goto out;
         }
 
+        glusterd_volinfo_ref (volinfo);
         synclock_unlock (&priv->big_lock);
         ret = glusterd_rpc_create (&defrag->rpc, options,
                                    glusterd_defrag_notify, volinfo);
@@ -657,6 +638,12 @@ glusterd_op_rebalance (dict_t *dict, char **op_errstr, dict_t *rsp_dict)
         case GF_DEFRAG_CMD_START:
         case GF_DEFRAG_CMD_START_LAYOUT_FIX:
         case GF_DEFRAG_CMD_START_FORCE:
+                /* Reset defrag status to 'NOT STARTED' whenever a
+                 * remove-brick/rebalance command is issued to remove
+                 * stale information from previous run.
+                 */
+                volinfo->rebal.defrag_status = GF_DEFRAG_STATUS_NOT_STARTED;
+
                 ret = dict_get_str (dict, GF_REBALANCE_TID_KEY, &task_id_str);
                 if (ret) {
                         gf_log (this->name, GF_LOG_DEBUG, "Missing rebalance "
@@ -666,9 +653,11 @@ glusterd_op_rebalance (dict_t *dict, char **op_errstr, dict_t *rsp_dict)
                         uuid_parse (task_id_str, volinfo->rebal.rebalance_id) ;
                         volinfo->rebal.op = GD_OP_REBALANCE;
                 }
+                if (!gd_should_i_start_rebalance (volinfo))
+                        break;
                 ret = glusterd_handle_defrag_start (volinfo, msg, sizeof (msg),
                                                     cmd, NULL, GD_OP_REBALANCE);
-                 break;
+                break;
         case GF_DEFRAG_CMD_STOP:
                 /* Clear task-id only on explicitly stopping rebalance.
                  * Also clear the stored operation, so it doesn't cause trouble

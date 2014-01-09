@@ -35,6 +35,7 @@
 #define GF_PRI_BLKSIZE     PRId32
 #define GF_PRI_SIZET       "zu"
 
+
 #if 0
 /* Syslog definitions :-) */
 #define LOG_EMERG   0           /* system is unusable */
@@ -59,6 +60,9 @@ typedef enum {
         GF_LOG_DEBUG,      /* internal errors */
         GF_LOG_TRACE,      /* full trace of operation */
 } gf_loglevel_t;
+
+#define DEFAULT_LOG_FILE_DIRECTORY            DATADIR "/log/glusterfs"
+#define DEFAULT_LOG_LEVEL                     GF_LOG_INFO
 
 typedef struct gf_log_handle_ {
         pthread_mutex_t  logfile_mutex;
@@ -148,6 +152,8 @@ int gf_cmd_log (const char *domain, const char *fmt, ...)
 int gf_cmd_log_init (const char *filename);
 
 void set_sys_log_level (gf_loglevel_t level);
+
+int gf_log_fini(void *data);
 
 #define GF_DEBUG(xl, format, args...)                           \
         gf_log ((xl)->name, GF_LOG_DEBUG, format, ##args)

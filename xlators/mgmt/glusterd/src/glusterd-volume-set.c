@@ -724,6 +724,34 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .flags      = OPT_FLAG_CLIENT_OPT
         },
 
+ 	/* Crypt xlator options */
+
+	{ .key         = "features.encryption",
+	  .voltype     = "encryption/crypt",
+	  .option      = "!feat",
+	  .value       = "off",
+	  .op_version  = 3,
+	  .description = "enable/disable client-side encryption for "
+                         "the volume.",
+	  .flags       = OPT_FLAG_CLIENT_OPT | OPT_FLAG_XLATOR_OPT
+	},
+
+        { .key         = "encryption.master-key",
+          .voltype     = "encryption/crypt",
+          .op_version  = 3,
+          .flags      = OPT_FLAG_CLIENT_OPT
+        },
+        { .key         = "encryption.data-key-size",
+          .voltype     = "encryption/crypt",
+          .op_version  = 3,
+          .flags      = OPT_FLAG_CLIENT_OPT
+        },
+        { .key         = "encryption.block-size",
+          .voltype     = "encryption/crypt",
+          .op_version  = 3,
+          .flags      = OPT_FLAG_CLIENT_OPT
+        },
+
         /* Client xlator options */
         { .key        = "network.frame-timeout",
           .voltype    = "protocol/client",
@@ -803,10 +831,26 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .option      = "root-squash",
           .op_version  = 2
         },
+        { .key         = "server.anonuid",
+          .voltype     = "protocol/server",
+          .option      = "anonuid",
+          .op_version  = 3
+        },
+        { .key         = "server.anongid",
+          .voltype     = "protocol/server",
+          .option      = "anongid",
+          .op_version  = 3
+        },
         { .key         = "server.statedump-path",
           .voltype     = "protocol/server",
           .option      = "statedump-path",
           .op_version  = 1
+        },
+        { .key         = "server.outstanding-rpc-limit",
+          .voltype     = "protocol/server",
+          .option      = "rpc.outstanding-rpc-limit",
+          .type        = GLOBAL_DOC,
+          .op_version  = 3
         },
         { .key         = "features.lock-heal",
           .voltype     = "protocol/server",
@@ -964,30 +1008,96 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .flags       = OPT_FLAG_CLIENT_OPT | OPT_FLAG_XLATOR_OPT
         },
 
-        /* Quota xlator options */
-        { .key        = VKEY_FEATURES_LIMIT_USAGE,
-          .voltype    = "features/quota",
-          .option     = "limit-set",
-          .type       = NO_DOC,
-          .op_version = 1,
-          .flags      = OPT_FLAG_CLIENT_OPT
-        },
-        { .key         = "features.quota-timeout",
-          .voltype     = "features/quota",
-          .option      = "timeout",
-          .value       = "0",
-          .op_version  = 1,
-          .validate_fn = validate_quota,
-          .flags       = OPT_FLAG_CLIENT_OPT
-        },
-        { .key         = "features.quota-deem-statfs",
-          .voltype     = "features/quota",
-          .option      = "deem-statfs",
+#ifdef HAVE_LIB_Z
+        /* Compressor-decompressor xlator options
+         * defaults used from xlator/feature/compress/src/cdc.h
+         */
+        { .key         = "features.compress",
+          .voltype     = "features/cdc",
+          .option      = "!compress",
           .value       = "off",
-          .type        = DOC,
-          .op_version  = 3,
-          .validate_fn = validate_quota,
-          .flags       = OPT_FLAG_CLIENT_OPT
+          .type        = NO_DOC,
+          .op_version  = 2,
+          .description = "enable/disable compression translator"
+        },
+        { .key         = "compress.mode",
+          .voltype     = "features/cdc",
+          .type        = NO_DOC,
+          .op_version  = 2
+        },
+        { .key         = "compress.window-size",
+          .voltype     = "features/cdc",
+          .type        = NO_DOC,
+          .op_version  = 2
+        },
+        { .key         = "compress.mem-level",
+          .voltype     = "features/cdc",
+          .type        = NO_DOC,
+          .op_version  = 2
+        },
+        { .key         = "compress.min-size",
+          .voltype     = "features/cdc",
+          .type        = NO_DOC,
+          .op_version  = 2
+        },
+        { .key         = "compress.compression-level",
+          .voltype     = "features/cdc",
+          .type        = NO_DOC,
+          .op_version  = 2
+        },
+        { .key         = "compress.debug",
+          .voltype     = "features/cdc",
+          .type        = NO_DOC,
+          .op_version  = 2
+        },
+ #endif
+
+        /* Quota xlator options */
+        { .key           = VKEY_FEATURES_LIMIT_USAGE,
+          .voltype       = "features/quota",
+          .option        = "limit-set",
+          .type          = NO_DOC,
+          .op_version    = 1,
+        },
+        {
+          .key           = "features.quota-timeout",
+          .voltype       = "features/quota",
+          .option        = "timeout",
+          .value         = "0",
+          .op_version    = 1,
+          .validate_fn   = validate_quota,
+        },
+        { .key           = "features.default-soft-limit",
+          .voltype       = "features/quota",
+          .option        = "default-soft-limit",
+          .type          = NO_DOC,
+          .op_version    = 3,
+        },
+        { .key           = "features.soft-timeout",
+          .voltype       = "features/quota",
+          .option        = "soft-timeout",
+          .type          = NO_DOC,
+          .op_version    = 3,
+        },
+        { .key           = "features.hard-timeout",
+          .voltype       = "features/quota",
+          .option        = "hard-timeout",
+          .type          = NO_DOC,
+          .op_version    = 3,
+        },
+        { .key           = "features.alert-time",
+          .voltype       = "features/quota",
+          .option        = "alert-time",
+          .type          = NO_DOC,
+          .op_version    = 3,
+        },
+        { .key           = "features.quota-deem-statfs",
+          .voltype       = "features/quota",
+          .option        = "deem-statfs",
+          .value         = "off",
+          .type          = DOC,
+          .op_version    = 2,
+          .validate_fn   = validate_quota,
         },
 
         /* Marker xlator options */
@@ -1142,6 +1252,12 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .type        = GLOBAL_DOC,
           .op_version  = 1
         },
+        { .key         = "nfs.outstanding-rpc-limit",
+          .voltype     = "nfs/server",
+          .option      = "rpc.outstanding-rpc-limit",
+          .type        = GLOBAL_DOC,
+          .op_version  = 3
+        },
         { .key         = "nfs.port",
           .voltype     = "nfs/server",
           .option      = "nfs.port",
@@ -1248,6 +1364,24 @@ struct volopt_map_entry glusterd_volopt_map[] = {
           .type        = GLOBAL_DOC,
           .op_version  = 3
         },
+        { .key         = "nfs.read-size",
+          .voltype     = "nfs/server",
+          .option      = "nfs3.read-size",
+          .type        = GLOBAL_DOC,
+          .op_version  = 3
+        },
+        { .key         = "nfs.write-size",
+          .voltype     = "nfs/server",
+          .option      = "nfs3.write-size",
+          .type        = GLOBAL_DOC,
+          .op_version  = 3
+        },
+        { .key         = "nfs.readdir-size",
+          .voltype     = "nfs/server",
+          .option      = "nfs3.readdir-size",
+          .type        = GLOBAL_DOC,
+          .op_version  = 3
+        },
 
         /* Other options which don't fit any place above */
         { .key        = "features.read-only",
@@ -1292,6 +1426,10 @@ struct volopt_map_entry glusterd_volopt_map[] = {
         },
         { .key         = "storage.health-check-interval",
           .voltype     = "storage/posix",
+          .op_version  = 3
+        },
+        { .key         = "storage.bd-aio",
+          .voltype     = "storage/bd",
           .op_version  = 3
         },
         { .key        = "config.memory-accounting",

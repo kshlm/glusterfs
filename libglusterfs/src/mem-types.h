@@ -115,7 +115,11 @@ enum gf_common_mem_types_ {
         gf_common_mt_client_ctx           = 99,
         gf_common_mt_lock_table           = 100,
         gf_common_mt_locker               = 101,
-        gf_common_mt_zmq_private_t        = 102,
-        gf_common_mt_end                  = 102 
+        gf_common_mt_auxgids              = 102,
+        gf_common_mt_syncopctx            = 103,
+        gf_common_mt_iobrefs              = 104,
+        gf_common_mt_gsync_status_t       = 105,
+        gf_common_mt_zmq_private_t        = 106,
+        gf_common_mt_end                  = 107
 };
 #endif

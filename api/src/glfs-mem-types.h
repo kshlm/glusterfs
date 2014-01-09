@@ -16,14 +16,16 @@
 #define GF_MEM_TYPE_START (gf_common_mt_end + 1)
 
 enum glfs_mem_types_ {
-        glfs_mt_glfs_t,
+        glfs_mt_glfs_t = GF_MEM_TYPE_START,
         glfs_mt_call_pool_t,
         glfs_mt_xlator_t,
 	glfs_mt_glfs_fd_t,
 	glfs_mt_glfs_io_t,
 	glfs_mt_volfile_t,
 	glfs_mt_xlator_cmdline_option_t,
-        glfs_mt_end
+	glfs_mt_glfs_object_t,
+	glfs_mt_readdirbuf_t,
+	glfs_mt_end
 
 };
 #endif

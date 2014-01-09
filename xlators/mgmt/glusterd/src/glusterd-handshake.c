@@ -244,16 +244,22 @@ __server_getspec (rpcsvc_request_t *req)
         }
 
         trans = req->trans;
+        /* addrstr will be empty for cli socket connections */
         ret = rpcsvc_transport_peername (trans, (char *)&addrstr,
                                          sizeof (addrstr));
         if (ret)
                 goto fail;
 
-        tmp = strrchr (addrstr, ':');
-        *tmp = '\0';
+        tmp  = strrchr (addrstr, ':');
+        if (tmp)
+                *tmp = '\0';
 
-        /* we trust the local admin */
-        if (gf_is_local_addr (addrstr)) {
+        /* The trusted volfiles are given to the glusterd owned process like NFS
+         * server, self-heal daemon etc., so that they are not inadvertently
+         * blocked by a auth.{allow,reject} setting. The trusted volfile is not
+         * meant for external users.
+         */
+        if (strlen (addrstr) && gf_is_local_addr (addrstr)) {
 
                 ret = build_volfile_path (volume, filename,
                                           sizeof (filename),
@@ -408,12 +414,16 @@ gd_validate_cluster_op_version (xlator_t *this, int cluster_op_version,
                 goto out;
         }
 
-        if (cluster_op_version < conf->op_version) {
+        /* The peer can only reduce its op-version when it doesn't have any
+         * volumes. Reducing op-version when it already contains volumes can
+         * lead to inconsistencies in the cluster
+         */
+        if ((cluster_op_version < conf->op_version) &&
+            !list_empty (&conf->volumes)) {
                 gf_log (this->name, GF_LOG_ERROR,
-                        "operating version %d is less than the currently "
-                        "running version (%d) on the machine (as per peer "
-                        "request from %s)", cluster_op_version,
-                        conf->op_version, peerid);
+                        "cannot reduce operating version to %d from current "
+                        "version %d as volumes exist (as per peer request from "
+                        "%s)", cluster_op_version, conf->op_version, peerid);
                 goto out;
         }
 
@@ -596,6 +606,19 @@ struct rpcsvc_program gluster_handshake_prog = {
         .numactors = GF_HNDSK_MAXVALUE,
 };
 
+/* A minimal RPC program just for the cli getspec command */
+rpcsvc_actor_t gluster_cli_getspec_actors[] = {
+        [GF_HNDSK_GETSPEC]      = {"GETSPEC",     GF_HNDSK_GETSPEC,      server_getspec,      NULL, 0, DRC_NA},
+};
+
+struct rpcsvc_program gluster_cli_getspec_prog = {
+        .progname  = "Gluster Handshake (CLI Getspec)",
+        .prognum   = GLUSTER_HNDSK_PROGRAM,
+        .progver   = GLUSTER_HNDSK_VERSION,
+        .actors    = gluster_cli_getspec_actors,
+        .numactors = GF_HNDSK_MAXVALUE,
+};
+
 
 char *glusterd_dump_proc[GF_DUMP_MAXVALUE] = {
         [GF_DUMP_NULL] = "NULL",
@@ -728,16 +751,6 @@ gd_validate_peer_op_version (xlator_t *this, glusterd_peerinfo_t *peerinfo,
         if ((peer_max_op_version < conf->op_version) ||
             (peer_min_op_version > conf->op_version)) {
                 ret = gf_asprintf (errstr, "Peer %s does not support required "
-                                   "op-version", peerinfo->hostname);
-                ret = -1;
-                goto out;
-        }
-
-        /* If peer is already operating at a higher op_version reject it.
-         * Cluster cannot be moved to higher op_version to accomodate a peer.
-         */
-        if (peer_op_version > conf->op_version) {
-                ret = gf_asprintf (errstr, "Peer %s is already at a higher "
                                    "op-version", peerinfo->hostname);
                 ret = -1;
                 goto out;

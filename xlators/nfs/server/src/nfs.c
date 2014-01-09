@@ -2,19 +2,10 @@
   Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 /* This is the primary translator source for NFS.
@@ -54,6 +45,194 @@
 /* TODO: DATADIR should be based on configure's $(localstatedir) */
 #define DATADIR                         "/var/lib/glusterd"
 #define NFS_DATADIR                     DATADIR "/nfs"
+
+/* Forward declaration */
+int nfs_add_initer (struct list_head *list, nfs_version_initer_t init);
+
+static int
+nfs_init_version (xlator_t *this, nfs_version_initer_t init)
+{
+        int                       ret       = -1;
+        struct nfs_initer_list    *version  = NULL;
+        struct nfs_initer_list    *tmp      = NULL;
+        rpcsvc_program_t          *prog     = NULL;
+        struct list_head          *versions = NULL;
+        struct nfs_state          *nfs      = NULL;
+        gf_boolean_t              found     = _gf_false;
+
+        if ((!this) || (!this->private) || (!init))
+                return (-1);
+
+        nfs = (struct nfs_state *)this->private;
+
+        ret = nfs_add_initer (&nfs->versions, init);
+        if (ret == -1) {
+                gf_log (GF_NFS, GF_LOG_ERROR,
+                                "Failed to add protocol initializer");
+                goto err;
+        }
+
+        versions = &nfs->versions;
+        list_for_each_entry_safe (version, tmp, versions, list) {
+                prog = version->program;
+                if (version->init == init) {
+                        prog = init(this);
+                        if (!prog) {
+                                ret = -1;
+                                goto err;
+                        }
+                        version->program = prog;
+                        found = _gf_true;
+                        break;
+                }
+        }
+
+        /* program not added */
+        if (!found) {
+                gf_log (GF_NFS, GF_LOG_ERROR,
+                                "Program: %s NOT found", prog->progname);
+                goto err;
+        }
+
+        /* Check if nfs.port is configured */
+        if (nfs->override_portnum)
+                prog->progport = nfs->override_portnum;
+
+        gf_log (GF_NFS, GF_LOG_DEBUG, "Starting program: %s", prog->progname);
+
+        ret = rpcsvc_program_register (nfs->rpcsvc, prog);
+        if (ret == -1) {
+                gf_log (GF_NFS, GF_LOG_ERROR, "Program: %s init failed",
+                                                      prog->progname);
+                goto err;
+        }
+
+        /* Registration with portmapper is disabled, Nothing to do */
+        if (!nfs->register_portmap)
+                goto err;
+
+        ret = rpcsvc_program_register_portmap (prog, prog->progport);
+        if (ret == -1) {
+                gf_log (GF_NFS, GF_LOG_ERROR,
+                                "Program  %s registration failed",
+                                prog->progname);
+                goto err;
+        }
+        ret = 0; /* All well */
+err:
+        return ret;
+}
+
+static int
+nfs_deinit_version (struct nfs_state *nfs, nfs_version_initer_t init)
+{
+        int                       ret       = -1;
+        struct nfs_initer_list    *version  = NULL;
+        struct nfs_initer_list    *tmp      = NULL;
+        rpcsvc_program_t          *prog     = NULL;
+        struct list_head          *versions = NULL;
+
+        if ((!nfs) || (!init))
+                return (-1);
+
+        versions = &nfs->versions;
+        list_for_each_entry_safe (version, tmp, versions, list) {
+                prog = version->program;
+                if (version->init == init) {
+                        prog = version->program;
+                        ret = rpcsvc_program_unregister (nfs->rpcsvc, prog);
+                        if (ret != 0)
+                                return (-1);
+                        list_del (&version->list);
+                        GF_FREE (version);
+                        return (0);
+                }
+        }
+
+        return (-1);
+}
+
+static int
+nfs_reconfigure_acl3 (xlator_t *this)
+{
+        struct nfs_state          *nfs     = NULL;
+
+        if ((!this) || (!this->private))
+                return (-1);
+
+        nfs = (struct nfs_state *)this->private;
+
+        /* ACL is enabled */
+        if (nfs->enable_acl)
+                return nfs_init_version (this, acl3svc_init);
+
+        /* ACL is disabled */
+        return nfs_deinit_version (nfs, acl3svc_init);
+}
+
+static int
+nfs_reconfigure_nlm4 (xlator_t *this)
+{
+        struct nfs_state          *nfs     = NULL;
+
+        if ((!this) || (!this->private))
+                return (-1);
+
+        nfs = (struct nfs_state *)this->private;
+
+        /* NLM is enabled */
+        if (nfs->enable_nlm)
+                return nfs_init_version (this, nlm4svc_init);
+
+        /* NLM is disabled */
+        return nfs_deinit_version (nfs, nlm4svc_init);
+}
+
+static int
+nfs_program_register_portmap_all (struct nfs_state *nfs)
+{
+        struct list_head                *versions = NULL;
+        struct nfs_initer_list          *version = NULL;
+        struct nfs_initer_list          *tmp = NULL;
+        rpcsvc_program_t                *prog = NULL;
+
+        if (nfs == NULL)
+                return (-1);
+
+        versions = &nfs->versions;
+        list_for_each_entry_safe (version, tmp, versions, list) {
+                prog = version->program;
+                if (prog == NULL)
+                        continue;
+                if (nfs->override_portnum)
+                        prog->progport = nfs->override_portnum;
+                (void) rpcsvc_program_register_portmap (prog, prog->progport);
+        }
+
+        return (0);
+}
+
+static int
+nfs_program_unregister_portmap_all (struct nfs_state *nfs)
+{
+        struct list_head                *versions = NULL;
+        struct nfs_initer_list          *version = NULL;
+        struct nfs_initer_list          *tmp = NULL;
+        rpcsvc_program_t                *prog = NULL;
+
+        if (nfs == NULL)
+                return (-1);
+
+        versions = &nfs->versions;
+        list_for_each_entry_safe (version, tmp, versions, list) {
+                prog = version->program;
+                if (prog == NULL)
+                        continue;
+                (void) rpcsvc_program_unregister_portmap (prog);
+        }
+
+        return (0);
+}
 
 /* Every NFS version must call this function with the init function
  * for its particular version.
@@ -131,7 +310,7 @@ nfs_init_versions (struct nfs_state *nfs, xlator_t *this)
                         ret = -1;
                         goto err;
                 }
-//                prog->actorxl = this;
+
                 version->program = prog;
                 if (nfs->override_portnum)
                         prog->progport = nfs->override_portnum;
@@ -140,17 +319,21 @@ nfs_init_versions (struct nfs_state *nfs, xlator_t *this)
 
                 ret = rpcsvc_program_register (nfs->rpcsvc, prog);
                 if (ret == -1) {
-                        gf_log (GF_NFS, GF_LOG_ERROR, "Program init failed");
+                        gf_log (GF_NFS, GF_LOG_ERROR, "Program: %s init failed",
+                                                      prog->progname);
                         goto err;
                 }
-                if (rpcsvc_register_portmap_enabled(nfs->rpcsvc)) {
+                if (nfs->register_portmap) {
                         ret = rpcsvc_program_register_portmap (prog,
                                                                prog->progport);
                         if (ret == -1) {
-                                gf_log (GF_NFS, GF_LOG_ERROR, "Program registration failed");
+                                gf_log (GF_NFS, GF_LOG_ERROR,
+                                        "Program  %s registration failed",
+                                        prog->progname);
                                 goto err;
                         }
                 }
+
         }
 
         ret = 0;
@@ -167,22 +350,22 @@ nfs_add_all_initiators (struct nfs_state *nfs)
         /* Add the initializers for all versions. */
         ret = nfs_add_initer (&nfs->versions, mnt3svc_init);
         if (ret == -1) {
-                gf_log (GF_NFS, GF_LOG_ERROR, "Failed to add protocol"
-                        " initializer");
+                gf_log (GF_NFS, GF_LOG_ERROR, "Failed to add "
+                                "MOUNT3 protocol initializer");
                 goto ret;
         }
 
         ret = nfs_add_initer (&nfs->versions, mnt1svc_init);
         if (ret == -1) {
-                gf_log (GF_NFS, GF_LOG_ERROR, "Failed to add protocol"
-                        " initializer");
+                gf_log (GF_NFS, GF_LOG_ERROR, "Failed to add "
+                                "MOUNT1 protocol initializer");
                 goto ret;
         }
 
         ret = nfs_add_initer (&nfs->versions, nfs3svc_init);
         if (ret == -1) {
-                gf_log (GF_NFS, GF_LOG_ERROR, "Failed to add protocol"
-                        " initializer");
+                gf_log (GF_NFS, GF_LOG_ERROR, "Failed to add "
+                                "NFS3 protocol initializer");
                 goto ret;
         }
 
@@ -597,19 +780,10 @@ nfs_init_state (xlator_t *this)
         }
 
         nfs->enable_nlm = _gf_true;
-        if (!dict_get_str (this->options, "nfs.nlm", &optstr)) {
-
-                ret = gf_string2boolean (optstr, &boolt);
-                if (ret < 0) {
-                        gf_log (GF_NFS, GF_LOG_ERROR, "Failed to parse"
-                                " bool string");
-                        goto free_foppool;
-                }
-
-                if (boolt == _gf_false) {
-                        gf_log (GF_NFS, GF_LOG_INFO, "NLM is manually disabled");
-                        nfs->enable_nlm = _gf_false;
-                }
+        ret = dict_get_str_boolean (this->options, "nfs.nlm", _gf_true);
+        if (ret == _gf_false) {
+                gf_log (GF_NFS, GF_LOG_INFO, "NLM is manually disabled");
+                nfs->enable_nlm = _gf_false;
         }
 
         nfs->enable_acl = _gf_true;
@@ -700,7 +874,7 @@ nfs_init_state (xlator_t *this)
                         nfs->mount_udp = 1;
         }
 
-        nfs->rmtab = NFS_DATADIR "/rmtab";
+        nfs->rmtab = gf_strdup (NFS_DATADIR "/rmtab");
         if (dict_get(this->options, "nfs.mount-rmtab")) {
                 ret = dict_get_str (this->options, "nfs.mount-rmtab", &nfs->rmtab);
                 if (ret == -1) {
@@ -785,12 +959,15 @@ nfs_init_state (xlator_t *this)
                 nfs->enable_nlm = _gf_false;
         }
 
-        nfs->rpcsvc =  rpcsvc_init (this, this->ctx, this->options, 0);
+        nfs->rpcsvc =  rpcsvc_init (this, this->ctx,
+                                    this->options, fopspoolsize);
         if (!nfs->rpcsvc) {
                 ret = -1;
                 gf_log (GF_NFS, GF_LOG_ERROR, "RPC service init failed");
                 goto free_foppool;
         }
+
+        nfs->register_portmap = rpcsvc_register_portmap_enabled (nfs->rpcsvc);
 
         this->private = (void *)nfs;
         INIT_LIST_HEAD (&nfs->versions);
@@ -819,6 +996,9 @@ nfs_drc_init (xlator_t *this)
         int       ret     = -1;
         rpcsvc_t *svc     = NULL;
 
+        GF_VALIDATE_OR_GOTO (GF_NFS, this, out);
+        GF_VALIDATE_OR_GOTO (GF_NFS, this->private, out);
+
         svc = ((struct nfs_state *)(this->private))->rpcsvc;
         if (!svc)
                 goto out;
@@ -829,49 +1009,245 @@ nfs_drc_init (xlator_t *this)
         return ret;
 }
 
+int
+nfs_reconfigure_state (xlator_t *this, dict_t *options)
+{
+        int                 ret = 0;
+        int                 keyindx = 0;
+        char                *optstr = NULL;
+        gf_boolean_t        optbool;
+        uint32_t            optuint32;
+        struct nfs_state    *nfs = NULL;
+        char                *blacklist_keys[] = {
+                                        "nfs.port",
+                                        "nfs.transport-type",
+                                        "nfs.mem-factor",
+                                        NULL};
 
-#if 0
-/* reconfigure() is currently not used for the NFS-server. Upon setting an
- * option for the NFS-xlator, the glusterfs process it restarted.
- *
- * This current implementation makes sure to read the currently used rmtab and
- * merge it with the new rmtab.
- *
- * As this function is never called, it is provided for the future, for when
- * the NFS-server supports reloading.
+        GF_VALIDATE_OR_GOTO (GF_NFS, this, out);
+        GF_VALIDATE_OR_GOTO (GF_NFS, this->private, out);
+        GF_VALIDATE_OR_GOTO (GF_NFS, options, out);
+
+        nfs = (struct nfs_state *)this->private;
+
+        /* Black listed options can't be reconfigured, they need
+         * NFS to be restarted. There are two cases 1. SET 2. UNSET.
+         * 1. SET */
+        while (blacklist_keys[keyindx]) {
+                if (dict_get (options, blacklist_keys[keyindx])) {
+                        gf_log (GF_NFS, GF_LOG_ERROR,
+                                "Reconfiguring %s needs NFS restart",
+                                blacklist_keys[keyindx]);
+                        goto out;
+                }
+                keyindx ++;
+        }
+
+        /* UNSET for nfs.mem-factor */
+        if ((!dict_get (options, "nfs.mem-factor")) &&
+            (nfs->memfactor != GF_NFS_DEFAULT_MEMFACTOR)) {
+                gf_log (GF_NFS, GF_LOG_INFO,
+                        "Reconfiguring nfs.mem-factor needs NFS restart");
+                goto out;
+        }
+
+        /* UNSET for nfs.port */
+        if ((!dict_get (options, "nfs.port")) &&
+            (nfs->override_portnum)) {
+                gf_log (GF_NFS, GF_LOG_ERROR,
+                        "Reconfiguring nfs.port needs NFS restart");
+                goto out;
+        }
+
+        /* reconfig nfs.mount-rmtab */
+        optstr = NFS_DATADIR "/rmtab";
+        if (dict_get (options, "nfs.mount-rmtab")) {
+                ret = dict_get_str (options, "nfs.mount-rmtab", &optstr);
+                if (ret < 0) {
+                        gf_log (GF_NFS, GF_LOG_ERROR, "Failed to read "
+                                "reconfigured option: nfs.mount-rmtab");
+                        goto out;
+                }
+                gf_path_strip_trailing_slashes (optstr);
+        }
+        if (strcmp (nfs->rmtab, optstr) != 0) {
+                mount_rewrite_rmtab (nfs->mstate, optstr);
+                gf_log (GF_NFS, GF_LOG_INFO,
+                                "Reconfigured nfs.mount-rmtab path: %s",
+                                nfs->rmtab);
+        }
+
+        GF_OPTION_RECONF (OPT_SERVER_AUX_GIDS, optbool,
+                                               options, bool, out);
+        if (nfs->server_aux_gids != optbool) {
+                nfs->server_aux_gids = optbool;
+                gf_log(GF_NFS, GF_LOG_INFO, "Reconfigured %s with value %d",
+                               OPT_SERVER_AUX_GIDS, optbool);
+        }
+
+        GF_OPTION_RECONF (OPT_SERVER_GID_CACHE_TIMEOUT, optuint32,
+                                               options, uint32, out);
+        if (nfs->server_aux_gids_max_age != optuint32) {
+                nfs->server_aux_gids_max_age = optuint32;
+                gid_cache_reconf (&nfs->gid_cache, optuint32);
+                gf_log(GF_NFS, GF_LOG_INFO, "Reconfigured %s with value %d",
+                               OPT_SERVER_GID_CACHE_TIMEOUT, optuint32);
+        }
+
+        /* reconfig nfs.dynamic-volumes */
+        ret = dict_get_str_boolean (options, "nfs.dynamic-volumes",
+                                             GF_NFS_DVM_OFF);
+        switch (ret) {
+        case GF_NFS_DVM_ON:
+        case GF_NFS_DVM_OFF:
+                optbool = ret;
+                break;
+        default:
+                optbool = GF_NFS_DVM_OFF;
+                break;
+        }
+        if (nfs->dynamicvolumes != optbool) {
+                nfs->dynamicvolumes = optbool;
+                gf_log(GF_NFS, GF_LOG_INFO, "Reconfigured nfs.dynamic-volumes"
+                                            " with value %d", optbool);
+        }
+
+        optbool = _gf_false;
+        if (dict_get (options, "nfs.enable-ino32")) {
+                ret = dict_get_str_boolean (options, "nfs.enable-ino32",
+                                                      _gf_false);
+                if (ret < 0) {
+                        gf_log (GF_NFS, GF_LOG_ERROR,
+                                "Failed to read reconfigured option: "
+                                "nfs.enable-ino32");
+                        goto out;
+                }
+                optbool = ret;
+        }
+        if (nfs->enable_ino32 != optbool) {
+                nfs->enable_ino32 = optbool;
+                gf_log(GF_NFS, GF_LOG_INFO, "Reconfigured nfs.enable-ino32"
+                                            " with value %d", optbool);
+        }
+
+        /* nfs.nlm is enabled by default */
+        ret = dict_get_str_boolean (options, "nfs.nlm", _gf_true);
+        if (ret < 0) {
+                optbool = _gf_true;
+        } else {
+                optbool = ret;
+        }
+        if (nfs->enable_nlm != optbool) {
+                gf_log (GF_NFS, GF_LOG_INFO, "NLM is manually %s",
+                                (optbool ? "enabled":"disabled"));
+                nfs->enable_nlm = optbool;
+                nfs_reconfigure_nlm4 (this);
+        }
+
+        /* nfs.acl is enabled by default */
+        ret = dict_get_str_boolean (options, "nfs.acl", _gf_true);
+        if (ret < 0) {
+                optbool = _gf_true;
+        } else {
+                optbool = ret;
+        }
+        if (nfs->enable_acl != optbool) {
+                gf_log (GF_NFS, GF_LOG_INFO, "ACL is manually %s",
+                                (optbool ? "enabled":"disabled"));
+                nfs->enable_acl = optbool;
+                nfs_reconfigure_acl3 (this);
+        }
+
+        ret = 0;
+out:
+        return ret;
+}
+
+
+/*
+ * reconfigure() for NFS server xlator.
  */
 int
 reconfigure (xlator_t *this, dict_t *options)
 {
-        int                       ret = 0;
-        char                     *rmtab = NULL;
+        int                      ret = 0;
         struct nfs_state         *nfs = NULL;
+        gf_boolean_t             regpmap = _gf_true;
+
+        if ((!this) || (!this->private) || (!options))
+                return (-1);
 
         nfs = (struct nfs_state *)this->private;
 
-        if (!nfs) {
-                gf_log_callingfn (this->name, GF_LOG_DEBUG, "conf == null!!!");
-                goto out;
-        }
-
-        ret = dict_get_str (options, "nfs.mount-rmtab", &rmtab);
+        /* Reconfigure nfs options */
+        ret = nfs_reconfigure_state(this, options);
         if (ret) {
-                goto out;
-        }
-        gf_path_strip_trailing_slashes (rmtab);
-
-        if (strcmp (nfs->rmtab, rmtab) != 0) {
-                mount_rewrite_rmtab (nfs->mstate, rmtab);
-
-                gf_log (this->name, GF_LOG_INFO,
-                        "Reconfigured nfs.mount-rmtab path: %s", nfs->rmtab);
+                gf_log (GF_NFS, GF_LOG_ERROR,
+                        "nfs reconfigure state failed");
+                return (-1);
         }
 
-out:
-        return ret;
+        /* Reconfigure nfs3 options */
+        ret = nfs3_reconfigure_state(this, options);
+        if (ret) {
+                gf_log (GF_NFS, GF_LOG_ERROR,
+                        "nfs3 reconfigure state failed");
+                return (-1);
+        }
+
+        /* Reconfigure mount options */
+        ret = mount_reconfigure_state(this, options);
+        if (ret) {
+                gf_log (GF_NFS, GF_LOG_ERROR,
+                        "mount reconfigure state failed");
+                return (-1);
+        }
+
+        /* Reconfigure rpc layer */
+        ret = rpcsvc_reconfigure_options (nfs->rpcsvc, options);
+        if (ret) {
+                gf_log (GF_NFS, GF_LOG_ERROR,
+                        "rpcsvc reconfigure options failed");
+                return (-1);
+        }
+        regpmap = rpcsvc_register_portmap_enabled(nfs->rpcsvc);
+        if (nfs->register_portmap != regpmap) {
+                nfs->register_portmap = regpmap;
+                if (regpmap) {
+                        (void) nfs_program_register_portmap_all (nfs);
+                } else {
+                        (void) nfs_program_unregister_portmap_all (nfs);
+                }
+        }
+
+        /* Reconfigure drc */
+        ret = rpcsvc_drc_reconfigure (nfs->rpcsvc, options);
+        if (ret) {
+                gf_log (GF_NFS, GF_LOG_ERROR,
+                        "rpcsvc DRC reconfigure failed");
+                return (-1);
+        }
+
+        return (0);
 }
-#endif /* glusterfs/nfs is restarted and reconfigure() is never called */
 
+/* Main init() routine for NFS server xlator. It inits NFS v3 protocol
+ * and its dependent protocols e.g. ACL, MOUNT v3 (mount3), NLM and
+ * DRC.
+ *
+ * Usage: glusterfsd:
+ *            glusterfs_process_volfp() =>
+ *              glusterfs_graph_activate() =>
+ *                glusterfs_graph_init() =>
+ *                  xlator_init () => NFS init() routine
+ *
+ * If init() routine fails, the glusterfsd cleans up the NFS process
+ * by invoking cleanup_and_exit().
+ *
+ * RETURN:
+ *       0 (SUCCESS) if all protocol specific inits PASS.
+ *      -1 (FAILURE) if any of them FAILS.
+ */
 int
 init (xlator_t *this) {
 
@@ -879,59 +1255,52 @@ init (xlator_t *this) {
         int                     ret = -1;
 
         if (!this)
-                return -1;
+                return (-1);
 
         nfs = nfs_init_state (this);
         if (!nfs) {
                 gf_log (GF_NFS, GF_LOG_ERROR, "Failed to init nfs option");
-                return -1;
+                return (-1);
         }
 
         ret = nfs_add_all_initiators (nfs);
-        if (ret == -1) {
+        if (ret) {
                 gf_log (GF_NFS, GF_LOG_ERROR, "Failed to add initiators");
-                goto err;
+                return (-1);
         }
 
         ret = nfs_init_subvolumes (nfs, this->children);
-        if (ret == -1) {
-                gf_log (GF_NFS, GF_LOG_CRITICAL, "Failed to init NFS "
-                        "exports");
-                goto err;
+        if (ret) {
+                gf_log (GF_NFS, GF_LOG_CRITICAL, "Failed to init NFS exports");
+                return (-1);
         }
 
         ret = mount_init_state (this);
-        if (ret == -1) {
-                gf_log (GF_NFS, GF_LOG_CRITICAL, "Failed to init Mount"
-                        "state");
-                goto err;
+        if (ret) {
+                gf_log (GF_NFS, GF_LOG_CRITICAL, "Failed to init Mount state");
+                return (-1);
         }
 
         ret = nlm4_init_state (this);
-        if (ret == -1) {
-                gf_log (GF_NFS, GF_LOG_CRITICAL, "Failed to init NLM"
-                        "state");
-                goto err;
+        if (ret) {
+                gf_log (GF_NFS, GF_LOG_CRITICAL, "Failed to init NLM state");
+                return (-1);
         }
 
         ret = nfs_init_versions (nfs, this);
-        if (ret == -1) {
-                gf_log (GF_NFS, GF_LOG_ERROR, "Failed to initialize "
-                        "protocols");
-                /* Do not return an error on this. If we dont return
-                 * an error, the process keeps running and it helps
-                 * to point out where the log is by doing ps ax|grep gluster.
-                 */
-                ret = 0;
-                goto err;
+        if (ret) {
+                gf_log (GF_NFS, GF_LOG_ERROR, "Failed to initialize protocols");
+                return (-1);
         }
 
         ret = nfs_drc_init (this);
-        if (ret == 0)
-                gf_log (GF_NFS, GF_LOG_INFO, "NFS service started");
-err:
+        if (ret) {
+                gf_log (GF_NFS, GF_LOG_ERROR, "Failed to initialize DRC");
+                return (-1);
+        }
 
-        return ret;
+        gf_log (GF_NFS, GF_LOG_INFO, "NFS service started");
+        return (0); /* SUCCESS */
 }
 
 
@@ -1121,23 +1490,42 @@ struct xlator_dumpops dumpops = {
 struct volume_options options[] = {
         { .key  = {"nfs3.read-size"},
           .type = GF_OPTION_TYPE_SIZET,
+          .min  = GF_NFS3_RTMIN,
+          .max  = GF_NFS3_RTMAX,
           .default_value = TOSTRING(GF_NFS3_RTPREF),
-          .description = "Size in which the client should issue read requests"
-                         " to the Gluster NFSv3 server. Must be a multiple of"
-                         " 4KB."
+          .description = "Size in which the client should issue read requests "
+                         "to the Gluster NFSv3 server. Must be a multiple of "
+                         "4KB (4096). Min and Max supported values are 4KB "
+                         "(4096) and 1MB (1048576) respectively. If the "
+                         "specified value is within the supported range but "
+                         "not a multiple of 4096, it is rounded up to the "
+                         "nearest multiple of 4096."
         },
         { .key  = {"nfs3.write-size"},
           .type = GF_OPTION_TYPE_SIZET,
+          .min  = GF_NFS3_WTMIN,
+          .max  = GF_NFS3_WTMAX,
           .default_value = TOSTRING(GF_NFS3_WTPREF),
-          .description = "Size in which the client should issue write requests"
-                         " to the Gluster NFSv3 server. Must be a multiple of"
-                         " 4KB."
+          .description = "Size in which the client should issue write requests "
+                         "to the Gluster NFSv3 server. Must be a multiple of "
+                         "1KB (1024). Min and Max supported values are "
+                         "4KB (4096) and 1MB(1048576) respectively. If the "
+                         "specified value is within the supported range but "
+                         "not a multiple of 4096, it is rounded up to the "
+                         "nearest multiple of 4096."
         },
         { .key  = {"nfs3.readdir-size"},
           .type = GF_OPTION_TYPE_SIZET,
+          .min  = GF_NFS3_DTMIN,
+          .max  = GF_NFS3_DTMAX,
           .default_value = TOSTRING(GF_NFS3_DTPREF),
           .description = "Size in which the client should issue directory "
-                         " reading requests."
+                         "reading requests to the Gluster NFSv3 server. Must "
+                         "be a multiple of 1KB (1024). Min and Max supported "
+                         "values are 4KB (4096) and 1MB (1048576) respectively."
+                         "If the specified value is within the supported range "
+                         "but not a multiple of 4096, it is rounded up to the "
+                         "nearest multiple of 4096."
         },
         { .key  = {"nfs3.*.volume-access"},
           .type = GF_OPTION_TYPE_STR,
@@ -1216,8 +1604,8 @@ struct volume_options options[] = {
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "on",
           .description = "Disable or enable the AUTH_UNIX authentication type."
-                         "Must always be enabled for better interoperability."
-                         "However, can be disabled if needed. Enabled by"
+                         "Must always be enabled for better interoperability. "
+                         "However, can be disabled if needed. Enabled by "
                          "default"
         },
         { .key  = {"rpc-auth.auth-null"},
@@ -1233,8 +1621,8 @@ struct volume_options options[] = {
           .description = "Disable or enable the AUTH_UNIX authentication type "
                          "for a particular exported volume overriding defaults"
                          " and general setting for AUTH_UNIX scheme. Must "
-                         "always be enabled for better interoperability."
-                         "However, can be disabled if needed. Enabled by"
+                         "always be enabled for better interoperability. "
+                         "However, can be disabled if needed. Enabled by "
                          "default."
         },
         { .key  = {"rpc-auth.auth-unix.*.allow"},
@@ -1243,8 +1631,8 @@ struct volume_options options[] = {
           .description = "Disable or enable the AUTH_UNIX authentication type "
                          "for a particular exported volume overriding defaults"
                          " and general setting for AUTH_UNIX scheme. Must "
-                         "always be enabled for better interoperability."
-                         "However, can be disabled if needed. Enabled by"
+                         "always be enabled for better interoperability. "
+                         "However, can be disabled if needed. Enabled by "
                          "default."
         },
         { .key  = {"rpc-auth.auth-null.*"},
@@ -1285,7 +1673,7 @@ struct volume_options options[] = {
           .default_value = "none",
           .description = "Reject a comma separated list of addresses and/or"
                          " hostnames from connecting to the server. By default,"
-                         " all connections are allowed. This allows users to"
+                         " all connections are allowed. This allows users to "
                          "define a rule for a specific exported volume."
         },
         { .key  = {"rpc-auth.ports.insecure"},
@@ -1349,6 +1737,15 @@ struct volume_options options[] = {
                          "portmap service. Use this option to turn off portmap "
                          "registration for Gluster NFS. On by default"
         },
+        { .key  = {"rpc.outstanding-rpc-limit"},
+          .type = GF_OPTION_TYPE_INT,
+          .min  = RPCSVC_MIN_OUTSTANDING_RPC_LIMIT,
+          .max  = RPCSVC_MAX_OUTSTANDING_RPC_LIMIT,
+          .default_value = TOSTRING(RPCSVC_DEFAULT_OUTSTANDING_RPC_LIMIT),
+          .description = "Parameter to throttle the number of incoming RPC "
+                         "requests from a client. 0 means no limit (can "
+                         "potentially run out of memory)"
+        },
         { .key  = {"nfs.port"},
           .type = GF_OPTION_TYPE_INT,
           .min  = 1,
@@ -1373,8 +1770,8 @@ struct volume_options options[] = {
         { .key  = {"nfs.*.disable"},
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "false",
-          .description = "This option is used to start or stop NFS server"
-                         "for individual volume."
+          .description = "This option is used to start or stop the NFS server "
+                         "for individual volumes."
         },
 
         { .key  = {"nfs.nlm"},
@@ -1427,8 +1824,8 @@ struct volume_options options[] = {
         },
         { .key  = {"nfs.drc"},
           .type = GF_OPTION_TYPE_STR,
-          .default_value = "off",
-          .description = "Enable Duplicate Request Cache in gNfs server to "
+          .default_value = "on",
+          .description = "Enable Duplicate Request Cache in gNFS server to "
                          "improve correctness of non-idempotent operations like "
                          "write, delete, link, et al"
         },

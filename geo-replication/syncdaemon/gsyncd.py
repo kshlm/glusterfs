@@ -12,7 +12,7 @@ import optparse
 import fcntl
 import fnmatch
 from optparse import OptionParser, SUPPRESS_HELP
-from logging import Logger
+from logging import Logger, handlers
 from errno import EEXIST, ENOENT
 
 from ipaddr import IPAddress, IPNetwork
@@ -58,7 +58,24 @@ class GLogger(Logger):
         logging.root = cls("root", lvl)
         logging.setLoggerClass(cls)
         logging.getLogger().handlers = []
-        logging.basicConfig(**lprm)
+        logging.getLogger().setLevel(lprm['level'])
+
+        if 'filename' in lprm:
+            try:
+                logging_handler = handlers.WatchedFileHandler(lprm['filename'])
+                formatter = logging.Formatter(fmt=lprm['format'],
+                datefmt=lprm['datefmt'])
+                logging_handler.setFormatter(formatter)
+                logging.getLogger().addHandler(logging_handler)
+            except AttributeError:
+                # Python version < 2.6 will not have WatchedFileHandler
+                # so fallback to logging without any handler.
+                # Note: logrotate will not work if Python version is < 2.6
+                logging.basicConfig(**lprm)
+        else:
+            # If filename not passed(not available in lprm) then it may be
+            # streaming.(Ex: {"stream": "/dev/stdout"})
+            logging.basicConfig(**lprm)
 
     @classmethod
     def _gsyncd_loginit(cls, **kw):
@@ -174,6 +191,7 @@ def main_i():
     op.add_option('--log-file-mbr',        metavar='LOGF',  type=str, action='callback', callback=store_abs)
     op.add_option('--state-file',          metavar='STATF', type=str, action='callback', callback=store_abs)
     op.add_option('--state-detail-file',   metavar='STATF', type=str, action='callback', callback=store_abs)
+    op.add_option('--georep-session-working-dir', metavar='STATF', type=str, action='callback', callback=store_abs)
     op.add_option('--ignore-deletes',      default=False, action='store_true')
     op.add_option('--isolated-slave',      default=False, action='store_true')
     op.add_option('--use-rsync-xattrs',    default=False, action='store_true')
@@ -185,6 +203,7 @@ def main_i():
     op.add_option('--local-id',            metavar='ID',    help=SUPPRESS_HELP, default='')
     op.add_option('--local-path',          metavar='PATH',  help=SUPPRESS_HELP, default='')
     op.add_option('-s', '--ssh-command',   metavar='CMD',   default='ssh')
+    op.add_option('--ssh-command-tar',     metavar='CMD',   default='ssh')
     op.add_option('--rsync-command',       metavar='CMD',   default='rsync')
     op.add_option('--rsync-options',       metavar='OPTS',  default='')
     op.add_option('--rsync-ssh-options',   metavar='OPTS',  default='--compress')
@@ -211,6 +230,7 @@ def main_i():
     op.add_option('--change-interval', metavar='SEC', type=int, default=3)
     # working directory for changelog based mechanism
     op.add_option('--working-dir', metavar='DIR', type=str, action='callback', callback=store_abs)
+    op.add_option('--use-tarssh', default=False, action='store_true')
 
     op.add_option('-c', '--config-file',   metavar='CONF',  type=str, action='callback', callback=store_local)
     # duh. need to specify dest or value will be mapped to None :S
@@ -457,8 +477,15 @@ def main_i():
             GLogger._gsyncd_loginit(log_file=gconf.log_file, label='conf')
             if confdata.op == 'set':
                 logging.info('checkpoint %s set' % confdata.val)
+                gcnf.delete('checkpoint_completed')
+                gcnf.delete('checkpoint_target')
             elif confdata.op == 'del':
                 logging.info('checkpoint info was reset')
+                # if it is removing 'checkpoint' then we need
+                # to remove 'checkpoint_completed' and 'checkpoint_target' too
+                gcnf.delete('checkpoint_completed')
+                gcnf.delete('checkpoint_target')
+
         except IOError:
             if sys.exc_info()[1].errno == ENOENT:
                 # directory of log path is not present,

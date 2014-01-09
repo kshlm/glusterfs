@@ -36,6 +36,7 @@
 #include <stdarg.h>
 #include "defaults.h"
 #include "logging.h"
+#include "cli1-xdr.h"
 
 #define MAX_LIST_MEMBERS 100
 
@@ -917,7 +918,8 @@ ios_dump_args_init (struct ios_dump_args *args, ios_dump_type_t type,
 }
 
 int
-io_stats_dump (xlator_t *this, struct ios_dump_args *args)
+io_stats_dump (xlator_t *this, struct ios_dump_args *args,
+               gf1_cli_stats_op op)
 {
         struct ios_conf         *conf = NULL;
         struct ios_global_stats  cumulative = {0, };
@@ -935,18 +937,30 @@ io_stats_dump (xlator_t *this, struct ios_dump_args *args)
         gettimeofday (&now, NULL);
         LOCK (&conf->lock);
         {
-                cumulative  = conf->cumulative;
-                incremental = conf->incremental;
+                if (op == GF_CLI_STATS_INFO ||
+                    op == GF_CLI_STATS_INFO_CUMULATIVE)
+                        cumulative  = conf->cumulative;
 
-                increment = conf->increment++;
+                if (op == GF_CLI_STATS_INFO ||
+                    op == GF_CLI_STATS_INFO_INCREMENTAL) {
+                        incremental = conf->incremental;
 
-                memset (&conf->incremental, 0, sizeof (conf->incremental));
-                conf->incremental.started_at = now;
+                        increment = conf->increment++;
+
+                        memset (&conf->incremental, 0,
+                                sizeof (conf->incremental));
+                        conf->incremental.started_at = now;
+                }
         }
         UNLOCK (&conf->lock);
 
-        io_stats_dump_global (this, &cumulative, &now, -1, args);
-        io_stats_dump_global (this, &incremental, &now, increment, args);
+        if (op == GF_CLI_STATS_INFO ||
+            op == GF_CLI_STATS_INFO_CUMULATIVE)
+                io_stats_dump_global (this, &cumulative, &now, -1, args);
+
+        if (op == GF_CLI_STATS_INFO ||
+            op == GF_CLI_STATS_INFO_INCREMENTAL)
+                io_stats_dump_global (this, &incremental, &now, increment, args);
 
         return 0;
 }
@@ -1746,6 +1760,16 @@ io_stats_discard_cbk(call_frame_t *frame, void *cookie, xlator_t *this,
 	return 0;
 }
 
+int
+io_stats_zerofill_cbk(call_frame_t *frame, void *cookie, xlator_t *this,
+                     int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
+                     struct iatt *postbuf, dict_t *xdata)
+{
+        UPDATE_PROFILE_STATS(frame, ZEROFILL);
+        STACK_UNWIND_STRICT(zerofill, frame, op_ret, op_errno, prebuf, postbuf,
+                            xdata);
+        return 0;
+}
 
 int
 io_stats_lk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
@@ -2197,7 +2221,7 @@ conditional_dump (dict_t *dict, char *key, data_t *value, void *data)
                 }
                 (void) ios_dump_args_init (&args, IOS_DUMP_TYPE_FILE,
                                            logfp);
-                io_stats_dump (this, &args);
+                io_stats_dump (this, &args, GF_CLI_STATS_INFO);
                 fclose (logfp);
         }
         return 0;
@@ -2439,6 +2463,18 @@ io_stats_discard(call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
 		   FIRST_CHILD(this)->fops->discard, fd, offset, len, xdata);
 
 	return 0;
+}
+
+int
+io_stats_zerofill(call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
+                 off_t len, dict_t *xdata)
+{
+        START_FOP_LATENCY(frame);
+
+        STACK_WIND(frame, io_stats_zerofill_cbk, FIRST_CHILD(this),
+                   FIRST_CHILD(this)->fops->zerofill, fd, offset, len, xdata);
+
+        return 0;
 }
 
 
@@ -2751,7 +2787,7 @@ notify (xlator_t *this, int32_t event, void *data, ...)
         struct ios_dump_args args = {0};
         dict_t       *output = NULL;
         dict_t       *dict = NULL;
-        int32_t       top_op = 0;
+        int32_t       op = 0;
         int32_t       list_cnt = 0;
         double        throughput = 0;
         double        time = 0;
@@ -2765,7 +2801,7 @@ notify (xlator_t *this, int32_t event, void *data, ...)
         case GF_EVENT_TRANSLATOR_INFO:
                 ret = dict_get_str_boolean (dict, "clear-stats", _gf_false);
                 if (ret) {
-                         ret = dict_set_int32 (output, "top-op", top_op);
+                        ret = dict_set_int32 (output, "top-op", op);
                         if (ret) {
                                 gf_log (this->name, GF_LOG_ERROR,
                                         "Failed to set top-op in dict");
@@ -2785,15 +2821,15 @@ notify (xlator_t *this, int32_t event, void *data, ...)
                         goto out;
                 }
 
-                ret = dict_get_int32 (dict, "top-op", &top_op);
+                ret = dict_get_int32 (dict, "top-op", &op);
                 if (!ret) {
                         ret = dict_get_int32 (dict, "list-cnt", &list_cnt);
-                        if (top_op > IOS_STATS_TYPE_NONE &&
-                            top_op < IOS_STATS_TYPE_MAX)
+                        if (op > IOS_STATS_TYPE_NONE &&
+                            op < IOS_STATS_TYPE_MAX)
                                 ret = io_stats_dump_stats_to_dict (this, output,
-                                                             top_op, list_cnt);
-                        if (top_op == IOS_STATS_TYPE_READ_THROUGHPUT ||
-                                top_op == IOS_STATS_TYPE_WRITE_THROUGHPUT) {
+                                                             op, list_cnt);
+                        if (op == IOS_STATS_TYPE_READ_THROUGHPUT ||
+                                op == IOS_STATS_TYPE_WRITE_THROUGHPUT) {
                                 ret = dict_get_double (dict, "throughput",
                                                         &throughput);
                                 if (!ret) {
@@ -2814,9 +2850,14 @@ notify (xlator_t *this, int32_t event, void *data, ...)
 
                         }
                 } else {
+                        ret = dict_get_int32 (dict, "info-op", &op);
+                        if (ret || op < GF_CLI_STATS_INFO ||
+                            GF_CLI_STATS_INFO_CUMULATIVE < op)
+                            op = GF_CLI_STATS_INFO;
+
                         (void) ios_dump_args_init (&args, IOS_DUMP_TYPE_DICT,
                                            output);
-                        ret = io_stats_dump (this, &args);
+                        ret = io_stats_dump (this, &args, op);
                 }
                 break;
         default:
@@ -2870,6 +2911,7 @@ struct xlator_fops fops = {
         .fsetattr    = io_stats_fsetattr,
 	.fallocate   = io_stats_fallocate,
 	.discard     = io_stats_discard,
+        .zerofill    = io_stats_zerofill,
 };
 
 struct xlator_cbks cbks = {

@@ -30,6 +30,7 @@
 #define glusterd_op_start_volume_args_get(dict, volname, flags) \
         glusterd_op_stop_volume_args_get (dict, volname, flags)
 
+
 int
 __glusterd_handle_create_volume (rpcsvc_request_t *req)
 {
@@ -526,9 +527,12 @@ __glusterd_handle_cli_statedump_volume (rpcsvc_request_t *req)
         glusterd_op_t                   cli_op = GD_OP_STATEDUMP_VOLUME;
         char                            err_str[2048] = {0,};
         xlator_t                        *this = NULL;
+        glusterd_conf_t                 *priv = NULL;
 
         this = THIS;
         GF_ASSERT (this);
+        priv = this->private;
+        GF_ASSERT (priv);
 
         GF_ASSERT (req);
 
@@ -577,6 +581,14 @@ __glusterd_handle_cli_statedump_volume (rpcsvc_request_t *req)
                 goto out;
         }
 
+        if (priv->op_version == GD_OP_VERSION_MIN &&
+            strstr (options, "quotad")) {
+                snprintf (err_str, sizeof (err_str), "The cluster is operating "
+                          "at op-version 1. Taking quotad's statedump is "
+                          "disallowed in this state");
+                ret = -1;
+                goto out;
+        }
 
         gf_log (this->name, GF_LOG_INFO, "Received statedump request for "
                 "volume %s with options %s", volname, options);
@@ -604,31 +616,96 @@ glusterd_handle_cli_statedump_volume (rpcsvc_request_t *req)
 }
 
 #ifdef HAVE_BD_XLATOR
+/*
+ * Validates if given VG in the brick exists or not. Also checks if VG has
+ * GF_XATTR_VOL_ID_KEY tag set to avoid using same VG for multiple bricks.
+ * Tag is checked only during glusterd_op_stage_create_volume. Tag is set during
+ * glusterd_validate_and_create_brickpath().
+ * @brick - brick info, @check_tag - check for VG tag or not
+ * @msg - Error message to return to caller
+ */
 int
-glusterd_is_valid_vg (const char *name)
+glusterd_is_valid_vg (glusterd_brickinfo_t *brick, int check_tag, char *msg)
 {
-        lvm_t           handle   = NULL;
-        vg_t            vg       = NULL;
-        char            *vg_name = NULL;
-        int             retval   = -1;
+        lvm_t                     handle     = NULL;
+        vg_t                      vg         = NULL;
+        char                     *vg_name    = NULL;
+        int                       retval     = 0;
+        char                     *p          = NULL;
+        char                     *ptr        = NULL;
+        struct dm_list           *dm_lvlist = NULL;
+        struct dm_list           *dm_seglist = NULL;
+        struct lvm_lv_list       *lv_list    = NULL;
+        struct lvm_property_value prop       = {0, };
+        struct lvm_lvseg_list    *seglist    = NULL;
+        struct dm_list           *taglist    = NULL;
+        struct lvm_str_list      *strl       = NULL;
 
         handle = lvm_init (NULL);
         if (!handle) {
-                gf_log ("", GF_LOG_ERROR, "lvm_init failed");
+                sprintf (msg, "lvm_init failed, could not validate vg");
                 return -1;
         }
-        vg_name = gf_strdup (name);
-        vg = lvm_vg_open (handle, basename (vg_name), "r", 0);
+        if (*brick->vg == '\0') { /* BD xlator has vg in brick->path */
+                p = gf_strdup (brick->path);
+                vg_name = strtok_r (p, "/", &ptr);
+        } else
+                vg_name = brick->vg;
+
+        vg = lvm_vg_open (handle, vg_name, "r", 0);
         if (!vg) {
-                gf_log ("", GF_LOG_ERROR, "no such vg: %s", vg_name);
+                sprintf (msg, "no such vg: %s", vg_name);
+                retval = -1;
                 goto out;
         }
+        if (!check_tag)
+                goto next;
+
+        taglist = lvm_vg_get_tags (vg);
+        if (!taglist)
+                goto next;
+
+        dm_list_iterate_items (strl, taglist) {
+                if (!strncmp(strl->str, GF_XATTR_VOL_ID_KEY,
+                             strlen (GF_XATTR_VOL_ID_KEY))) {
+                            sprintf (msg, "VG %s is already part of"
+                                    " a brick", vg_name);
+                            retval = -1;
+                            goto out;
+                    }
+        }
+next:
+
+        brick->caps = CAPS_BD | CAPS_OFFLOAD_COPY | CAPS_OFFLOAD_SNAPSHOT;
+
+        dm_lvlist = lvm_vg_list_lvs (vg);
+        if (!dm_lvlist)
+                goto out;
+
+        dm_list_iterate_items (lv_list, dm_lvlist) {
+                dm_seglist = lvm_lv_list_lvsegs (lv_list->lv);
+                dm_list_iterate_items (seglist, dm_seglist) {
+                        prop = lvm_lvseg_get_property (seglist->lvseg,
+                                                       "segtype");
+                        if (!prop.is_valid || !prop.value.string)
+                                continue;
+                        if (!strcmp (prop.value.string, "thin-pool")) {
+                                brick->caps |= CAPS_THIN;
+                                gf_log (THIS->name, GF_LOG_INFO, "Thin Pool "
+                                        "\"%s\" will be used for thin LVs",
+                                        lvm_lv_get_name (lv_list->lv));
+                                break;
+                        }
+                }
+        }
+
         retval = 0;
 out:
         if (vg)
                 lvm_vg_close (vg);
         lvm_quit (handle);
-        GF_FREE (vg_name);
+        if (p)
+                GF_FREE (p);
         return retval;
 }
 #endif
@@ -653,9 +730,6 @@ glusterd_op_stage_create_volume (dict_t *dict, char **op_errstr)
         char                                    msg[2048] = {0};
         uuid_t                                  volume_uuid;
         char                                    *volume_uuid_str;
-#ifdef HAVE_BD_XLATOR
-        char                                    *dev_type = NULL;
-#endif
         gf_boolean_t                             is_force = _gf_false;
 
         this = THIS;
@@ -699,10 +773,6 @@ glusterd_op_stage_create_volume (dict_t *dict, char **op_errstr)
                         " volume %s", volname);
                 goto out;
         }
-
-#ifdef HAVE_BD_XLATOR
-        ret = dict_get_str (dict, "device", &dev_type);
-#endif
 
         ret = dict_get_str (dict, "bricks", &bricks);
         if (ret) {
@@ -752,19 +822,14 @@ glusterd_op_stage_create_volume (dict_t *dict, char **op_errstr)
                         goto out;
                 }
 
-#ifdef HAVE_BD_XLATOR
-                if (dev_type) {
-                        ret = glusterd_is_valid_vg (brick_info->path);
-                        if (ret) {
-                                snprintf (msg, sizeof(msg), "invalid vg %s",
-                                  brick_info->path);
-                                goto out;
-                        }
-
-                        break;
-                } else
-#endif
                 if (!uuid_compare (brick_info->uuid, MY_UUID)) {
+#ifdef HAVE_BD_XLATOR
+                        if (brick_info->vg[0]) {
+                                ret = glusterd_is_valid_vg (brick_info, 1, msg);
+                                if (ret)
+                                        goto out;
+                        }
+#endif
                         ret = glusterd_validate_and_create_brickpath (brick_info,
                                                           volume_uuid, op_errstr,
                                                           is_force);
@@ -862,6 +927,7 @@ glusterd_op_stage_start_volume (dict_t *dict, char **op_errstr)
         uuid_t                                  volume_id = {0,};
         char                                    volid[50] = {0,};
         char                                    xattr_volid[50] = {0,};
+        int                                     caps = 0;
 
         this = THIS;
         GF_ASSERT (this);
@@ -911,9 +977,6 @@ glusterd_op_stage_start_volume (dict_t *dict, char **op_errstr)
                 if (uuid_compare (brickinfo->uuid, MY_UUID))
                         continue;
 
-                if (volinfo->backend == GD_VOL_BK_BD)
-                        continue;
-
                 ret = gf_lstat_dir (brickinfo->path, NULL);
                 if (ret && (flags & GF_CLI_FLAG_OP_FORCE)) {
                         continue;
@@ -958,8 +1021,24 @@ glusterd_op_stage_start_volume (dict_t *dict, char **op_errstr)
                         ret = -1;
                         goto out;
                 }
+#ifdef HAVE_BD_XLATOR
+                if (brickinfo->vg[0])
+                        caps = CAPS_BD | CAPS_THIN |
+                                CAPS_OFFLOAD_COPY | CAPS_OFFLOAD_SNAPSHOT;
+                /* Check for VG/thin pool if its BD volume */
+                if (brickinfo->vg[0]) {
+                        ret = glusterd_is_valid_vg (brickinfo, 0, msg);
+                        if (ret)
+                                goto out;
+                        /* if anyone of the brick does not have thin support,
+                           disable it for entire volume */
+                        caps &= brickinfo->caps;
+                } else
+                        caps = 0;
+#endif
         }
 
+        volinfo->caps = caps;
         ret = 0;
 out:
         if (ret && (msg[0] != '\0')) {
@@ -1211,14 +1290,22 @@ glusterd_op_stage_heal_volume (dict_t *dict, char **op_errstr)
                 goto out;
         }
 
-        if ((heal_op != GF_AFR_OP_INDEX_SUMMARY) &&
-            !glusterd_is_nodesvc_online ("glustershd")) {
-                ret = -1;
-                *op_errstr = gf_strdup ("Self-heal daemon is not running."
-                                        " Check self-heal daemon log file.");
-                gf_log (this->name, GF_LOG_WARNING, "%s", "Self-heal daemon is "
-                        "not running. Check self-heal daemon log file.");
-                goto out;
+        switch (heal_op) {
+                case GF_AFR_OP_INDEX_SUMMARY:
+                case GF_AFR_OP_STATISTICS_HEAL_COUNT:
+                case GF_AFR_OP_STATISTICS_HEAL_COUNT_PER_REPLICA:
+                        break;
+                default:
+                        if (!glusterd_is_nodesvc_online("glustershd")){
+                                ret = -1;
+                                *op_errstr = gf_strdup ("Self-heal daemon is "
+                                                "not running. Check self-heal "
+                                                "daemon log file.");
+                                gf_log (this->name, GF_LOG_WARNING, "%s",
+                                        "Self-heal daemon is not running."
+                                        "Check self-heal daemon log file.");
+                                goto out;
+                        }
         }
 
         ret = 0;
@@ -1238,6 +1325,13 @@ glusterd_op_stage_statedump_volume (dict_t *dict, char **op_errstr)
         gf_boolean_t            is_running = _gf_false;
         glusterd_volinfo_t      *volinfo = NULL;
         char                    msg[2408] = {0,};
+        xlator_t                *this     = NULL;
+        glusterd_conf_t         *priv     = NULL;
+
+        this = THIS;
+        GF_ASSERT (this);
+        priv = this->private;
+        GF_ASSERT (priv);
 
         ret = glusterd_op_statedump_volume_args_get (dict, &volname, &options,
                                                      &option_cnt);
@@ -1246,10 +1340,7 @@ glusterd_op_stage_statedump_volume (dict_t *dict, char **op_errstr)
 
         ret = glusterd_volinfo_find (volname, &volinfo);
         if (ret) {
-                snprintf (msg, sizeof(msg), "Volume %s does not exist",
-                          volname);
-                gf_log ("", GF_LOG_ERROR, "%s", msg);
-                *op_errstr = gf_strdup (msg);
+                snprintf (msg, sizeof(msg), FMTSTR_CHECK_VOL_EXISTS, volname);
                 goto out;
         }
 
@@ -1259,16 +1350,31 @@ glusterd_op_stage_statedump_volume (dict_t *dict, char **op_errstr)
 
         is_running = glusterd_is_volume_started (volinfo);
         if (!is_running) {
-                snprintf (msg, sizeof(msg), "Volume %s is not in a started"
+                snprintf (msg, sizeof(msg), "Volume %s is not in the started"
                           " state", volname);
-                gf_log ("", GF_LOG_ERROR, "%s", msg);
-                *op_errstr = gf_strdup (msg);
                 ret = -1;
                 goto out;
         }
 
+        if (priv->op_version == GD_OP_VERSION_MIN &&
+            strstr (options, "quotad")) {
+                snprintf (msg, sizeof (msg), "The cluster is operating "
+                          "at op-version 1. Taking quotad's statedump is "
+                          "disallowed in this state");
+                ret = -1;
+                goto out;
+        }
+        if ((strstr (options, "quotad")) &&
+            (!glusterd_is_volume_quota_enabled (volinfo))) {
+                    snprintf (msg, sizeof (msg), "Quota is not enabled on "
+                              "volume %s", volname);
+                    ret = -1;
+                    goto out;
+        }
 out:
-        gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
+        if (ret && msg[0] != '\0')
+                *op_errstr = gf_strdup (msg);
+        gf_log (this->name, GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
 
@@ -1342,109 +1448,6 @@ out:
         return ret;
 }
 
-#ifdef HAVE_BD_XLATOR
-int
-glusterd_op_stage_bd (dict_t *dict, char **op_errstr)
-{
-        int                     ret       = -1;
-        char                    *volname  = NULL;
-        char                    *path     = NULL;
-        char                    *size     = NULL;
-        glusterd_volinfo_t      *volinfo  = NULL;
-        char                    msg[2048] = {0,};
-        gf_xl_bd_op_t           bd_op     = GF_BD_OP_INVALID;
-        uint64_t                bytes     = 0;
-
-        ret = dict_get_str (dict, "volname", &volname);
-        if (ret) {
-                snprintf (msg, sizeof(msg), "Failed to get volume name");
-                gf_log (THIS->name, GF_LOG_ERROR, "%s", msg);
-                *op_errstr = gf_strdup (msg);
-                goto out;
-        }
-
-        ret = dict_get_int32 (dict, "bd-op", (int32_t *)&bd_op);
-        if (ret) {
-                snprintf (msg, sizeof(msg), "Failed to get bd-op");
-                gf_log (THIS->name, GF_LOG_ERROR, "%s", msg);
-                *op_errstr = gf_strdup (msg);
-                goto out;
-        }
-
-        ret = dict_get_str (dict, "path", &path);
-        if (ret) {
-                snprintf (msg, sizeof(msg), "Failed to get path");
-                gf_log (THIS->name, GF_LOG_ERROR, "%s", msg);
-                *op_errstr = gf_strdup (msg);
-                goto out;
-        }
-
-        if (bd_op == GF_BD_OP_NEW_BD) {
-                ret = dict_get_str (dict, "size", &size);
-                if (ret) {
-                        snprintf (msg, sizeof(msg), "Failed to get size");
-                        gf_log ("", GF_LOG_ERROR, "%s", msg);
-                        *op_errstr = gf_strdup (msg);
-                        goto out;
-                }
-                if (gf_string2bytesize (size, &bytes) < 0) {
-                        snprintf (msg, sizeof(msg),
-                                  "Invalid size %s, suffix with KB, MB etc",
-                                   size);
-                        gf_log ("", GF_LOG_ERROR, "%s", msg);
-                        *op_errstr = gf_strdup (msg);
-                        ret = -1;
-                        goto out;
-                }
-        } else if (bd_op == GF_BD_OP_SNAPSHOT_BD) {
-                ret = dict_get_str (dict, "size", &size);
-                if (ret) {
-                        snprintf (msg, sizeof(msg), "Failed to get size");
-                        gf_log ("", GF_LOG_ERROR, "%s", msg);
-                        *op_errstr = gf_strdup (msg);
-                        goto out;
-                }
-
-                if (gf_string2bytesize (size, &bytes) < 0) {
-                        ret = -1;
-                        snprintf (msg, sizeof(msg),
-                                "Invalid size %s, suffix with KB, MB etc",
-                                size);
-                        gf_log ("", GF_LOG_ERROR, "%s", msg);
-                        *op_errstr = gf_strdup (msg);
-                        goto out;
-                }
-        }
-
-        ret = glusterd_volinfo_find (volname, &volinfo);
-        if (ret) {
-                snprintf (msg, sizeof(msg), "Volume %s does not exist",
-                          volname);
-                gf_log ("", GF_LOG_ERROR, "%s", msg);
-                *op_errstr = gf_strdup (msg);
-                goto out;
-        }
-
-        ret = glusterd_validate_volume_id (dict, volinfo);
-        if (ret)
-                goto out;
-
-        if (!glusterd_is_volume_started (volinfo)) {
-                snprintf (msg, sizeof(msg), "Volume %s is not started",
-                          volname);
-                gf_log ("", GF_LOG_ERROR, "%s", msg);
-                *op_errstr = gf_strdup (msg);
-                ret = -1;
-                goto out;
-        }
-
-        ret = 0;
-out:
-        gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
-        return ret;
-}
-#endif
-
 int
 glusterd_op_create_volume (dict_t *dict, char **op_errstr)
 {
@@ -1466,9 +1469,8 @@ glusterd_op_create_volume (dict_t *dict, char **op_errstr)
         char                 *str        = NULL;
         char                 *username   = NULL;
         char                 *password   = NULL;
-#ifdef HAVE_BD_XLATOR
-        char                 *device     = NULL;
-#endif
+        int                   caps       = 0;
+        char                  msg[1024] __attribute__((unused)) = {0, };
 
         this = THIS;
         GF_ASSERT (this);
@@ -1522,12 +1524,6 @@ glusterd_op_create_volume (dict_t *dict, char **op_errstr)
                         "volume %s", volname);
                 goto out;
         }
-
-#ifdef HAVE_BD_XLATOR
-        ret = dict_get_str (dict, "device", &device);
-        if (!ret)
-                volinfo->backend = GD_VOL_BK_BD;
-#endif
 
         /* replica-count 1 means, no replication, file is in one brick only */
         volinfo->replica_count = 1;
@@ -1637,6 +1633,7 @@ glusterd_op_create_volume (dict_t *dict, char **op_errstr)
 
         if (count)
                 brick = strtok_r (brick_list+1, " \n", &saveptr);
+        caps = CAPS_BD | CAPS_THIN | CAPS_OFFLOAD_COPY | CAPS_OFFLOAD_SNAPSHOT;
 
         while ( i <= count) {
                 ret = glusterd_brickinfo_new_from_brick (brick, &brickinfo);
@@ -1649,12 +1646,35 @@ glusterd_op_create_volume (dict_t *dict, char **op_errstr)
                                 brickinfo->hostname, brickinfo->path);
                         goto out;
                 }
+
+#ifdef HAVE_BD_XLATOR
+                if (!uuid_compare (brickinfo->uuid, MY_UUID)) {
+                        if (brickinfo->vg[0]) {
+                                ret = glusterd_is_valid_vg (brickinfo, 0, msg);
+                                if (ret) {
+                                        gf_log (this->name, GF_LOG_ERROR, "%s",
+                                                msg);
+                                        goto out;
+                                }
+
+                                /* if anyone of the brick does not have thin
+                                   support, disable it for entire volume */
+                                caps &= brickinfo->caps;
+
+
+                        } else
+                                caps = 0;
+                }
+#endif
+
                 list_add_tail (&brickinfo->brick_list, &volinfo->bricks);
                 brick = strtok_r (NULL, " \n", &saveptr);
                 i++;
         }
 
         gd_update_volume_op_versions (volinfo);
+
+        volinfo->caps = caps;
 
         ret = glusterd_store_volinfo (volinfo, GLUSTERD_VOLINFO_VER_AC_INCREMENT);
         if (ret) {
@@ -1676,7 +1696,7 @@ glusterd_op_create_volume (dict_t *dict, char **op_errstr)
 out:
         GF_FREE(free_ptr);
         if (!vol_added && volinfo)
-                glusterd_volinfo_delete (volinfo);
+                glusterd_volinfo_unref (volinfo);
         return ret;
 }
 
@@ -1795,6 +1815,10 @@ glusterd_op_delete_volume (dict_t *dict)
                 goto out;
         }
 
+        ret = glusterd_remove_auxiliary_mount (volname);
+        if (ret)
+                goto out;
+
         ret = glusterd_delete_volume (volinfo);
 out:
         gf_log (this->name, GF_LOG_DEBUG, "returning %d", ret);
@@ -1831,6 +1855,12 @@ glusterd_op_statedump_volume (dict_t *dict, char **op_errstr)
         gf_log ("", GF_LOG_DEBUG, "Performing statedump on volume %s", volname);
         if (strstr (options, "nfs") != NULL) {
                 ret = glusterd_nfs_statedump (options, option_cnt, op_errstr);
+                if (ret)
+                        goto out;
+
+        } else if (strstr (options, "quotad")) {
+                ret = glusterd_quotad_statedump (options, option_cnt,
+                                                 op_errstr);
                 if (ret)
                         goto out;
         } else {

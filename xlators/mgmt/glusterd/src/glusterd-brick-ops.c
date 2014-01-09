@@ -585,10 +585,23 @@ subvol_matcher_update (int *subvols, glusterd_volinfo_t *volinfo,
 
 static int
 subvol_matcher_verify (int *subvols, glusterd_volinfo_t *volinfo, char *err_str,
-                       size_t err_len, char *vol_type)
+                       size_t err_len, char *vol_type, int replica_count)
 {
         int i = 0;
         int ret = 0;
+        int count = volinfo->replica_count-replica_count;
+
+        if (replica_count) {
+                for (i = 0; i < volinfo->subvol_count; i++) {
+                        if (subvols[i] != count) {
+                                ret = -1;
+                                snprintf (err_str, err_len, "Remove exactly %d"
+                                " brick(s) from each subvolume.", count);
+                                break;
+                        }
+                }
+                return ret;
+        }
 
        do {
 
@@ -598,7 +611,6 @@ subvol_matcher_verify (int *subvols, glusterd_volinfo_t *volinfo, char *err_str,
                         ret = -1;
                         snprintf (err_str, err_len,
                                 "Bricks not from same subvol for %s", vol_type);
-                        gf_log (THIS->name, GF_LOG_ERROR, "%s", err_str);
                         break;
                 }
         } while (++i < volinfo->subvol_count);
@@ -626,16 +638,11 @@ __glusterd_handle_remove_brick (rpcsvc_request_t *req)
         glusterd_volinfo_t       *volinfo          = NULL;
         glusterd_brickinfo_t     *brickinfo        = NULL;
         int                      *subvols          = NULL;
-        glusterd_brickinfo_t     *tmp              = NULL;
         char                      err_str[2048]    = {0};
         gf_cli_rsp                rsp              = {0,};
         void                     *cli_rsp          = NULL;
         char                      vol_type[256]    = {0,};
         int32_t                   replica_count    = 0;
-        int32_t                   brick_index      = 0;
-        int32_t                   tmp_brick_idx    = 0;
-        int                       found            = 0;
-        int                       diff_count       = 0;
         char                     *volname          = 0;
         xlator_t                 *this             = NULL;
 
@@ -826,45 +833,6 @@ __glusterd_handle_remove_brick (rpcsvc_request_t *req)
                     (volinfo->brick_count <= volinfo->dist_leaf_count))
                         continue;
 
-                if (replica_count) {
-                        /* do the validation of bricks here */
-                        /* -2 because i++ is already done, and i starts with 1,
-                           instead of 0 */
-                        diff_count = (volinfo->replica_count - replica_count);
-                        brick_index = (((i -2) / diff_count) * volinfo->replica_count);
-                        tmp_brick_idx = 0;
-                        found = 0;
-                        list_for_each_entry (tmp, &volinfo->bricks, brick_list) {
-                                tmp_brick_idx++;
-                                gf_log (this->name, GF_LOG_TRACE,
-                                        "validate brick %s:%s (%d %d %d)",
-                                        tmp->hostname, tmp->path, tmp_brick_idx,
-                                        brick_index, volinfo->replica_count);
-                                if (tmp_brick_idx <= brick_index)
-                                        continue;
-                                if (tmp_brick_idx >
-                                    (brick_index + volinfo->replica_count))
-                                        break;
-                                if ((!strcmp (tmp->hostname,brickinfo->hostname)) &&
-                                    !strcmp (tmp->path, brickinfo->path)) {
-                                        found = 1;
-                                        break;
-                                }
-                        }
-                        if (found)
-                                continue;
-
-                        snprintf (err_str, sizeof (err_str), "Bricks are from "
-                                  "same subvol");
-                        gf_log (this->name, GF_LOG_INFO,
-                                "failed to validate brick %s:%s (%d %d %d)",
-                                tmp->hostname, tmp->path, tmp_brick_idx,
-                                brick_index, volinfo->replica_count);
-                        ret = -1;
-                        /* brick order is not valid */
-                        goto out;
-                }
-
                 /* Find which subvolume the brick belongs to */
                 subvol_matcher_update (subvols, volinfo, brickinfo);
         }
@@ -874,7 +842,7 @@ __glusterd_handle_remove_brick (rpcsvc_request_t *req)
             (volinfo->subvol_count > 1)) {
                 ret = subvol_matcher_verify (subvols, volinfo,
                                              err_str, sizeof(err_str),
-                                             vol_type);
+                                             vol_type, replica_count);
                 if (ret)
                         goto out;
         }
@@ -1025,6 +993,8 @@ glusterd_op_perform_add_bricks (glusterd_volinfo_t *volinfo, int32_t count,
         glusterd_brickinfo_t         *brickinfo      = NULL;
         glusterd_gsync_status_temp_t  param          = {0, };
         gf_boolean_t                  restart_needed = 0;
+        char                          msg[1024] __attribute__((unused)) = {0, };
+        int                           caps           = 0;
 
         GF_ASSERT (volinfo);
 
@@ -1105,12 +1075,31 @@ glusterd_op_perform_add_bricks (glusterd_volinfo_t *volinfo, int32_t count,
 
         if (count)
                 brick = strtok_r (brick_list+1, " \n", &saveptr);
+#ifdef HAVE_BD_XLATOR
+        if (brickinfo->vg[0])
+                caps = CAPS_BD | CAPS_THIN |
+                        CAPS_OFFLOAD_COPY | CAPS_OFFLOAD_SNAPSHOT;
+#endif
 
         while (i <= count) {
                 ret = glusterd_volume_brickinfo_get_by_brick (brick, volinfo,
                                                               &brickinfo);
                 if (ret)
                         goto out;
+#ifdef HAVE_BD_XLATOR
+                /* Check for VG/thin pool if its BD volume */
+                if (brickinfo->vg[0]) {
+                        ret = glusterd_is_valid_vg (brickinfo, 0, msg);
+                        if (ret) {
+                                gf_log (THIS->name, GF_LOG_CRITICAL, "%s", msg);
+                                goto out;
+                        }
+                        /* if anyone of the brick does not have thin support,
+                           disable it for entire volume */
+                        caps &= brickinfo->caps;
+                } else
+                        caps = 0;
+#endif
 
                 if (uuid_is_null (brickinfo->uuid)) {
                         ret = glusterd_resolve_brick (brickinfo);
@@ -1147,7 +1136,7 @@ glusterd_op_perform_add_bricks (glusterd_volinfo_t *volinfo, int32_t count,
                 dict_foreach (volinfo->gsync_slaves,
                               _glusterd_restart_gsync_session, &param);
         }
-
+        volinfo->caps = caps;
 out:
         GF_FREE (free_ptr1);
         GF_FREE (free_ptr2);
@@ -1244,15 +1233,6 @@ glusterd_op_stage_add_brick (dict_t *dict, char **op_errstr)
                 goto out;
         }
 
-        if (volinfo->backend == GD_VOL_BK_BD) {
-                snprintf (msg, sizeof (msg), "Add brick is not supported for "
-                           "Block backend volume %s.", volname);
-                gf_log (THIS->name, GF_LOG_ERROR, "%s", msg);
-                *op_errstr = gf_strdup (msg);
-                ret = -1;
-                goto out;
-        }
-
         ret = glusterd_validate_volume_id (dict, volinfo);
         if (ret)
                 goto out;
@@ -1330,6 +1310,18 @@ glusterd_op_stage_add_brick (dict_t *dict, char **op_errstr)
                 }
 
                 if (!uuid_compare (brickinfo->uuid, MY_UUID)) {
+#ifdef HAVE_BD_XLATOR
+                        if (brickinfo->vg[0]) {
+                                ret = glusterd_is_valid_vg (brickinfo, 1, msg);
+                                if (ret) {
+                                        gf_log (THIS->name, GF_LOG_ERROR, "%s",
+                                                msg);
+                                        *op_errstr = gf_strdup (msg);
+                                        goto out;
+                                }
+                        }
+#endif
+
                         ret = glusterd_validate_and_create_brickpath (brickinfo,
                                                           volinfo->volume_id,
                                                           op_errstr, is_force);
@@ -1359,17 +1351,20 @@ out:
 int
 glusterd_op_stage_remove_brick (dict_t *dict, char **op_errstr)
 {
-        int                 ret         = -1;
-        char               *volname     = NULL;
-        glusterd_volinfo_t *volinfo     = NULL;
-        char               *errstr      = NULL;
-        int32_t             brick_count = 0;
-        int32_t             replica_cnt = 0;
-        char                msg[2048]   = {0,};
-        int32_t             flag        = 0;
-        gf1_op_commands     cmd         = GF_OP_CMD_NONE;
-        char               *task_id_str = NULL;
-        xlator_t           *this        = NULL;
+        int                     ret         = -1;
+        char                   *volname     = NULL;
+        glusterd_volinfo_t     *volinfo     = NULL;
+        char                   *errstr      = NULL;
+        int32_t                 brick_count = 0;
+        char                    msg[2048]   = {0,};
+        int32_t                 flag        = 0;
+        gf1_op_commands         cmd         = GF_OP_CMD_NONE;
+        char                   *task_id_str = NULL;
+        xlator_t               *this        = NULL;
+        int                     i           = 1;
+        char                    key[256]    = {0,};
+        char                   *brick       = NULL;
+        glusterd_brickinfo_t   *brickinfo   = NULL;
 
         this = THIS;
         GF_ASSERT (this);
@@ -1403,10 +1398,25 @@ glusterd_op_stage_remove_brick (dict_t *dict, char **op_errstr)
 
         ret = dict_get_int32 (dict, "command", &flag);
         if (ret) {
-                gf_log (this->name, GF_LOG_ERROR, "Unable to get brick count");
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Unable to get brick command");
                 goto out;
         }
         cmd = flag;
+
+        ret = dict_get_int32 (dict, "count", &brick_count);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Unable to get brick count");
+                goto out;
+        }
+
+        ret = 0;
+        if (volinfo->brick_count == brick_count) {
+                errstr = gf_strdup ("Deleting all the bricks of the "
+                                    "volume is not allowed");
+                ret = -1;
+                goto out;
+        }
 
         ret = -1;
         switch (cmd) {
@@ -1421,10 +1431,10 @@ glusterd_op_stage_remove_brick (dict_t *dict, char **op_errstr)
         case GF_OP_CMD_START:
         {
                 if ((volinfo->type == GF_CLUSTER_TYPE_REPLICATE) &&
-                    !dict_get_int32 (dict, "replica-count", &replica_cnt)) {
-                        snprintf (msg, sizeof(msg), "Rebalancing not needed "
-                                  "when reducing replica count. Try without "
-                                  "the 'start' option");
+                    dict_get (dict, "replica-count")) {
+                        snprintf (msg, sizeof(msg), "Migration of data is not "
+                                  "needed when reducing replica count. Use the"
+                                  " 'force' option");
                         errstr = gf_strdup (msg);
                         gf_log (this->name, GF_LOG_ERROR, "%s", errstr);
                         goto out;
@@ -1487,25 +1497,44 @@ glusterd_op_stage_remove_brick (dict_t *dict, char **op_errstr)
                                             "is in progress");
                         goto out;
                 }
+
+                /* Do not allow commit if the bricks are not decommissioned */
+                for ( i = 1; i <= brick_count; i++ ) {
+                        snprintf (key, sizeof (key), "brick%d", i);
+                        ret = dict_get_str (dict, key, &brick);
+                        if (ret) {
+                                snprintf (msg, sizeof (msg),
+                                          "Unable to get %s", key);
+                                errstr = gf_strdup (msg);
+                                goto out;
+                        }
+
+                        ret =
+                        glusterd_volume_brickinfo_get_by_brick(brick, volinfo,
+                                                               &brickinfo);
+                        if (ret) {
+                                snprintf (msg, sizeof (msg), "Incorrect brick "
+                                          "%s for volume %s", brick, volname);
+                                errstr = gf_strdup (msg);
+                                goto out;
+                        }
+                        if ( !brickinfo->decommissioned ) {
+                                snprintf (msg, sizeof (msg), "Brick %s "
+                                          "is not decommissioned. "
+                                          "Use start or force option",
+                                          brick);
+                                errstr = gf_strdup (msg);
+                                ret = -1;
+                                goto out;
+                        }
+                }
+
                 break;
 
         case GF_OP_CMD_COMMIT_FORCE:
                 break;
         }
-
-        ret = dict_get_int32 (dict, "count", &brick_count);
-        if (ret) {
-                gf_log (this->name, GF_LOG_ERROR, "Unable to get brick count");
-                goto out;
-        }
-
         ret = 0;
-        if (volinfo->brick_count == brick_count) {
-                errstr = gf_strdup ("Deleting all the bricks of the "
-                                    "volume is not allowed");
-                ret = -1;
-                goto out;
-        }
 
 out:
         gf_log (this->name, GF_LOG_DEBUG, "Returning %d", ret);
@@ -1644,15 +1673,6 @@ glusterd_op_add_brick (dict_t *dict, char **op_errstr)
                 goto out;
         }
 
-        /* Need to reset the defrag/rebalance status accordingly */
-        switch (volinfo->rebal.defrag_status) {
-        case GF_DEFRAG_STATUS_FAILED:
-        case GF_DEFRAG_STATUS_COMPLETE:
-                volinfo->rebal.defrag_status = 0;
-        default:
-                break;
-        }
-
         ret = glusterd_store_volinfo (volinfo, GLUSTERD_VOLINFO_VER_AC_INCREMENT);
         if (ret)
                 goto out;
@@ -1684,6 +1704,8 @@ glusterd_op_remove_brick (dict_t *dict, char **op_errstr)
         glusterd_brickinfo_t    *tmp           = NULL;
         char                    *task_id_str   = NULL;
         xlator_t                *this          = NULL;
+        dict_t                  *bricks_dict   = NULL;
+        char                    *brick_tmpstr  = NULL;
 
         this = THIS;
         GF_ASSERT (this);
@@ -1724,10 +1746,13 @@ glusterd_op_remove_brick (dict_t *dict, char **op_errstr)
                 }
         }
 
-        /* Clear task-id & rebal.op on commmitting/stopping remove-brick */
+        /* Clear task-id, rebal.op and stored bricks on commmitting/stopping
+         * remove-brick */
         if ((cmd != GF_OP_CMD_START) || (cmd != GF_OP_CMD_STATUS)) {
                 uuid_clear (volinfo->rebal.rebalance_id);
                 volinfo->rebal.op = GD_OP_NONE;
+                dict_unref (volinfo->rebal.dict);
+                volinfo->rebal.dict = NULL;
         }
 
         ret = -1;
@@ -1768,6 +1793,11 @@ glusterd_op_remove_brick (dict_t *dict, char **op_errstr)
         }
 
         case GF_OP_CMD_START:
+                /* Reset defrag status to 'NOT STARTED' whenever a
+                 * remove-brick/rebalance command is issued to remove
+                 * stale information from previous run.
+                 */
+                volinfo->rebal.defrag_status = GF_DEFRAG_STATUS_NOT_STARTED;
                 ret = dict_get_str (dict, GF_REMOVE_BRICK_TID_KEY, &task_id_str);
                 if (ret) {
                         gf_log (this->name, GF_LOG_DEBUG,
@@ -1812,7 +1842,23 @@ glusterd_op_remove_brick (dict_t *dict, char **op_errstr)
                 goto out;
         }
 
-
+        /* Save the list of bricks for later usage only on starting a
+         * remove-brick. Right now this is required for displaying the task
+         * parameters with task status in volume status.
+         */
+        if (GF_OP_CMD_START == cmd) {
+                bricks_dict = dict_new ();
+                if (!bricks_dict) {
+                        ret = -1;
+                        goto out;
+                }
+                ret = dict_set_int32 (bricks_dict, "count", count);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Failed to save remove-brick count");
+                        goto out;
+                }
+        }
         while ( i <= count) {
                 snprintf (key, 256, "brick%d", i);
                 ret = dict_get_str (dict, key, &brick);
@@ -1822,12 +1868,32 @@ glusterd_op_remove_brick (dict_t *dict, char **op_errstr)
                         goto out;
                 }
 
+                if (GF_OP_CMD_START == cmd) {
+                        brick_tmpstr = gf_strdup (brick);
+                        if (!brick_tmpstr) {
+                                ret = -1;
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "Failed to duplicate brick name");
+                                goto out;
+                        }
+                        ret = dict_set_dynstr (bricks_dict, key, brick_tmpstr);
+                        if (ret) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "Failed to add brick to dict");
+                                goto out;
+                        }
+                        brick_tmpstr = NULL;
+                }
+
                 ret = glusterd_op_perform_remove_brick (volinfo, brick, force,
                                                         &need_rebalance);
                 if (ret)
                         goto out;
                 i++;
         }
+        if (GF_OP_CMD_START == cmd)
+                volinfo->rebal.dict = dict_ref (bricks_dict);
+
         ret = dict_get_int32 (dict, "replica-count", &replica_count);
         if (!ret) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1835,6 +1901,7 @@ glusterd_op_remove_brick (dict_t *dict, char **op_errstr)
                         volinfo->replica_count, replica_count,
                         volinfo->volname);
                 volinfo->replica_count = replica_count;
+                volinfo->sub_count = replica_count;
                 volinfo->dist_leaf_count = glusterd_get_dist_leaf_count (volinfo);
                 volinfo->subvol_count = (volinfo->brick_count /
                                          volinfo->dist_leaf_count);
@@ -1894,6 +1961,10 @@ glusterd_op_remove_brick (dict_t *dict, char **op_errstr)
 out:
         if (ret && err_str[0] && op_errstr)
                 *op_errstr = gf_strdup (err_str);
+
+        GF_FREE (brick_tmpstr);
+        if (bricks_dict)
+                dict_unref (bricks_dict);
 
         return ret;
 }

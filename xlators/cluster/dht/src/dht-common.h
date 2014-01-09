@@ -14,6 +14,7 @@
 #endif
 
 #include <regex.h>
+#include <signal.h>
 
 #include "dht-mem-types.h"
 #include "libxlator.h"
@@ -212,6 +213,10 @@ enum gf_defrag_status_t {
         GF_DEFRAG_STATUS_STOPPED,
         GF_DEFRAG_STATUS_COMPLETE,
         GF_DEFRAG_STATUS_FAILED,
+        GF_DEFRAG_STATUS_LAYOUT_FIX_STARTED,
+        GF_DEFRAG_STATUS_LAYOUT_FIX_STOPPED,
+        GF_DEFRAG_STATUS_LAYOUT_FIX_COMPLETE,
+        GF_DEFRAG_STATUS_LAYOUT_FIX_FAILED,
 };
 typedef enum gf_defrag_status_t gf_defrag_status_t;
 
@@ -327,12 +332,7 @@ typedef enum {
 #define DHT_MIGRATION_IN_PROGRESS 1
 #define DHT_MIGRATION_COMPLETED   2
 
-#define DHT_LINKFILE_MODE        (S_ISVTX)
-
-#define check_is_linkfile(i,s,x,n) (                                      \
-                ((st_mode_from_ia ((s)->ia_prot, (s)->ia_type) & ~S_IFMT) \
-                 == DHT_LINKFILE_MODE) &&                                 \
-                dict_get (x, n))
+#define check_is_linkfile(i,s,x,n) (IS_DHT_LINKFILE_MODE (s) && dict_get (x, n))
 
 #define IS_DHT_MIGRATION_PHASE2(buf)  (                                 \
                 IA_ISREG ((buf)->ia_type) &&                            \
@@ -350,6 +350,8 @@ typedef enum {
                         (buf)->ia_prot.sgid = 0;                \
                 }                                               \
         } while (0)
+
+#define dht_inode_missing(op_errno) (op_errno == ENOENT || op_errno == ESTALE)
 
 #define check_is_dir(i,s,x) (IA_ISDIR(s->ia_type))
 
@@ -396,26 +398,18 @@ typedef enum {
         } while (0)
 
 #define is_greater_time(a, an, b, bn) (((a) < (b)) || (((a) == (b)) && ((an) < (bn))))
-
-dht_layout_t    *dht_layout_new         (xlator_t *this, int cnt);
-dht_layout_t    *dht_layout_get         (xlator_t *this, inode_t *inode);
-dht_layout_t    *dht_layout_for_subvol  (xlator_t *this, xlator_t *subvol);
-xlator_t        *dht_layout_search      (xlator_t *this, dht_layout_t *layout,
-                                         const char *name);
-int             dht_layout_normalize    (xlator_t *this, loc_t *loc,
-                                         dht_layout_t *layout,
-                                         uint32_t *missing_p);
-int             dht_layout_anomalies    (xlator_t *this, loc_t *loc,
-                                         dht_layout_t *layout,
-                                         uint32_t *holes_p,
-                                         uint32_t *overlaps_p,
-                                         uint32_t *missing_p,
-                                         uint32_t *down_p,
-                                         uint32_t *misc_p,
-                                         uint32_t *no_space_p);
-int             dht_layout_dir_mismatch (xlator_t *this, dht_layout_t *layout,
-                                         xlator_t *subvol, loc_t *loc,
-                                         dict_t *xattr);
+dht_layout_t                            *dht_layout_new (xlator_t *this, int cnt);
+dht_layout_t                            *dht_layout_get (xlator_t *this, inode_t *inode);
+dht_layout_t                            *dht_layout_for_subvol (xlator_t *this, xlator_t *subvol);
+xlator_t *dht_layout_search (xlator_t   *this, dht_layout_t *layout,
+                             const char *name);
+int                                      dht_layout_normalize (xlator_t *this, loc_t *loc, dht_layout_t *layout);
+int dht_layout_anomalies (xlator_t      *this, loc_t *loc, dht_layout_t *layout,
+                          uint32_t      *holes_p, uint32_t *overlaps_p,
+                          uint32_t      *missing_p, uint32_t *down_p,
+                          uint32_t      *misc_p, uint32_t *no_space_p);
+int dht_layout_dir_mismatch (xlator_t   *this, dht_layout_t *layout,
+                             xlator_t   *subvol, loc_t *loc, dict_t *xattr);
 
 xlator_t *dht_linkfile_subvol (xlator_t *this, inode_t *inode,
                                struct iatt *buf, dict_t *xattr);
@@ -699,6 +693,8 @@ int32_t dht_fallocate(call_frame_t *frame, xlator_t *this, fd_t *fd,
 		      int32_t mode, off_t offset, size_t len, dict_t *xdata);
 int32_t dht_discard(call_frame_t *frame, xlator_t *this, fd_t *fd,
 		    off_t offset, size_t len, dict_t *xdata);
+int32_t dht_zerofill(call_frame_t *frame, xlator_t *this, fd_t *fd,
+                    off_t offset, off_t len, dict_t *xdata);
 
 int32_t dht_init (xlator_t *this);
 void    dht_fini (xlator_t *this);
@@ -736,7 +732,8 @@ int
 gf_defrag_status_get (gf_defrag_info_t *defrag, dict_t *dict);
 
 int
-gf_defrag_stop (gf_defrag_info_t *defrag, dict_t *output);
+gf_defrag_stop (gf_defrag_info_t *defrag, gf_defrag_status_t status,
+                dict_t *output);
 
 void*
 gf_defrag_start (void *this);
@@ -782,5 +779,8 @@ int32_t
 dht_priv_dump (xlator_t *this);
 int32_t
 dht_inodectx_dump (xlator_t *this, inode_t *inode);
+
+int
+dht_inode_ctx_get1 (xlator_t *this, inode_t *inode, xlator_t **subvol);
 
 #endif/* _DHT_H */

@@ -56,6 +56,24 @@ fop_fn (void *data, char *buffer, gf_boolean_t encode)
         return bufsz;
 }
 
+size_t
+number_fn (void *data, char *buffer, gf_boolean_t encode)
+{
+        size_t       bufsz = 0;
+        unsigned int nr    = 0;
+        char buf[20]       = {0,};
+
+        nr = *(unsigned int *) data;
+
+        if (encode) {
+                (void) snprintf (buf, sizeof (buf), "%u", nr);
+                CHANGELOG_FILL_BUFFER (buffer, bufsz, buf, strlen (buf));
+        } else
+                CHANGELOG_FILL_BUFFER (buffer, bufsz, &nr, sizeof (unsigned int));
+
+        return bufsz;
+}
+
 void
 entry_free_fn (void *data)
 {
@@ -93,6 +111,9 @@ changelog_encode_write_xtra (changelog_log_data_t *cld,
                         break;
                 case CHANGELOG_OPT_REC_ENTRY:
                         data = &co->co_entry;
+                        break;
+                case CHANGELOG_OPT_REC_UINT32:
+                        data = &co->co_uint32;
                         break;
                 }
 
@@ -153,4 +174,24 @@ changelog_encode_binary (xlator_t *this, changelog_log_data_t *cld)
         CHANGELOG_FILL_BUFFER (buffer, off, "\0", 1);
 
         return changelog_write_change (priv, buffer, off);
+}
+
+static struct changelog_encoder
+cb_encoder[] = {
+        [CHANGELOG_ENCODE_BINARY] =
+        {
+                .encoder = CHANGELOG_ENCODE_BINARY,
+                .encode = changelog_encode_binary,
+        },
+        [CHANGELOG_ENCODE_ASCII] =
+        {
+                .encoder = CHANGELOG_ENCODE_ASCII,
+                .encode = changelog_encode_ascii,
+        },
+};
+
+void
+changelog_encode_change( changelog_priv_t * priv)
+{
+        priv->ce = &cb_encoder[priv->encode_mode];
 }

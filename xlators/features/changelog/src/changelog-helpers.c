@@ -21,6 +21,7 @@
 #include "changelog-helpers.h"
 #include "changelog-mem-types.h"
 
+#include "changelog-encoders.h"
 #include <pthread.h>
 
 void
@@ -53,6 +54,9 @@ inline void *
 changelog_get_usable_buffer (changelog_local_t *local)
 {
         changelog_log_data_t *cld = NULL;
+
+        if (!local)
+                return NULL;
 
         cld = &local->cld;
         if (!cld->cld_iobuf)
@@ -201,7 +205,7 @@ changelog_open (xlator_t *this,
         (void) snprintf (buffer, 1024, CHANGELOG_HEADER,
                          CHANGELOG_VERSION_MAJOR,
                          CHANGELOG_VERSION_MINOR,
-                         priv->encode_mode);
+                         priv->ce->encoder);
         ret = changelog_write_change (priv, buffer, strlen (buffer));
         if (ret) {
                 close (priv->changelog_fd);
@@ -267,6 +271,7 @@ changelog_handle_change (xlator_t *this,
         int ret = 0;
 
         if (CHANGELOG_TYPE_IS_ROLLOVER (cld->cld_type)) {
+                changelog_encode_change(priv);
                 ret = changelog_start_next_change (this, priv,
                                                    cld->cld_roll_time,
                                                    cld->cld_finale);

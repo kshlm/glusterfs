@@ -98,10 +98,6 @@ static struct argp_option gf_options[] = {
         {"volfile-server", ARGP_VOLFILE_SERVER_KEY, "SERVER", 0,
          "Server to get the volume file from.  This option overrides "
          "--volfile option"},
-        {"volfile-max-fetch-attempts", ARGP_VOLFILE_MAX_FETCH_ATTEMPTS,
-         "MAX-ATTEMPTS", 0, "Maximum number of connect attempts to server. "
-         "This option should be provided with --volfile-server option"
-         "[default: 1]"},
         {"volfile", ARGP_VOLUME_FILE_KEY, "VOLFILE", 0,
          "File to use as VOLUME_FILE"},
         {"spec-file", ARGP_VOLUME_FILE_KEY, "VOLFILE", OPTION_HIDDEN,
@@ -167,7 +163,7 @@ static struct argp_option gf_options[] = {
          "Brick name to be registered with Gluster portmapper" },
         {"brick-port", ARGP_BRICK_PORT_KEY, "BRICK-PORT", OPTION_HIDDEN,
          "Brick Port to be registered with Gluster portmapper" },
-	{"fopen-keep-cache", ARGP_FOPEN_KEEP_CACHE_KEY, 0, 0,
+	{"fopen-keep-cache", ARGP_FOPEN_KEEP_CACHE_KEY, "BOOL", OPTION_ARG_OPTIONAL,
 	 "Do not purge the cache on file open"},
 
         {0, 0, 0, 0, "Fuse options:"},
@@ -383,7 +379,8 @@ set_fuse_mount_options (glusterfs_ctx_t *ctx, dict_t *options)
                 }
         }
 
-	if (cmd_args->fopen_keep_cache) {
+	switch (cmd_args->fopen_keep_cache) {
+	case GF_OPTION_ENABLE:
 		ret = dict_set_static_ptr(options, "fopen-keep-cache",
 			"on");
 		if (ret < 0) {
@@ -392,9 +389,26 @@ set_fuse_mount_options (glusterfs_ctx_t *ctx, dict_t *options)
 				"fopen-keep-cache");
 			goto err;
 		}
+		break;
+	case GF_OPTION_DISABLE:
+		ret = dict_set_static_ptr(options, "fopen-keep-cache",
+			"off");
+		if (ret < 0) {
+			gf_log("glusterfsd", GF_LOG_ERROR,
+				"failed to set dict value for key "
+				"fopen-keep-cache");
+			goto err;
+		}
+		break;
+        case GF_OPTION_DEFERRED: /* default */
+        default:
+                gf_log ("glusterfsd", GF_LOG_DEBUG,
+			"fopen-keep-cache mode %d",
+                        cmd_args->fopen_keep_cache);
+                break;
 	}
 
-	if (cmd_args->gid_timeout) {
+	if (cmd_args->gid_timeout_set) {
 		ret = dict_set_int32(options, "gid-timeout",
 			cmd_args->gid_timeout);
 		if (ret < 0) {
@@ -582,7 +596,58 @@ get_volfp (glusterfs_ctx_t *ctx)
 }
 
 static int
-gf_remember_xlator_option (struct list_head *options, char *arg)
+gf_remember_backup_volfile_server (char *arg)
+{
+        glusterfs_ctx_t         *ctx = NULL;
+        cmd_args_t              *cmd_args = NULL;
+        int                      ret = -1;
+        server_cmdline_t        *server = NULL;
+
+        ctx = glusterfsd_ctx;
+        if (!ctx)
+                goto out;
+        cmd_args = &ctx->cmd_args;
+
+        if(!cmd_args)
+                goto out;
+
+        server = GF_CALLOC (1, sizeof (server_cmdline_t),
+                            gfd_mt_server_cmdline_t);
+        if (!server)
+                goto out;
+
+        INIT_LIST_HEAD(&server->list);
+
+        server->volfile_server = gf_strdup(arg);
+
+        if (!cmd_args->volfile_server) {
+                cmd_args->volfile_server = server->volfile_server;
+                cmd_args->curr_server = server;
+        }
+
+        if (!server->volfile_server) {
+                gf_log ("", GF_LOG_WARNING,
+                        "xlator option %s is invalid", arg);
+                goto out;
+        }
+
+        list_add_tail (&server->list, &cmd_args->volfile_servers);
+
+        ret = 0;
+out:
+        if (ret == -1) {
+                if (server) {
+                        GF_FREE (server->volfile_server);
+                        GF_FREE (server);
+                }
+        }
+
+        return ret;
+
+}
+
+static int
+gf_remember_xlator_option (char *arg)
 {
         glusterfs_ctx_t         *ctx = NULL;
         cmd_args_t              *cmd_args  = NULL;
@@ -673,19 +738,8 @@ parse_opts (int key, char *arg, struct argp_state *state)
 
         switch (key) {
         case ARGP_VOLFILE_SERVER_KEY:
-                cmd_args->volfile_server = gf_strdup (arg);
-                break;
+                gf_remember_backup_volfile_server (arg);
 
-        case ARGP_VOLFILE_MAX_FETCH_ATTEMPTS:
-                n = 0;
-
-                if (gf_string2uint_base10 (arg, &n) == 0) {
-                        cmd_args->max_connect_attempts = n;
-                        break;
-                }
-
-                argp_failure (state, -1, 0,
-                              "Invalid limit on connect attempts %s", arg);
                 break;
 
         case ARGP_READ_ONLY_KEY:
@@ -694,14 +748,12 @@ parse_opts (int key, char *arg, struct argp_state *state)
 
         case ARGP_ACL_KEY:
                 cmd_args->acl = 1;
-		gf_remember_xlator_option (&cmd_args->xlator_options,
-					   "*-md-cache.cache-posix-acl=true");
+                gf_remember_xlator_option ("*-md-cache.cache-posix-acl=true");
                 break;
 
         case ARGP_SELINUX_KEY:
                 cmd_args->selinux = 1;
-		gf_remember_xlator_option (&cmd_args->xlator_options,
-					   "*-md-cache.cache-selinux=true");
+                gf_remember_xlator_option ("*-md-cache.cache-selinux=true");
                 break;
 
         case ARGP_AUX_GFID_MOUNT_KEY:
@@ -906,8 +958,9 @@ parse_opts (int key, char *arg, struct argp_state *state)
                 break;
 
         case ARGP_XLATOR_OPTION_KEY:
-                if (gf_remember_xlator_option (&cmd_args->xlator_options, arg))
-                        argp_failure (state, -1, 0, "invalid xlator option  %s", arg);
+                if (gf_remember_xlator_option (arg))
+                        argp_failure (state, -1, 0, "invalid xlator option  %s",
+                                      arg);
 
                 break;
 
@@ -955,12 +1008,25 @@ parse_opts (int key, char *arg, struct argp_state *state)
                 break;
 
 	case ARGP_FOPEN_KEEP_CACHE_KEY:
-		cmd_args->fopen_keep_cache = 1;
+                if (!arg)
+                        arg = "on";
+
+                if (gf_string2boolean (arg, &b) == 0) {
+                        cmd_args->fopen_keep_cache = b;
+
+                        break;
+                }
+
+                argp_failure (state, -1, 0,
+                              "unknown cache setting \"%s\"", arg);
+
 		break;
 
 	case ARGP_GID_TIMEOUT_KEY:
-		if (!gf_string2int(arg, &cmd_args->gid_timeout))
+		if (!gf_string2int(arg, &cmd_args->gid_timeout)) {
+			cmd_args->gid_timeout_set = _gf_true;
 			break;
+		}
 
 		argp_failure(state, -1, 0, "unknown group list timeout %s", arg);
 		break;
@@ -985,7 +1051,7 @@ parse_opts (int key, char *arg, struct argp_state *state)
 
         case ARGP_FUSE_USE_READDIRP_KEY:
                 if (!arg)
-                        arg = "no";
+                        arg = "yes";
 
                 if (gf_string2boolean (arg, &b) == 0) {
                         if (b) {
@@ -1136,72 +1202,12 @@ gf_get_process_mode (char *exec_name)
 }
 
 
-
-static int
-set_log_file_path (cmd_args_t *cmd_args)
-{
-        int   i = 0;
-        int   j = 0;
-        int   ret = 0;
-        int   port = 0;
-        char  tmp_str[1024] = {0,};
-
-        if (cmd_args->mount_point) {
-                j = 0;
-                i = 0;
-                if (cmd_args->mount_point[0] == '/')
-                        i = 1;
-                for (; i < strlen (cmd_args->mount_point); i++,j++) {
-                        tmp_str[j] = cmd_args->mount_point[i];
-                        if (cmd_args->mount_point[i] == '/')
-                                tmp_str[j] = '-';
-                }
-
-                ret = gf_asprintf (&cmd_args->log_file,
-                                   DEFAULT_LOG_FILE_DIRECTORY "/%s.log",
-                                   tmp_str);
-                goto done;
-        }
-
-        if (cmd_args->volfile) {
-                j = 0;
-                i = 0;
-                if (cmd_args->volfile[0] == '/')
-                        i = 1;
-                for (; i < strlen (cmd_args->volfile); i++,j++) {
-                        tmp_str[j] = cmd_args->volfile[i];
-                        if (cmd_args->volfile[i] == '/')
-                                tmp_str[j] = '-';
-                }
-                ret = gf_asprintf (&cmd_args->log_file,
-                                   DEFAULT_LOG_FILE_DIRECTORY "/%s.log",
-                                   tmp_str);
-                goto done;
-        }
-
-        if (cmd_args->volfile_server) {
-                port = GF_DEFAULT_BASE_PORT;
-
-                if (cmd_args->volfile_server_port)
-                        port = cmd_args->volfile_server_port;
-
-                ret = gf_asprintf (&cmd_args->log_file,
-                                   DEFAULT_LOG_FILE_DIRECTORY "/%s-%s-%d.log",
-                                   cmd_args->volfile_server,
-                                   cmd_args->volfile_id, port);
-        }
-done:
-        return ret;
-}
-
-
 static int
 glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
 {
-        cmd_args_t    *cmd_args = NULL;
-        struct rlimit  lim = {0, };
-        call_pool_t   *pool = NULL;
-        int            ret = -1;
+        cmd_args_t          *cmd_args = NULL;
+        struct rlimit        lim      = {0, };
+        int                  ret      = -1;
 
         xlator_mem_acct_init (THIS, gfd_mt_end);
 
@@ -1228,24 +1234,26 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
                 goto out;
         }
 
-        pool = GF_CALLOC (1, sizeof (call_pool_t),
-                          gfd_mt_call_pool_t);
-        if (!pool) {
+        ctx->pool = GF_CALLOC (1, sizeof (call_pool_t), gfd_mt_call_pool_t);
+        if (!ctx->pool) {
                 gf_log ("", GF_LOG_CRITICAL,
                         "ERROR: glusterfs call pool creation failed");
                 goto out;
         }
 
+        INIT_LIST_HEAD (&ctx->pool->all_frames);
+        LOCK_INIT (&ctx->pool->lock);
+
         /* frame_mem_pool size 112 * 4k */
-        pool->frame_mem_pool = mem_pool_new (call_frame_t, 4096);
-        if (!pool->frame_mem_pool) {
+        ctx->pool->frame_mem_pool = mem_pool_new (call_frame_t, 4096);
+        if (!ctx->pool->frame_mem_pool) {
                 gf_log ("", GF_LOG_CRITICAL,
                         "ERROR: glusterfs frame pool creation failed");
                 goto out;
         }
         /* stack_mem_pool size 256 * 1024 */
-        pool->stack_mem_pool = mem_pool_new (call_stack_t, 1024);
-        if (!pool->stack_mem_pool) {
+        ctx->pool->stack_mem_pool = mem_pool_new (call_stack_t, 1024);
+        if (!ctx->pool->stack_mem_pool) {
                 gf_log ("", GF_LOG_CRITICAL,
                         "ERROR: glusterfs stack pool creation failed");
                 goto out;
@@ -1260,24 +1268,22 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
 
         ctx->dict_pool = mem_pool_new (dict_t, GF_MEMPOOL_COUNT_OF_DICT_T);
         if (!ctx->dict_pool)
-                return -1;
+                goto out;
 
         ctx->dict_pair_pool = mem_pool_new (data_pair_t,
                                             GF_MEMPOOL_COUNT_OF_DATA_PAIR_T);
         if (!ctx->dict_pair_pool)
-                return -1;
+                goto out;
 
         ctx->dict_data_pool = mem_pool_new (data_t, GF_MEMPOOL_COUNT_OF_DATA_T);
         if (!ctx->dict_data_pool)
-                return -1;
-
-        INIT_LIST_HEAD (&pool->all_frames);
-        LOCK_INIT (&pool->lock);
-        ctx->pool = pool;
+                goto out;
 
         pthread_mutex_init (&(ctx->lock), NULL);
 
         ctx->clienttable = gf_clienttable_alloc();
+        if (!ctx->clienttable)
+                goto out;
 
         cmd_args = &ctx->cmd_args;
 
@@ -1295,8 +1301,10 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
 #endif
         cmd_args->fuse_attribute_timeout = -1;
         cmd_args->fuse_entry_timeout = -1;
+	cmd_args->fopen_keep_cache = GF_OPTION_DEFERRED;
 
         INIT_LIST_HEAD (&cmd_args->xlator_options);
+        INIT_LIST_HEAD (&cmd_args->volfile_servers);
 
         lim.rlim_cur = RLIM_INFINITY;
         lim.rlim_max = RLIM_INFINITY;
@@ -1305,29 +1313,16 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
         ret = 0;
 out:
 
-        if (ret && pool) {
-
-                if (pool->frame_mem_pool)
-                        mem_pool_destroy (pool->frame_mem_pool);
-
-                if (pool->stack_mem_pool)
-                        mem_pool_destroy (pool->stack_mem_pool);
-
-                GF_FREE (pool);
-        }
-
         if (ret && ctx) {
-                if (ctx->stub_mem_pool)
-                        mem_pool_destroy (ctx->stub_mem_pool);
-
-                if (ctx->dict_pool)
-                        mem_pool_destroy (ctx->dict_pool);
-
-                if (ctx->dict_data_pool)
-                        mem_pool_destroy (ctx->dict_data_pool);
-
-                if (ctx->dict_pair_pool)
-                        mem_pool_destroy (ctx->dict_pair_pool);
+                if (ctx->pool) {
+                        mem_pool_destroy (ctx->pool->frame_mem_pool);
+                        mem_pool_destroy (ctx->pool->stack_mem_pool);
+                }
+                GF_FREE (ctx->pool);
+                mem_pool_destroy (ctx->stub_mem_pool);
+                mem_pool_destroy (ctx->dict_pool);
+                mem_pool_destroy (ctx->dict_data_pool);
+                mem_pool_destroy (ctx->dict_pair_pool);
         }
 
         return ret;
@@ -1345,7 +1340,7 @@ logging_init (glusterfs_ctx_t *ctx, const char *progpath)
         cmd_args = &ctx->cmd_args;
 
         if (cmd_args->log_file == NULL) {
-                ret = set_log_file_path (cmd_args);
+                ret = gf_set_log_file_path (cmd_args);
                 if (ret == -1) {
                         fprintf (stderr, "ERROR: failed to set the log file path\n");
                         return -1;

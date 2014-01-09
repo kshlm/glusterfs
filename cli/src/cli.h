@@ -18,6 +18,7 @@
 #include "rpc-clnt.h"
 #include "glusterfs.h"
 #include "protocol-common.h"
+#include "logging.h"
 
 #include "cli1-xdr.h"
 
@@ -32,24 +33,9 @@
 #define CLI_DEFAULT_CMD_TIMEOUT              120
 #define CLI_TEN_MINUTES_TIMEOUT              600 //Longer timeout for volume top
 #define DEFAULT_CLI_LOG_FILE_DIRECTORY     DATADIR "/log/glusterfs"
-#define DEFAULT_LOG_FILE_DIRECTORY         DATADIR "/log/glusterfs"
-#define DEFAULT_VAR_RUN_DIRECTORY          DATADIR "/run/gluster"
 #define CLI_VOL_STATUS_BRICK_LEN              55
 #define CLI_TAB_LENGTH                         8
 #define CLI_BRICK_STATUS_LINE_LEN             78
-
-#define CLI_LOCAL_INIT(local, words, frame, dictionary) \
-        do {                                                 \
-                local = cli_local_get ();                    \
-                                                             \
-                if (local) {                                 \
-                        local->words = words;                \
-                        if (dictionary)                      \
-                                local->dict = dictionary;    \
-                        if (frame)                           \
-                                frame->local = local;        \
-                }                                            \
-        } while (0)
 
 enum argp_option_keys {
 	ARGP_DEBUG_KEY = 133,
@@ -59,6 +45,18 @@ enum argp_option_keys {
 #define GLUSTER_MODE_SCRIPT    (1 << 0)
 #define GLUSTER_MODE_ERR_FATAL (1 << 1)
 #define GLUSTER_MODE_XML       (1 << 2)
+#define GLUSTER_MODE_WIGNORE   (1 << 3)
+
+
+#define GLUSTERD_GET_QUOTA_AUX_MOUNT_PATH(abspath, volname, path)      \
+        snprintf (abspath, sizeof (abspath)-1,                          \
+                  DEFAULT_VAR_RUN_DIRECTORY"/%s%s", volname, path);
+
+#define GLUSTERFS_GET_AUX_MOUNT_PIDFILE(pidfile,volname) {               \
+                snprintf (pidfile, PATH_MAX-1,                             \
+                          DEFAULT_VAR_RUN_DIRECTORY"/%s.pid", volname);  \
+        }
+
 struct cli_state;
 struct cli_cmd_word;
 struct cli_cmd_tree;
@@ -66,6 +64,7 @@ struct cli_cmd;
 
 extern char *cli_vol_type_str[];
 extern char *cli_vol_status_str[];
+extern char *cli_vol_task_status_str[];
 
 typedef int (cli_cmd_cbk_t)(struct cli_state *state,
                             struct cli_cmd_word *word,
@@ -128,6 +127,8 @@ struct cli_state {
 
         char                 *log_file;
         gf_loglevel_t         log_level;
+
+        char                 *glusterd_sock;
 };
 
 struct cli_local {
@@ -147,18 +148,6 @@ struct cli_local {
 #endif
 };
 
-struct gf_cli_gsync_detailed_status_ {
-        char *node;
-        char *master;
-        char *slave;
-        char *health;
-        char *uptime;
-        char *files_syncd;
-        char *files_pending;
-        char *bytes_pending;
-        char *deletes_pending;
-};
-
 struct cli_volume_status {
         int            port;
         int            online;
@@ -176,8 +165,6 @@ struct cli_volume_status {
         char          *inode_size;
 #endif
 };
-
-typedef struct gf_cli_gsync_detailed_status_ gf_cli_gsync_status_t;
 
 typedef struct cli_volume_status cli_volume_status_t;
 
@@ -223,7 +210,7 @@ int _cli_err (const char *fmt, ...);
         } while (0)
 
 int
-cli_submit_request (void *req, call_frame_t *frame,
+cli_submit_request (struct rpc_clnt *rpc, void *req, call_frame_t *frame,
                     rpc_clnt_prog_t *prog,
                     int procnum, struct iobref *iobref,
                     xlator_t *this, fop_cbk_fn_t cbkfn, xdrproc_t xdrproc);
@@ -393,6 +380,8 @@ cli_xml_output_generic_volume (char *op, dict_t *dict, int op_ret, int op_errno,
 int
 cli_xml_output_vol_gsync (dict_t *dict, int op_ret, int op_errno,
                           char *op_errstr);
+int
+cli_xml_output_vol_status_tasks_detail (cli_local_t *local, dict_t *dict);
 
 char *
 is_server_debug_xlator (void *myframe);

@@ -155,6 +155,40 @@ glusterd_op_sm_inject_all_acc ()
         return ret;
 }
 
+static int
+glusterd_check_quota_cmd (char *key, char *value, char *errstr, size_t size)
+{
+        int                ret = -1;
+        gf_boolean_t       b   = _gf_false;
+
+        if ((strcmp (key, "quota") == 0) ||
+           (strcmp (key, "features.quota") == 0)) {
+                ret = gf_string2boolean (value, &b);
+                if (ret)
+                        goto out;
+                if (b) {
+                          snprintf (errstr, size," 'gluster "
+                                    "volume set <VOLNAME> %s %s' is "
+                                    "deprecated. Use 'gluster volume "
+                                    "quota <VOLNAME> enable' instead.",
+                                     key, value);
+                          ret = -1;
+                          goto out;
+                } else {
+                          snprintf (errstr, size, " 'gluster "
+                                    "volume set <VOLNAME> %s %s' is "
+                                    "deprecated. Use 'gluster volume "
+                                    "quota <VOLNAME> disable' instead.",
+                                     key, value);
+                          ret = -1;
+                          goto out;
+                }
+        }
+        ret = 0;
+out:
+        return ret;
+}
+
 int
 glusterd_brick_op_build_payload (glusterd_op_t op, glusterd_brickinfo_t *brickinfo,
                                  gd1_mgmt_brick_op_req **req, dict_t *dict)
@@ -236,19 +270,6 @@ glusterd_brick_op_build_payload (glusterd_op_t op, glusterd_brickinfo_t *brickin
 
                 break;
 
-#ifdef HAVE_BD_XLATOR
-        case GD_OP_BD_OP:
-        {
-                brick_req = GF_CALLOC (1, sizeof (*brick_req),
-                                       gf_gld_mt_mop_brick_req_t);
-                if (!brick_req)
-                        goto out;
-
-                brick_req->op = GLUSTERD_BRICK_BD_OP;
-                brick_req->name = "";
-        }
-                break;
-#endif
         default:
                 goto out;
         break;
@@ -556,6 +577,10 @@ glusterd_op_stage_set_volume (dict_t *dict, char **op_errstr)
                                 goto out;
                         }
                 }
+
+                ret = glusterd_check_quota_cmd (key, value, errstr, sizeof (errstr));
+                if (ret)
+                        goto out;
 
                 if (is_key_glusterd_hooks_friendly (key))
                         continue;
@@ -901,18 +926,24 @@ glusterd_op_stage_status_volume (dict_t *dict, char **op_errstr)
         if (cmd & GF_CLI_STATUS_ALL)
                 goto out;
 
+        if ((cmd & GF_CLI_STATUS_QUOTAD) &&
+            (priv->op_version == GD_OP_VERSION_MIN)) {
+                snprintf (msg, sizeof (msg), "The cluster is operating at "
+                          "version 1. Getting the status of quotad is not "
+                          "allowed in this state.");
+                ret = -1;
+                goto out;
+        }
+
         ret = dict_get_str (dict, "volname", &volname);
         if (ret) {
-                gf_log (THIS->name, GF_LOG_ERROR,
-                        "Unable to get volume name");
+                gf_log (this->name, GF_LOG_ERROR, "Unable to get volume name");
                 goto out;
         }
 
         ret = glusterd_volinfo_find (volname, &volinfo);
         if (ret) {
-                snprintf (msg, sizeof(msg), "Volume %s does not exist",
-                          volname);
-                gf_log (THIS->name, GF_LOG_ERROR, "%s", msg);
+                snprintf (msg, sizeof(msg), FMTSTR_CHECK_VOL_EXISTS, volname);
                 ret = -1;
                 goto out;
         }
@@ -925,7 +956,6 @@ glusterd_op_stage_status_volume (dict_t *dict, char **op_errstr)
         if (!ret) {
                 snprintf (msg, sizeof (msg), "Volume %s is not started",
                           volname);
-                gf_log (THIS->name, GF_LOG_ERROR, "%s", msg);
                 ret = -1;
                 goto out;
         }
@@ -940,7 +970,6 @@ glusterd_op_stage_status_volume (dict_t *dict, char **op_errstr)
                         snprintf (msg, sizeof (msg),
                                   "NFS server is disabled for volume %s",
                                   volname);
-                        gf_log (THIS->name, GF_LOG_ERROR, "%s", msg);
                         goto out;
                 }
         } else if ((cmd & GF_CLI_STATUS_SHD) != 0) {
@@ -949,7 +978,6 @@ glusterd_op_stage_status_volume (dict_t *dict, char **op_errstr)
                         snprintf (msg, sizeof (msg),
                                   "Volume %s is not of type replicate",
                                   volname);
-                        gf_log (THIS->name, GF_LOG_ERROR, "%s", msg);
                         goto out;
                 }
 
@@ -961,10 +989,15 @@ glusterd_op_stage_status_volume (dict_t *dict, char **op_errstr)
                         snprintf (msg, sizeof (msg),
                                   "Self-heal Daemon is disabled for volume %s",
                                   volname);
-                        gf_log (THIS->name, GF_LOG_ERROR, "%s", msg);
                         goto out;
                 }
-
+        } else if ((cmd & GF_CLI_STATUS_QUOTAD) != 0) {
+                if (!glusterd_is_volume_quota_enabled (volinfo)) {
+                        ret = -1;
+                        snprintf (msg, sizeof (msg), "Volume %s does not have "
+                                  "quota enabled", volname);
+                        goto out;
+                }
         } else if ((cmd & GF_CLI_STATUS_BRICK) != 0) {
                 ret = dict_get_str (dict, "brick", &brick);
                 if (ret)
@@ -975,8 +1008,6 @@ glusterd_op_stage_status_volume (dict_t *dict, char **op_errstr)
                 if (ret) {
                         snprintf (msg, sizeof(msg), "No brick %s in"
                                   " volume %s", brick, volname);
-                        gf_log (THIS->name, GF_LOG_ERROR, "%s", msg);
-
                         ret = -1;
                         goto out;
                 }
@@ -992,7 +1023,7 @@ glusterd_op_stage_status_volume (dict_t *dict, char **op_errstr)
                         *op_errstr = gf_strdup ("Validation Failed for Status");
         }
 
-        gf_log (THIS->name, GF_LOG_DEBUG, "Returning: %d", ret);
+        gf_log (this->name, GF_LOG_DEBUG, "Returning: %d", ret);
         return ret;
 }
 
@@ -1063,7 +1094,8 @@ glusterd_op_stage_stats_volume (dict_t *dict, char **op_errstr)
 
         }
         if ((GF_CLI_STATS_STOP == stats_op) ||
-            (GF_CLI_STATS_INFO == stats_op)) {
+            (GF_CLI_STATS_INFO <= stats_op &&
+             stats_op <= GF_CLI_STATS_INFO_CUMULATIVE)) {
                 if (_gf_false == glusterd_is_profile_on (volinfo)) {
                         snprintf (msg, sizeof (msg), "Profile on Volume %s is"
                                   " not started", volinfo->volname);
@@ -1073,7 +1105,8 @@ glusterd_op_stage_stats_volume (dict_t *dict, char **op_errstr)
                 }
         }
         if ((GF_CLI_STATS_TOP == stats_op) ||
-            (GF_CLI_STATS_INFO == stats_op)) {
+            (GF_CLI_STATS_INFO <= stats_op &&
+             stats_op <= GF_CLI_STATS_INFO_CUMULATIVE)) {
                 if (_gf_false == glusterd_is_volume_started (volinfo)) {
                         snprintf (msg, sizeof (msg), "Volume %s is not started.",
                                   volinfo->volname);
@@ -1101,14 +1134,17 @@ _delete_reconfig_opt (dict_t *this, char *key, data_t *value, void *data)
         GF_ASSERT (data);
         is_force = (int32_t*)data;
 
-        if (*is_force != 1 &&
-            (_gf_true == glusterd_check_voloption_flags (key,
-                                                         OPT_FLAG_FORCE))) {
+        if (*is_force != 1) {
+                if (_gf_true == glusterd_check_voloption_flags (key,
+                                                         OPT_FLAG_FORCE)) {
                 /* indicate to caller that we don't set the option
                  * due to being protected
                  */
-                *is_force = -1;
-                goto out;
+                        *is_force = *is_force | GD_OP_PROTECTED;
+                        goto out;
+                } else {
+                        *is_force = *is_force | GD_OP_UNPROTECTED;
+                }
         }
 
         gf_log ("", GF_LOG_DEBUG, "deleting dict with key=%s,value=%s",
@@ -1277,7 +1313,7 @@ out:
 }
 
 static int
-glusterd_op_reset_volume (dict_t *dict, char **op_errstr)
+glusterd_op_reset_volume (dict_t *dict, char **op_rspstr)
 {
         glusterd_volinfo_t      *volinfo    = NULL;
         int                     ret         = -1;
@@ -1332,10 +1368,18 @@ glusterd_op_reset_volume (dict_t *dict, char **op_errstr)
                 quorum_action = _gf_true;
 
         ret = glusterd_options_reset (volinfo, key, &is_force);
-        if (is_force == -1) {
-                ret = -1;
-                gf_asprintf(op_errstr, "'%s' is protected. To reset use 'force'.",
-                            key);
+        if (ret == -1) {
+                gf_asprintf(op_rspstr, "Volume reset : failed");
+        } else if (is_force & GD_OP_PROTECTED) {
+                if (is_force & GD_OP_UNPROTECTED) {
+                        gf_asprintf (op_rspstr, "All unprotected fields were"
+                                     " reset. To reset the protected fields,"
+                                     " use 'force'.");
+                } else {
+                        ret = -1;
+                        gf_asprintf (op_rspstr, "'%s' is protected. To reset"
+                                     " use 'force'.", key);
+                }
         }
 
 out:
@@ -1475,6 +1519,7 @@ glusterd_op_set_volume (dict_t *dict)
         char                                     str[50] = {0, };
         char                                    *op_errstr = NULL;
         gf_boolean_t                             global_opt    = _gf_false;
+        gf_boolean_t                             global_opts_set = _gf_false;
         glusterd_volinfo_t                      *voliter = NULL;
         int32_t                                  dict_count = 0;
         gf_boolean_t                             check_op_version = _gf_false;
@@ -1536,7 +1581,6 @@ glusterd_op_set_volume (dict_t *dict)
 
         for (count = 1; ret != -1 ; count++) {
 
-                global_opt = _gf_false;
                 sprintf (str, "key%d", count);
                 ret = dict_get_str (dict, str, &key);
                 if (ret)
@@ -1584,8 +1628,11 @@ glusterd_op_set_volume (dict_t *dict)
                         }
                 }
 
-                if (glusterd_check_globaloption (key))
+                global_opt = _gf_false;
+                if (glusterd_check_globaloption (key)) {
                         global_opt = _gf_true;
+                        global_opts_set = _gf_true;
+                }
 
                 if (!global_opt)
                         value = gf_strdup (value);
@@ -1641,7 +1688,7 @@ glusterd_op_set_volume (dict_t *dict)
                 }
         }
 
-        if (!global_opt) {
+        if (!global_opts_set) {
                 gd_update_volume_op_versions (volinfo);
                 ret = glusterd_create_volfiles_and_notify_services (volinfo);
                 if (ret) {
@@ -1861,6 +1908,8 @@ glusterd_op_stats_volume (dict_t *dict, char **op_errstr,
                 glusterd_remove_profile_volume_options (volinfo);
                 break;
         case GF_CLI_STATS_INFO:
+        case GF_CLI_STATS_INFO_INCREMENTAL:
+        case GF_CLI_STATS_INFO_CUMULATIVE:
         case GF_CLI_STATS_TOP:
                 //info is already collected in brick op.
                 //just goto out;
@@ -1901,6 +1950,105 @@ out:
 }
 
 static int
+_add_brick_name_to_dict (dict_t *dict, char *key, glusterd_brickinfo_t *brick)
+{
+        int     ret = -1;
+        char    tmp[1024] = {0,};
+        char    *brickname = NULL;
+        xlator_t *this = NULL;
+
+        GF_ASSERT (dict);
+        GF_ASSERT (key);
+        GF_ASSERT (brick);
+
+        this = THIS;
+        GF_ASSERT (this);
+
+        snprintf (tmp, sizeof (tmp), "%s:%s", brick->hostname, brick->path);
+        brickname = gf_strdup (tmp);
+        if (!brickname) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to dup brick name");
+                goto out;
+        }
+
+        ret = dict_set_dynstr (dict, key, brickname);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Failed to add brick name to dict");
+                goto out;
+        }
+        brickname = NULL;
+out:
+        if (brickname)
+                GF_FREE (brickname);
+        return ret;
+}
+
+static int
+_add_remove_bricks_to_dict (dict_t *dict, glusterd_volinfo_t *volinfo,
+                            char *prefix)
+{
+        int             ret = -1;
+        int             count = 0;
+        int             i = 0;
+        char            brick_key[1024] = {0,};
+        char            dict_key[1024] ={0,};
+        char            *brick = NULL;
+        xlator_t        *this = NULL;
+
+        GF_ASSERT (dict);
+        GF_ASSERT (volinfo);
+        GF_ASSERT (prefix);
+
+        this = THIS;
+        GF_ASSERT (this);
+
+        ret = dict_get_int32 (volinfo->rebal.dict, "count", &count);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Failed to get brick count");
+                goto out;
+        }
+
+        snprintf (dict_key, sizeof (dict_key), "%s.count", prefix);
+        ret = dict_set_int32 (dict, dict_key, count);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Failed to set brick count in dict");
+                goto out;
+        }
+
+        for (i = 1; i <= count; i++) {
+                memset (brick_key, 0, sizeof (brick_key));
+                snprintf (brick_key, sizeof (brick_key), "brick%d", i);
+
+                ret = dict_get_str (volinfo->rebal.dict, brick_key, &brick);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Unable to get %s", brick_key);
+                        goto out;
+                }
+
+                memset (dict_key, 0, sizeof (dict_key));
+                snprintf (dict_key, sizeof (dict_key), "%s.%s", prefix,
+                          brick_key);
+                ret = dict_set_str (dict, dict_key, brick);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Failed to add brick to dict");
+                        goto out;
+                }
+                brick = NULL;
+        }
+
+out:
+        return ret;
+}
+
+/* This adds the respective task-id and all available parameters of a task into
+ * a dictionary
+ */
+static int
 _add_task_to_dict (dict_t *dict, glusterd_volinfo_t *volinfo, int op, int index)
 {
 
@@ -1917,13 +2065,34 @@ _add_task_to_dict (dict_t *dict, glusterd_volinfo_t *volinfo, int op, int index)
         GF_ASSERT (this);
 
         switch (op) {
-        case GD_OP_REBALANCE:
         case GD_OP_REMOVE_BRICK:
+                snprintf (key, sizeof (key), "task%d", index);
+                ret = _add_remove_bricks_to_dict (dict, volinfo, key);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Failed to add remove bricks to dict");
+                        goto out;
+                }
+        case GD_OP_REBALANCE:
                 uuid_str = gf_strdup (uuid_utoa (volinfo->rebal.rebalance_id));
                 status = volinfo->rebal.defrag_status;
                 break;
 
         case GD_OP_REPLACE_BRICK:
+                snprintf (key, sizeof (key), "task%d.src-brick", index);
+                ret = _add_brick_name_to_dict (dict, key,
+                                               volinfo->rep_brick.src_brick);
+                if (ret)
+                        goto out;
+                memset (key, 0, sizeof (key));
+
+                snprintf (key, sizeof (key), "task%d.dst-brick", index);
+                ret = _add_brick_name_to_dict (dict, key,
+                                               volinfo->rep_brick.dst_brick);
+                if (ret)
+                        goto out;
+                memset (key, 0, sizeof (key));
+
                 uuid_str = gf_strdup (uuid_utoa (volinfo->rep_brick.rb_id));
                 status = volinfo->rep_brick.rb_status;
                 break;
@@ -1936,8 +2105,7 @@ _add_task_to_dict (dict_t *dict, glusterd_volinfo_t *volinfo, int op, int index)
         }
 
         snprintf (key, sizeof (key), "task%d.type", index);
-        ret = dict_set_str (dict, key,
-                            (char *)gd_op_list[op]);
+        ret = dict_set_str (dict, key, (char *)gd_op_list[op]);
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "Error setting task type in dict");
@@ -1946,7 +2114,6 @@ _add_task_to_dict (dict_t *dict, glusterd_volinfo_t *volinfo, int op, int index)
 
         memset (key, 0, sizeof (key));
         snprintf (key, sizeof (key), "task%d.id", index);
-
 
         if (!uuid_str)
                 goto out;
@@ -1974,6 +2141,50 @@ out:
 }
 
 static int
+glusterd_aggregate_task_status (dict_t *rsp_dict, glusterd_volinfo_t *volinfo)
+{
+        int        ret   = -1;
+        int        tasks = 0;
+        xlator_t  *this  = NULL;
+
+        this = THIS;
+        GF_ASSERT (this);
+
+        if (!uuid_is_null (volinfo->rebal.rebalance_id)) {
+                ret = _add_task_to_dict (rsp_dict, volinfo, volinfo->rebal.op,
+                                         tasks);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Failed to add task details to dict");
+                        goto out;
+                }
+                tasks++;
+        }
+
+        if (!uuid_is_null (volinfo->rep_brick.rb_id)) {
+                ret = _add_task_to_dict (rsp_dict, volinfo, GD_OP_REPLACE_BRICK,
+                                         tasks);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Failed to add task details to dict");
+                        goto out;
+                }
+                tasks++;
+        }
+
+        ret = dict_set_int32 (rsp_dict, "tasks", tasks);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Error setting tasks count in dict");
+                goto out;
+        }
+        ret = 0;
+
+out:
+        return ret;
+}
+
+static int
 glusterd_op_status_volume (dict_t *dict, char **op_errstr,
                            dict_t *rsp_dict)
 {
@@ -1993,7 +2204,6 @@ glusterd_op_status_volume (dict_t *dict, char **op_errstr,
         gf_boolean_t            nfs_disabled    = _gf_false;
         gf_boolean_t            shd_enabled     = _gf_true;
         gf_boolean_t            origin_glusterd = _gf_false;
-        int                     tasks           = 0;
 
         this = THIS;
         GF_ASSERT (this);
@@ -2009,7 +2219,7 @@ glusterd_op_status_volume (dict_t *dict, char **op_errstr,
         if (ret)
                 goto out;
 
-        if (is_origin_glusterd ()) {
+        if (origin_glusterd) {
                 ret = 0;
                 if ((cmd & GF_CLI_STATUS_ALL)) {
                         ret = glusterd_get_all_volnames (rsp_dict);
@@ -2054,6 +2264,14 @@ glusterd_op_status_volume (dict_t *dict, char **op_errstr,
                 other_count++;
                 node_count++;
 
+        } else if ((cmd & GF_CLI_STATUS_QUOTAD) != 0) {
+                ret = glusterd_add_node_to_dict ("quotad", rsp_dict, 0,
+                                                 vol_opts);
+                if (ret)
+                        goto out;
+                other_count++;
+                node_count++;
+
         } else if ((cmd & GF_CLI_STATUS_BRICK) != 0) {
                 ret = dict_get_str (dict, "brick", &brick);
                 if (ret)
@@ -2075,6 +2293,10 @@ glusterd_op_status_volume (dict_t *dict, char **op_errstr,
                                                            rsp_dict,
                                                            brick_index);
                 node_count++;
+
+        } else if ((cmd & GF_CLI_STATUS_TASKS) != 0) {
+                ret = glusterd_aggregate_task_status (rsp_dict, volinfo);
+                goto out;
 
         } else {
                 list_for_each_entry (brickinfo, &volinfo->bricks, brick_list) {
@@ -2125,6 +2347,17 @@ glusterd_op_status_volume (dict_t *dict, char **op_errstr,
                                         goto out;
                                 other_count++;
                                 node_count++;
+                                other_index++;
+                        }
+                        if (glusterd_is_volume_quota_enabled (volinfo)) {
+                                ret = glusterd_add_node_to_dict ("quotad",
+                                                                 rsp_dict,
+                                                                 other_index,
+                                                                 vol_opts);
+                                if (ret)
+                                        goto out;
+                                other_count++;
+                                node_count++;
                         }
                 }
         }
@@ -2150,38 +2383,15 @@ glusterd_op_status_volume (dict_t *dict, char **op_errstr,
 
         /* Active tasks */
         /* Tasks are added only for normal volume status request for either a
-         * single volume or all volumes, and only by the origin glusterd
+         * single volume or all volumes
          */
-        if (((cmd & GF_CLI_STATUS_MASK) != GF_CLI_STATUS_NONE) ||
-            !(cmd & (GF_CLI_STATUS_VOL | GF_CLI_STATUS_ALL)) ||
-            !origin_glusterd)
+        if (!glusterd_status_has_tasks (cmd))
                 goto out;
 
-        if (!uuid_is_null (volinfo->rebal.rebalance_id)) {
-                ret = _add_task_to_dict (rsp_dict, volinfo, volinfo->rebal.op,
-                                         tasks);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Failed to add task details to dict");
-                        goto out;
-                }
-                tasks++;
-        }
-        if (!uuid_is_null (volinfo->rep_brick.rb_id)) {
-                ret = _add_task_to_dict (rsp_dict, volinfo, GD_OP_REPLACE_BRICK,
-                                         tasks);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Failed to add task details to dict");
-                        goto out;
-                }
-                tasks++;
-        }
-
-        ret = dict_set_int32 (rsp_dict, "tasks", tasks);
+        ret = glusterd_aggregate_task_status (rsp_dict, volinfo);
         if (ret)
-                gf_log (this->name, GF_LOG_ERROR,
-                        "Error setting tasks count in dict");
+                goto out;
+        ret = 0;
 
 out:
         gf_log (this->name, GF_LOG_DEBUG, "Returning %d", ret);
@@ -2603,9 +2813,6 @@ glusterd_op_build_payload (dict_t **req, char **op_errstr, dict_t *op_ctx)
                 case GD_OP_STATEDUMP_VOLUME:
                 case GD_OP_CLEARLOCKS_VOLUME:
                 case GD_OP_DEFRAG_BRICK_VOLUME:
-#ifdef HAVE_BD_XLATOR
-                case GD_OP_BD_OP:
-#endif
                         {
                                 ret = dict_get_str (dict, "volname", &volname);
                                 if (ret) {
@@ -2855,7 +3062,7 @@ static int32_t
 glusterd_op_start_rb_timer (dict_t *dict)
 {
         int32_t         op = 0;
-        struct timeval  timeout = {0, };
+        struct timespec timeout = {0, };
         glusterd_conf_t *priv = NULL;
         int32_t         ret = -1;
         dict_t          *rb_ctx = NULL;
@@ -2876,7 +3083,7 @@ glusterd_op_start_rb_timer (dict_t *dict)
         }
 
         timeout.tv_sec  = 5;
-        timeout.tv_usec = 0;
+        timeout.tv_nsec = 0;
 
 
         rb_ctx = dict_copy (dict, rb_ctx);
@@ -2954,6 +3161,97 @@ out:
         return ret;
 }
 
+static int
+reassign_defrag_status (dict_t *dict, char *key, gf_defrag_status_t *status)
+{
+        int ret = 0;
+
+        if (!*status)
+                return ret;
+
+        switch (*status) {
+        case GF_DEFRAG_STATUS_STARTED:
+                *status = GF_DEFRAG_STATUS_LAYOUT_FIX_STARTED;
+                break;
+
+        case GF_DEFRAG_STATUS_STOPPED:
+                *status = GF_DEFRAG_STATUS_LAYOUT_FIX_STOPPED;
+                break;
+
+        case GF_DEFRAG_STATUS_COMPLETE:
+                *status = GF_DEFRAG_STATUS_LAYOUT_FIX_COMPLETE;
+                break;
+
+        case GF_DEFRAG_STATUS_FAILED:
+                *status = GF_DEFRAG_STATUS_LAYOUT_FIX_FAILED;
+                break;
+        default:
+                break;
+         }
+
+        ret = dict_set_int32(dict, key, *status);
+        if (ret)
+                gf_log (THIS->name, GF_LOG_WARNING,
+                        "failed to reset defrag %s in dict", key);
+
+        return ret;
+}
+
+/* Check and reassign the defrag_status enum got from the rebalance process
+ * of all peers so that the rebalance-status CLI command can display if a
+ * full-rebalance or just a fix-layout was carried out.
+ */
+static int
+glusterd_op_check_peer_defrag_status (dict_t *dict, int count)
+{
+        glusterd_volinfo_t *volinfo  = NULL;
+        gf_defrag_status_t status    = GF_DEFRAG_STATUS_NOT_STARTED;
+        char               key[256]  = {0,};
+        char               *volname  = NULL;
+        int                ret       = -1;
+        int                i         = 1;
+
+        ret = dict_get_str (dict, "volname", &volname);
+        if (ret) {
+                gf_log (THIS->name, GF_LOG_WARNING, "Unable to get volume name");
+                goto out;
+        }
+
+        ret = glusterd_volinfo_find (volname, &volinfo);
+        if (ret) {
+                gf_log (THIS->name, GF_LOG_WARNING, FMTSTR_CHECK_VOL_EXISTS,
+                        volname);
+                goto out;
+        }
+
+        if (volinfo->rebal.defrag_cmd != GF_DEFRAG_CMD_START_LAYOUT_FIX) {
+                /* Fix layout was not issued; we don't need to reassign
+                   the status */
+                ret = 0;
+                goto out;
+        }
+
+        do {
+                memset (key, 0, 256);
+                snprintf (key, 256, "status-%d", i);
+                ret = dict_get_int32 (dict, key, (int32_t *)&status);
+                if (ret) {
+                        gf_log (THIS->name, GF_LOG_WARNING,
+                                "failed to get defrag %s", key);
+                        goto out;
+                }
+                ret = reassign_defrag_status (dict, key, &status);
+                if (ret)
+                        goto out;
+                i++;
+        } while (i <= count);
+
+        ret = 0;
+out:
+        return ret;
+
+}
+
 /* This function is used to modify the op_ctx dict before sending it back
  * to cli. This is useful in situations like changing the peer uuids to
  * hostnames etc.
@@ -3016,6 +3314,38 @@ glusterd_op_modify_op_ctx (glusterd_op_t op, void *ctx)
 
                 count = brick_index_max + other_count + 1;
 
+                /* add 'brick%d.peerid' into op_ctx with value of 'brick%d.path'.
+                   nfs/sshd like services have this additional uuid */
+                {
+                        char  key[1024];
+                        char *uuid_str = NULL;
+                        char *uuid = NULL;
+                        int   i;
+
+                        for (i = brick_index_max + 1; i < count; i++) {
+                                memset (key, 0, sizeof (key));
+                                snprintf (key, sizeof (key), "brick%d.path", i);
+                                ret = dict_get_str (op_ctx, key, &uuid_str);
+                                if (!ret) {
+                                        memset (key, 0, sizeof (key));
+                                        snprintf (key, sizeof (key),
+                                                  "brick%d.peerid", i);
+                                        uuid = gf_strdup (uuid_str);
+                                        if (!uuid) {
+                                                gf_log (this->name, GF_LOG_DEBUG,
+                                                        "unable to create dup of"
+                                                        " uuid_str");
+                                                continue;
+                                        }
+                                        ret = dict_set_dynstr (op_ctx, key,
+                                                               uuid);
+                                        if (ret != 0) {
+                                                GF_FREE (uuid);
+                                        }
+                                }
+                        }
+                }
+
                 ret = glusterd_op_volume_dict_uuid_to_hostname (op_ctx,
                                                                 "brick%d.path",
                                                                 0, count);
@@ -3057,12 +3387,49 @@ glusterd_op_modify_op_ctx (glusterd_op_t op, void *ctx)
                         goto out;
                 }
 
+                /* add 'node-name-%d' into op_ctx with value uuid_str.
+                   this will be used to convert to hostname later */
+                {
+                        char  key[1024];
+                        char *uuid_str = NULL;
+                        char *uuid = NULL;
+                        int   i;
+
+                        for (i = 1; i <= count; i++) {
+                                memset (key, 0, sizeof (key));
+                                snprintf (key, sizeof (key), "node-uuid-%d", i);
+                                ret = dict_get_str (op_ctx, key, &uuid_str);
+                                if (!ret) {
+                                        memset (key, 0, sizeof (key));
+                                        snprintf (key, sizeof (key),
+                                                  "node-name-%d", i);
+                                        uuid = gf_strdup (uuid_str);
+                                        if (!uuid) {
+                                                gf_log (this->name, GF_LOG_DEBUG,
+                                                        "unable to create dup of"
+                                                        " uuid_str");
+                                                continue;
+                                        }
+                                        ret = dict_set_dynstr (op_ctx, key,
+                                                               uuid);
+                                        if (ret != 0) {
+                                                GF_FREE (uuid);
+                                        }
+                                }
+                        }
+                }
+
                 ret = glusterd_op_volume_dict_uuid_to_hostname (op_ctx,
-                                                                "node-uuid-%d",
+                                                                "node-name-%d",
                                                                 1, (count + 1));
                 if (ret)
                         gf_log (this->name, GF_LOG_WARNING,
                                 "Failed uuid to hostname conversion");
+
+                ret = glusterd_op_check_peer_defrag_status (op_ctx, count);
+                if (ret)
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Failed to reset defrag status for fix-layout");
                 break;
 
         default:
@@ -3784,7 +4151,8 @@ glusterd_op_stage_validate (glusterd_op_t op, dict_t *dict, char **op_errstr,
                         break;
 
                 case GD_OP_QUOTA:
-                        ret = glusterd_op_stage_quota (dict, op_errstr);
+                        ret = glusterd_op_stage_quota (dict, op_errstr,
+                                                       rsp_dict);
                         break;
 
                 case GD_OP_STATUS_VOLUME:
@@ -3808,11 +4176,6 @@ glusterd_op_stage_validate (glusterd_op_t op, dict_t *dict, char **op_errstr,
                         ret = glusterd_op_stage_clearlocks_volume (dict,
                                                                    op_errstr);
                         break;
-#ifdef HAVE_BD_XLATOR
-                case GD_OP_BD_OP:
-                        ret = glusterd_op_stage_bd (dict, op_errstr);
-                        break;
-#endif
 
                 case GD_OP_COPY_FILE:
                         ret = glusterd_op_stage_copy_file (dict, op_errstr);
@@ -3924,11 +4287,6 @@ glusterd_op_commit_perform (glusterd_op_t op, dict_t *dict, char **op_errstr,
                         ret = glusterd_op_clearlocks_volume (dict, op_errstr,
                                                              rsp_dict);
                         break;
-#ifdef HAVE_BD_XLATOR
-                case GD_OP_BD_OP:
-                        ret = 0;
-                        break;
-#endif
 
                 case GD_OP_COPY_FILE:
                         ret = glusterd_op_copy_file (dict, op_errstr);
@@ -3950,6 +4308,7 @@ glusterd_op_commit_perform (glusterd_op_t op, dict_t *dict, char **op_errstr,
         gf_log (this->name, GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
+
 
 static int
 glusterd_bricks_select_stop_volume (dict_t *dict, char **op_errstr,
@@ -4121,6 +4480,8 @@ glusterd_bricks_select_profile_volume (dict_t *dict, char **op_errstr,
                 goto out;
                 break;
         case GF_CLI_STATS_INFO:
+        case GF_CLI_STATS_INFO_INCREMENTAL:
+        case GF_CLI_STATS_INFO_CUMULATIVE:
                 ret = dict_get_str_boolean (dict, "nfs", _gf_false);
                 if (ret) {
                         if (!glusterd_is_nodesvc_online ("nfs")) {
@@ -4267,24 +4628,95 @@ out:
 }
 
 int
+get_replica_index_for_per_replica_cmd (glusterd_volinfo_t *volinfo,
+                                       dict_t *dict) {
+        int                     ret = 0;
+        char                    *hostname = NULL;
+        char                    *path = NULL;
+        int                     index = 0;
+        glusterd_brickinfo_t   *brickinfo = NULL;
+        int                     cmd_replica_index = -1;
+        int                     replica_count = -1;
+
+
+        if (!dict)  {
+                ret = -1;
+                goto out;
+        }
+
+        ret = dict_get_str (dict, "per-replica-cmd-hostname", &hostname);
+        if (ret)
+                goto out;
+        ret = dict_get_str (dict, "per-replica-cmd-path", &path);
+        if (ret)
+                goto out;
+
+        replica_count = volinfo->replica_count;
+
+        list_for_each_entry (brickinfo, &volinfo->bricks, brick_list) {
+                if (uuid_is_null (brickinfo->uuid))
+                        (void)glusterd_resolve_brick (brickinfo);
+                if (!strcmp (brickinfo->path,  path) &&
+                    !strcmp (brickinfo->hostname, hostname)) {
+                        cmd_replica_index = index/(replica_count);
+                        goto out;
+                }
+                index++;
+        }
+
+
+out:
+        if (ret)
+                cmd_replica_index = -1;
+
+        return cmd_replica_index;
+}
+
+int
 _select_rxlators_with_local_bricks (xlator_t *this, glusterd_volinfo_t *volinfo,
-                                    dict_t *dict)
+                                    dict_t *dict, cli_cmd_type type)
 {
         glusterd_brickinfo_t    *brickinfo = NULL;
         glusterd_conf_t         *priv   = NULL;
-        int                     index = 1;
+        int                     index = 0;
         int                     rxlator_count = 0;
         int                     replica_count = 0;
         gf_boolean_t            add     = _gf_false;
+        int                     ret = 0;
+        int                     cmd_replica_index = -1;
 
         priv = this->private;
         replica_count = volinfo->replica_count;
+
+        if (type == PER_REPLICA) {
+
+                cmd_replica_index = get_replica_index_for_per_replica_cmd
+                                    (volinfo, dict);
+                if (cmd_replica_index == -1) {
+                        ret = -1;
+                        goto err;
+                }
+        }
+
+        index = 1;
+
         list_for_each_entry (brickinfo, &volinfo->bricks, brick_list) {
                 if (uuid_is_null (brickinfo->uuid))
                         (void)glusterd_resolve_brick (brickinfo);
 
-                if (!uuid_compare (MY_UUID, brickinfo->uuid))
-                        add = _gf_true;
+                switch (type) {
+                        case ALL_REPLICA:
+                                if (!uuid_compare (MY_UUID, brickinfo->uuid))
+                                        add = _gf_true;
+                                break;
+                        case PER_REPLICA:
+                                if (!uuid_compare (MY_UUID, brickinfo->uuid) &&
+                                 ((index-1)/replica_count == cmd_replica_index))
+
+                                                add = _gf_true;
+                                break;
+                }
+
                 if (index % replica_count == 0) {
                         if (add) {
                                 _add_rxlator_to_dict (dict, volinfo->volname,
@@ -4297,6 +4729,10 @@ _select_rxlators_with_local_bricks (xlator_t *this, glusterd_volinfo_t *volinfo,
 
                 index++;
         }
+err:
+        if (ret)
+                rxlator_count = -1;
+
         return rxlator_count;
 }
 
@@ -4337,64 +4773,10 @@ _select_rxlators_for_full_self_heal (xlator_t *this,
         return rxlator_count;
 }
 
-#ifdef HAVE_BD_XLATOR
-static int
-glusterd_bricks_select_bd (dict_t *dict, char **op_errstr)
-{
-        int                        ret           = -1;
-        glusterd_conf_t            *priv         = NULL;
-        xlator_t                   *this         = NULL;
-        glusterd_pending_node_t    *pending_node = NULL;
-        glusterd_volinfo_t         *volinfo      = NULL;
-        char                       *volname      = NULL;
-        glusterd_brickinfo_t       *brickinfo    = NULL;
-        int                         brick_index  = -1;
-
-        this = THIS;
-        GF_ASSERT (this);
-        priv = this->private;
-        GF_ASSERT (priv);
-
-        ret = dict_get_str (dict, "volname", &volname);
-        if (ret) {
-                gf_log (this->name, GF_LOG_ERROR, "Unable to get volname");
-                goto out;
-        }
-        ret = glusterd_volinfo_find (volname, &volinfo);
-        if (ret)
-                goto out;
-
-        pending_node = GF_CALLOC (1, sizeof (*pending_node),
-                                  gf_gld_mt_pending_node_t);
-        if (!pending_node) {
-                ret = -1;
-                goto out;
-        }
-
-        list_for_each_entry (brickinfo, &volinfo->bricks, brick_list) {
-                brick_index++;
-                if (uuid_compare (brickinfo->uuid, MY_UUID) ||
-                    !glusterd_is_brick_started (brickinfo)) {
-                        continue;
-                }
-                pending_node->node = brickinfo;
-                pending_node->type = GD_NODE_BRICK;
-                pending_node->index = brick_index;
-                list_add_tail (&pending_node->list,
-                               &opinfo.pending_bricks);
-                pending_node = NULL;
-        }
-
-        ret = 0;
-
-out:
-        gf_log (THIS->name, GF_LOG_DEBUG, "Returning ret %d", ret);
-        return ret;
-}
-#endif
 
 static int
-fill_shd_status_for_local_bricks (dict_t *dict, glusterd_volinfo_t *volinfo)
+fill_shd_status_for_local_bricks (dict_t *dict, glusterd_volinfo_t *volinfo,
+                                  cli_cmd_type type, dict_t *req_dict)
 {
         glusterd_brickinfo_t    *brickinfo = NULL;
         char                    msg[1024] = {0,};
@@ -4403,9 +4785,21 @@ fill_shd_status_for_local_bricks (dict_t *dict, glusterd_volinfo_t *volinfo)
         int                     index = 0;
         int                     ret = 0;
         xlator_t               *this = NULL;
+        int                     cmd_replica_index = -1;
 
         this = THIS;
         snprintf (msg, sizeof (msg), "self-heal-daemon is not running on");
+
+        if (type == PER_REPLICA) {
+                cmd_replica_index = get_replica_index_for_per_replica_cmd
+                                    (volinfo, req_dict);
+                if (cmd_replica_index == -1) {
+                        gf_log (THIS->name, GF_LOG_ERROR, "Could not find the "
+                                "replica index for per replica type command");
+                        ret = -1;
+                        goto out;
+                }
+        }
 
         list_for_each_entry (brickinfo, &volinfo->bricks, brick_list) {
                 if (uuid_is_null (brickinfo->uuid))
@@ -4414,6 +4808,14 @@ fill_shd_status_for_local_bricks (dict_t *dict, glusterd_volinfo_t *volinfo)
                 if (uuid_compare (MY_UUID, brickinfo->uuid)) {
                         index++;
                         continue;
+                }
+
+                if (type == PER_REPLICA) {
+                      if (cmd_replica_index != (index/volinfo->replica_count)) {
+                              index++;
+                              continue;
+                        }
+
                 }
                 snprintf (key, sizeof (key), "%d-status",index);
                 snprintf (value, sizeof (value), "%s %s",msg,
@@ -4483,21 +4885,49 @@ glusterd_bricks_select_heal_volume (dict_t *dict, char **op_errstr,
                 goto out;
         }
 
+        switch (heal_op) {
+                case GF_AFR_OP_INDEX_SUMMARY:
+                case GF_AFR_OP_STATISTICS_HEAL_COUNT:
+                if (!glusterd_is_nodesvc_online ("glustershd")) {
+                        if (!rsp_dict) {
+                                gf_log (this->name, GF_LOG_ERROR, "Received "
+                                        "empty ctx.");
+                                goto out;
+                        }
 
-        if (!glusterd_is_nodesvc_online ("glustershd") &&
-            (heal_op == GF_AFR_OP_INDEX_SUMMARY)) {
-
-                if (!rsp_dict) {
-                        gf_log (this->name, GF_LOG_ERROR, "Received empty "
-                                "ctx.");
+                        ret = fill_shd_status_for_local_bricks (rsp_dict,
+                                                                volinfo,
+                                                                ALL_REPLICA,
+                                                                dict);
+                        if (ret)
+                                gf_log (this->name, GF_LOG_ERROR, "Unable to "
+                                        "fill the shd status for the local "
+                                        "bricks");
                         goto out;
-                }
 
-                ret = fill_shd_status_for_local_bricks (rsp_dict, volinfo);
-                if (ret)
-                        gf_log (this->name, GF_LOG_ERROR, "Unable to fill the shd"
-                                " status for the local bricks");
-                goto out;
+                }
+                break;
+                case GF_AFR_OP_STATISTICS_HEAL_COUNT_PER_REPLICA:
+                if (!glusterd_is_nodesvc_online ("glustershd")) {
+                        if (!rsp_dict) {
+                                gf_log (this->name, GF_LOG_ERROR, "Received "
+                                        "empty ctx.");
+                                goto out;
+                        }
+                        ret = fill_shd_status_for_local_bricks (rsp_dict,
+                                                                volinfo,
+                                                                PER_REPLICA,
+                                                                dict);
+                        if (ret)
+                                gf_log (this->name, GF_LOG_ERROR, "Unable to "
+                                        "fill the shd status for the local"
+                                        " bricks.");
+                        goto out;
+
+                }
+                break;
+                default:
+                        break;
         }
 
 
@@ -4507,14 +4937,28 @@ glusterd_bricks_select_heal_volume (dict_t *dict, char **op_errstr,
                                                                      volinfo,
                                                                      dict);
                 break;
+        case GF_AFR_OP_STATISTICS_HEAL_COUNT_PER_REPLICA:
+                rxlator_count = _select_rxlators_with_local_bricks (this,
+                                                                   volinfo,
+                                                                   dict,
+                                                                   PER_REPLICA);
+                break;
         default:
                 rxlator_count = _select_rxlators_with_local_bricks (this,
                                                                     volinfo,
-                                                                    dict);
+                                                                    dict,
+                                                                   ALL_REPLICA);
                 break;
         }
         if (!rxlator_count)
                 goto out;
+        if (rxlator_count == -1){
+                gf_log (this->name, GF_LOG_ERROR, "Could not determine the"
+                        "translator count");
+                ret = -1;
+                goto out;
+        }
+
         ret = dict_set_int32 (dict, "count", rxlator_count);
         if (ret)
                 goto out;
@@ -4583,9 +5027,6 @@ out:
         return ret;
 }
 
-
-
-
 static int
 glusterd_bricks_select_status_volume (dict_t *dict, char **op_errstr,
                                       struct list_head *selected)
@@ -4625,6 +5066,7 @@ glusterd_bricks_select_status_volume (dict_t *dict, char **op_errstr,
         case GF_CLI_STATUS_CALLPOOL:
         case GF_CLI_STATUS_NFS:
         case GF_CLI_STATUS_SHD:
+        case GF_CLI_STATUS_QUOTAD:
                 break;
         default:
                 goto out;
@@ -4702,6 +5144,25 @@ glusterd_bricks_select_status_volume (dict_t *dict, char **op_errstr,
                 }
                 pending_node->node = priv->shd;
                 pending_node->type = GD_NODE_SHD;
+                pending_node->index = 0;
+                list_add_tail (&pending_node->list, selected);
+
+                ret = 0;
+        } else if ((cmd & GF_CLI_STATUS_QUOTAD) != 0) {
+                if (!glusterd_is_nodesvc_online ("quotad")) {
+                        gf_log (this->name, GF_LOG_ERROR, "Quotad is not "
+                                "running");
+                        ret = -1;
+                        goto out;
+                }
+                pending_node = GF_CALLOC (1, sizeof (*pending_node),
+                                          gf_gld_mt_pending_node_t);
+                if (!pending_node) {
+                        ret = -1;
+                        goto out;
+                }
+                pending_node->node = priv->quotad;
+                pending_node->type = GD_NODE_QUOTAD;
                 pending_node->index = 0;
                 list_add_tail (&pending_node->list, selected);
 
@@ -4882,11 +5343,7 @@ glusterd_op_bricks_select (glusterd_op_t op, dict_t *dict, char **op_errstr,
                 ret = glusterd_bricks_select_rebalance_volume (dict, op_errstr,
                                                                selected);
                 break;
-#ifdef HAVE_BD_XLATOR
-        case GD_OP_BD_OP:
-                ret = glusterd_bricks_select_bd (dict, op_errstr);
-                break;
-#endif
+
         default:
                 break;
          }
@@ -5459,9 +5916,6 @@ glusterd_op_free_ctx (glusterd_op_t op, void *ctx)
                 case GD_OP_STATEDUMP_VOLUME:
                 case GD_OP_CLEARLOCKS_VOLUME:
                 case GD_OP_DEFRAG_BRICK_VOLUME:
-#ifdef HAVE_BD_XLATOR
-                case GD_OP_BD_OP:
-#endif
                         dict_unref (ctx);
                         break;
                 default:
@@ -5490,4 +5944,3 @@ glusterd_op_sm_init ()
         pthread_mutex_init (&gd_op_sm_lock, NULL);
         return 0;
 }
-

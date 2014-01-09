@@ -38,6 +38,10 @@
 #define MAX_IOVEC 16
 #endif
 
+#define RPCSVC_DEFAULT_OUTSTANDING_RPC_LIMIT 64
+#define RPCSVC_MAX_OUTSTANDING_RPC_LIMIT 65536
+#define RPCSVC_MIN_OUTSTANDING_RPC_LIMIT 0 /* No limit i.e. Unlimited */
+
 #define GF_RPCSVC       "rpc-service"
 #define RPCSVC_THREAD_STACK_SIZE ((size_t)(1024 * GF_UNIT_KB))
 
@@ -181,7 +185,9 @@ struct rpcsvc_request {
         /* Might want to move this to AUTH_UNIX specific state since this array
          * is not available for every authentication scheme.
          */
-        gid_t                   auxgids[GF_MAX_AUX_GROUPS];
+        gid_t                   *auxgids;
+        gid_t                   auxgidsmall[SMALL_GROUP_COUNT];
+        gid_t                   *auxgidlarge;
         int                     auxgidcount;
 
 
@@ -276,14 +282,14 @@ struct rpcsvc_request {
                 int gidcount = 0;                                       \
                 if (req->svc->root_squash) {                            \
                         if (req->uid == RPC_ROOT_UID)                   \
-                                req->uid = RPC_NOBODY_UID;              \
+                                req->uid = req->svc->anonuid;           \
                         if (req->gid == RPC_ROOT_GID)                   \
-                                req->gid = RPC_NOBODY_GID;              \
+                                req->gid = req->svc->anongid;           \
                         for (gidcount = 0; gidcount < req->auxgidcount; \
                              ++gidcount) {                              \
                                 if (!req->auxgids[gidcount])            \
                                         req->auxgids[gidcount] =        \
-                                                RPC_NOBODY_GID;         \
+                                                req->svc->anongid;      \
                         }                                               \
                 }                                                       \
         } while (0);
@@ -435,6 +441,9 @@ extern int
 rpcsvc_program_register_portmap (rpcsvc_program_t *newprog, uint32_t port);
 
 extern int
+rpcsvc_program_unregister_portmap (rpcsvc_program_t *newprog);
+
+extern int
 rpcsvc_register_portmap_enabled (rpcsvc_t *svc);
 
 /* Inits the global RPC service data structures.
@@ -443,6 +452,9 @@ rpcsvc_register_portmap_enabled (rpcsvc_t *svc);
 extern rpcsvc_t *
 rpcsvc_init (xlator_t *xl, glusterfs_ctx_t *ctx, dict_t *options,
              uint32_t poolcount);
+
+extern int
+rpcsvc_reconfigure_options (rpcsvc_t *svc, dict_t *options);
 
 int
 rpcsvc_register_notify (rpcsvc_t *svc, rpcsvc_notify_t notify, void *mydata);
@@ -486,8 +498,7 @@ rpcsvc_transport_peeraddr (rpc_transport_t *trans, char *addrstr, int addrlen,
                            struct sockaddr_storage *returnsa, socklen_t sasize);
 
 extern int
-rpcsvc_auth_check (dict_t *options, char *volname,
-                   rpc_transport_t *trans);
+rpcsvc_auth_check (rpcsvc_t *svc, char *volname, rpc_transport_t *trans);
 
 extern int
 rpcsvc_transport_privport_check (rpcsvc_t *svc, char *volname,
@@ -542,10 +553,13 @@ struct rpcsvc_auth_list {
 };
 
 extern int
-rpcsvc_auth_request_init (rpcsvc_request_t *req);
+rpcsvc_auth_request_init (rpcsvc_request_t *req, struct rpc_msg *callmsg);
 
 extern int
 rpcsvc_auth_init (rpcsvc_t *svc, dict_t *options);
+
+extern int
+rpcsvc_auth_reconf (rpcsvc_t *svc, dict_t *options);
 
 extern int
 rpcsvc_auth_transport_init (rpc_transport_t *xprt);
@@ -579,11 +593,13 @@ rpcsvc_transport_unix_options_build (dict_t **options, char *filepath);
 int
 rpcsvc_set_allow_insecure (rpcsvc_t *svc, dict_t *options);
 int
+rpcsvc_set_addr_namelookup (rpcsvc_t *svc, dict_t *options);
+int
 rpcsvc_set_root_squash (rpcsvc_t *svc, dict_t *options);
 int
+rpcsvc_set_outstanding_rpc_limit (rpcsvc_t *svc, dict_t *options);
+int
 rpcsvc_auth_array (rpcsvc_t *svc, char *volname, int *autharr, int arrlen);
-char *
-rpcsvc_volume_allowed (dict_t *options, char *volname);
 rpcsvc_vector_sizer
 rpcsvc_get_program_vector_sizer (rpcsvc_t *svc, uint32_t prognum,
                                  uint32_t progver, uint32_t procnum);

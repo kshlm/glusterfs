@@ -32,6 +32,8 @@
 
 typedef struct {
 	uint64_t	gl_id;
+	uint64_t        gl_uid;
+	uint64_t        gl_gid;
 	int		gl_count;
 	gid_t		*gl_list;
 	time_t		gl_deadline;
@@ -45,7 +47,8 @@ typedef struct {
 } gid_cache_t;
 
 int gid_cache_init(gid_cache_t *, uint32_t);
-const gid_list_t *gid_cache_lookup(gid_cache_t *, uint64_t);
+int gid_cache_reconf(gid_cache_t *, uint32_t);
+const gid_list_t *gid_cache_lookup(gid_cache_t *, uint64_t, uint64_t, uint64_t);
 void gid_cache_release(gid_cache_t *, const gid_list_t *);
 int gid_cache_add(gid_cache_t *, gid_list_t *);
 

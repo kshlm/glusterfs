@@ -268,13 +268,6 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                 goto out;
         }
 
-        if (volinfo->backend == GD_VOL_BK_BD) {
-                snprintf (msg, sizeof (msg), "replace brick not supported "
-                       "for Block backend volume");
-                *op_errstr = gf_strdup (msg);
-                goto out;
-        }
-
         if (GLUSTERD_STATUS_STARTED != volinfo->status) {
                 ret = -1;
                 snprintf (msg, sizeof (msg), "volume: %s is not started",
@@ -457,7 +450,7 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                 GLUSTERD_GET_BRICK_PIDFILE (pidfile, volinfo, src_brickinfo,
                                             priv);
                 if ((replace_op != GF_REPLACE_OP_COMMIT_FORCE) &&
-                    !glusterd_is_service_running (pidfile, NULL)) {
+                    !gf_is_service_running (pidfile, NULL)) {
                         snprintf(msg, sizeof(msg), "Source brick %s:%s "
                                  "is not online.", src_brickinfo->hostname,
                                  src_brickinfo->path);
@@ -2019,5 +2012,9 @@ out:
         else
                 ret = glusterd_op_sm_inject_event (GD_OP_EVENT_COMMIT_ACC, NULL);
 
-        glusterd_op_sm ();
+        synclock_lock (&priv->big_lock);
+        {
+                glusterd_op_sm ();
+        }
+        synclock_unlock (&priv->big_lock);
 }

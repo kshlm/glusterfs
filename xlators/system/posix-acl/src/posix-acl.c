@@ -15,11 +15,31 @@
 
 #include "posix-acl.h"
 #include "posix-acl-xattr.h"
+#include "posix-acl-mem-types.h"
 
 
 #define UINT64(ptr) ((uint64_t)((long)(ptr)))
 #define PTR(num) ((void *)((long)(num)))
 
+
+int32_t
+mem_acct_init (xlator_t *this)
+{
+        int     ret = -1;
+
+        if (!this)
+                return ret;
+
+        ret = xlator_mem_acct_init (this, gf_posix_acl_mt_end + 1);
+
+        if (ret != 0) {
+                gf_log(this->name, GF_LOG_ERROR, "Memory accounting init"
+                       "failed");
+                return ret;
+        }
+
+        return ret;
+}
 
 static uid_t
 r00t ()
@@ -186,7 +206,7 @@ acl_permits (call_frame_t *frame, inode_t *inode, int want)
 
         ace = acl->entries;
 
-        if (acl->count > 3)
+        if (acl->count > POSIX_ACL_MINIMAL_ACE_COUNT)
                 acl_present = 1;
 
         for (i = 0; i < acl->count; i++) {
@@ -277,7 +297,7 @@ posix_acl_ctx_get (inode_t *inode, xlator_t *this)
         if ((ret == 0) && (int_ctx))
                 return PTR(int_ctx);
 
-        ctx = CALLOC (1, sizeof (*ctx));
+        ctx = GF_CALLOC (1, sizeof (*ctx), gf_posix_acl_mt_ctx_t);
         if (!ctx)
                 return NULL;
 
@@ -333,7 +353,8 @@ posix_acl_new (xlator_t *this, int entrycnt)
         struct posix_acl *acl = NULL;
         struct posix_ace *ace = NULL;
 
-        acl = CALLOC (1, sizeof (*acl) + (entrycnt * sizeof (*ace)));
+        acl = GF_CALLOC (1, sizeof (*acl) + (entrycnt * sizeof (*ace)),
+                         gf_posix_acl_mt_posix_ace_t);
         if (!acl)
                 return NULL;
 
@@ -348,7 +369,7 @@ posix_acl_new (xlator_t *this, int entrycnt)
 void
 posix_acl_destroy (xlator_t *this, struct posix_acl *acl)
 {
-        FREE (acl);
+       GF_FREE (acl);
 
         return;
 }
@@ -577,7 +598,7 @@ posix_acl_inherit (xlator_t *this, loc_t *loc, dict_t *params, mode_t mode,
         ctx->perm = retmode;
 
         size_access = posix_acl_to_xattr (this, acl_access, NULL, 0);
-        xattr_access = CALLOC (1, size_access);
+        xattr_access = GF_CALLOC (1, size_access, gf_posix_acl_mt_char);
         if (!xattr_access) {
                 gf_log (this->name, GF_LOG_ERROR, "out of memory");
                 ret = -1;
@@ -600,7 +621,7 @@ posix_acl_inherit (xlator_t *this, loc_t *loc, dict_t *params, mode_t mode,
         acl_default = posix_acl_ref (this, par_default);
 
         size_default = posix_acl_to_xattr (this, acl_default, NULL, 0);
-        xattr_default = CALLOC (1, size_default);
+        xattr_default = GF_CALLOC (1, size_default, gf_posix_acl_mt_char);
         if (!xattr_default) {
                 gf_log (this->name, GF_LOG_ERROR, "out of memory");
                 ret = -1;
@@ -663,7 +684,12 @@ int
 posix_acl_ctx_update (inode_t *inode, xlator_t *this, struct iatt *buf)
 {
         struct posix_acl_ctx *ctx = NULL;
+	struct posix_acl     *acl = NULL;
+	struct posix_ace     *ace = NULL;
+	struct posix_ace     *mask_ce = NULL;
+	struct posix_ace     *group_ce = NULL;
         int                   ret = 0;
+	int                   i = 0;
 
         ctx = posix_acl_ctx_get (inode, this);
         if (!ctx) {
@@ -676,7 +702,46 @@ posix_acl_ctx_update (inode_t *inode, xlator_t *this, struct iatt *buf)
                 ctx->uid   = buf->ia_uid;
                 ctx->gid   = buf->ia_gid;
                 ctx->perm  = st_mode_from_ia (buf->ia_prot, buf->ia_type);
+
+		acl = ctx->acl_access;
+		if (!acl || !(acl->count > POSIX_ACL_MINIMAL_ACE_COUNT))
+			goto unlock;
+
+		/* This is an extended ACL (not minimal acl). In case we
+		   are only refreshing from iatt and not ACL xattrs (for
+		   e.g. from postattributes of setattr() call, we need to
+		   update the corresponding ACEs as well.
+		*/
+		ace = acl->entries;
+		for (i = 0; i < acl->count; i++) {
+			switch (ace->tag) {
+			case POSIX_ACL_USER_OBJ:
+				ace->perm = (ctx->perm & S_IRWXU) >> 6;
+				break;
+			case POSIX_ACL_USER:
+			case POSIX_ACL_GROUP:
+				break;
+			case POSIX_ACL_GROUP_OBJ:
+				group_ce = ace;
+				break;
+			case POSIX_ACL_MASK:
+				mask_ce = ace;
+				break;
+			case POSIX_ACL_OTHER:
+				ace->perm = (ctx->perm & S_IRWXO);
+				break;
+			}
+			ace++;
+		}
+
+		if (mask_ce)
+			mask_ce->perm = (ctx->perm & S_IRWXG) >> 3;
+		else if (group_ce)
+			group_ce->perm = (ctx->perm & S_IRWXG) >> 3;
+		else
+			ret = -1;
         }
+unlock:
         UNLOCK(&inode->lock);
 out:
         return ret;
@@ -2006,7 +2071,7 @@ posix_acl_forget (xlator_t *this, inode_t *inode)
         if (ctx->acl_default)
                 posix_acl_unref (this, ctx->acl_default);
 
-        FREE (ctx);
+        GF_FREE (ctx);
 out:
         return 0;
 }
@@ -2034,7 +2099,7 @@ init (xlator_t *this)
         struct posix_acl        *minacl = NULL;
         struct posix_ace        *minace = NULL;
 
-        conf = CALLOC (1, sizeof (*conf));
+        conf = GF_CALLOC (1, sizeof (*conf), gf_posix_acl_mt_conf_t);
         if (!conf) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "out of memory");

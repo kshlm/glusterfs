@@ -12,6 +12,7 @@
 #include "fuse-bridge.h"
 #include "mount-gluster-compat.h"
 #include "glusterfs.h"
+#include "glusterfs-acl.h"
 
 #ifdef __NetBSD__
 #undef open /* in perfuse.h, pulled from mount-gluster-compat.h */
@@ -49,6 +50,13 @@ fuse_invalidate(xlator_t *this, inode_t *inode)
                      uuid_utoa (inode->gfid));
         fuse_invalidate_inode(this, nodeid);
 
+        return 0;
+}
+
+static int32_t
+fuse_forget_cbk (xlator_t *this, inode_t *inode)
+{
+        //Nothing to free in inode ctx, hence return.
         return 0;
 }
 
@@ -2309,6 +2317,16 @@ fuse_flush (xlator_t *this, fuse_in_header_t *finh, void *msg)
         return;
 }
 
+int
+fuse_internal_release (xlator_t *this, fd_t *fd)
+{
+        //This is a place holder function to prevent "xlator does not implement
+        //release_cbk" Warning log.
+        //Actual release happens as part of fuse_release which gets executed
+        //when kernel fuse sends it.
+        return 0;
+}
+
 static void
 fuse_release (xlator_t *this, fuse_in_header_t *finh, void *msg)
 {
@@ -2721,6 +2739,7 @@ fuse_readdirp (xlator_t *this, fuse_in_header_t *finh, void *msg)
 	fuse_resolve_and_resume (state, fuse_readdirp_resume);
 }
 
+#ifdef FALLOC_FL_KEEP_SIZE
 static int
 fuse_fallocate_cbk(call_frame_t *frame, void *cookie, xlator_t *this,
 		   int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
@@ -2761,6 +2780,7 @@ fuse_fallocate(xlator_t *this, fuse_in_header_t *finh, void *msg)
 	fuse_resolve_fd_init(state, &state->resolve, state->fd);
 	fuse_resolve_and_resume(state, fuse_fallocate_resume);
 }
+#endif /* FALLOC_FL_KEEP_SIZE */
 
 
 static void
@@ -3004,8 +3024,8 @@ fuse_setxattr (xlator_t *this, fuse_in_header_t *finh, void *msg)
         }
 
         if (!priv->acl) {
-                if ((strcmp (name, "system.posix_acl_access") == 0) ||
-                    (strcmp (name, "system.posix_acl_default") == 0)) {
+                if ((strcmp (name, POSIX_ACL_ACCESS_XATTR) == 0) ||
+                    (strcmp (name, POSIX_ACL_DEFAULT_XATTR) == 0)) {
                         send_fuse_err (this, finh, EOPNOTSUPP);
                         GF_FREE (finh);
                         return;
@@ -3038,7 +3058,7 @@ fuse_setxattr (xlator_t *this, fuse_in_header_t *finh, void *msg)
                 return;
         }
 
-        if (!strcmp (GFID_XATTR_KEY, name)) {
+        if (!strcmp (GFID_XATTR_KEY, name) || !strcmp (GF_XATTR_VOL_ID_KEY, name)) {
                 send_fuse_err (this, finh, EPERM);
                 GF_FREE (finh);
                 return;
@@ -3340,8 +3360,8 @@ fuse_getxattr (xlator_t *this, fuse_in_header_t *finh, void *msg)
 #endif
 
         if (!priv->acl) {
-                if ((strcmp (name, "system.posix_acl_access") == 0) ||
-                    (strcmp (name, "system.posix_acl_default") == 0)) {
+                if ((strcmp (name, POSIX_ACL_ACCESS_XATTR) == 0) ||
+                    (strcmp (name, POSIX_ACL_DEFAULT_XATTR) == 0)) {
                         op_errno = ENOTSUP;
                         goto err;
                 }
@@ -3353,8 +3373,6 @@ fuse_getxattr (xlator_t *this, fuse_in_header_t *finh, void *msg)
                         goto err;
                 }
         }
-
-        GET_STATE (this, finh, state);
 
         fuse_resolve_inode_init (state, &state->resolve, finh->nodeid);
 
@@ -3478,7 +3496,7 @@ fuse_removexattr (xlator_t *this, fuse_in_header_t *finh, void *msg)
         int32_t       ret = -1;
         char *newkey = NULL;
 
-        if (!strcmp (GFID_XATTR_KEY, name)) {
+        if (!strcmp (GFID_XATTR_KEY, name) || !strcmp (GF_XATTR_VOL_ID_KEY, name)) {
                 send_fuse_err (this, finh, EPERM);
                 GF_FREE (finh);
                 return;
@@ -3791,8 +3809,8 @@ fuse_init (xlator_t *this, fuse_in_header_t *finh, void *msg)
                 }
                 priv->revchan_in  = pfd[0];
                 priv->revchan_out = pfd[1];
-                ret = pthread_create (&messenger, NULL, notify_kernel_loop,
-                                      this);
+                ret = gf_thread_create (&messenger, NULL, notify_kernel_loop,
+					this);
                 if (ret != 0) {
                         gf_log ("glusterfs-fuse", GF_LOG_ERROR,
                                 "failed to start messenger daemon (%s)",
@@ -3828,6 +3846,40 @@ fuse_init (xlator_t *this, fuse_in_header_t *finh, void *msg)
                 if (fini->flags & FUSE_DO_READDIRPLUS)
                         fino.flags |= FUSE_DO_READDIRPLUS;
         }
+
+	if (priv->fopen_keep_cache == 2) {
+		/* If user did not explicitly set --fopen-keep-cache[=off],
+		   then check if kernel support FUSE_AUTO_INVAL_DATA and ...
+		*/
+		if (fini->flags & FUSE_AUTO_INVAL_DATA) {
+			/* ... enable fopen_keep_cache mode if supported.
+			*/
+			gf_log ("glusterfs-fuse", GF_LOG_DEBUG, "Detected "
+				"support for FUSE_AUTO_INVAL_DATA. Enabling "
+				"fopen_keep_cache automatically.");
+			fino.flags |= FUSE_AUTO_INVAL_DATA;
+			priv->fopen_keep_cache = 1;
+		} else {
+			gf_log ("glusterfs-fuse", GF_LOG_DEBUG, "No support "
+				"for FUSE_AUTO_INVAL_DATA. Disabling "
+				"fopen_keep_cache.");
+			/* ... else disable. */
+			priv->fopen_keep_cache = 0;
+		}
+	} else if (priv->fopen_keep_cache == 1) {
+		/* If user explicitly set --fopen-keep-cache[=on],
+		   then enable FUSE_AUTO_INVAL_DATA if possible.
+		*/
+		if (fini->flags & FUSE_AUTO_INVAL_DATA) {
+			gf_log ("glusterfs-fuse", GF_LOG_DEBUG, "fopen_keep_cache "
+				"is explicitly set. Enabling FUSE_AUTO_INVAL_DATA");
+			fino.flags |= FUSE_AUTO_INVAL_DATA;
+		} else {
+			gf_log ("glusterfs-fuse", GF_LOG_WARNING, "fopen_keep_cache "
+				"is explicitly set. Support for "
+				"FUSE_AUTO_INVAL_DATA is missing");
+		}
+	}
 
 	if (fini->flags & FUSE_ASYNC_DIO)
 		fino.flags |= FUSE_ASYNC_DIO;
@@ -4852,9 +4904,10 @@ dump_history_fuse (circular_buffer_t *cb, void *data)
 int
 fuse_graph_setup (xlator_t *this, glusterfs_graph_t *graph)
 {
-        inode_table_t  *itable = NULL;
-        int             ret = 0;
-        fuse_private_t *priv = NULL;
+        inode_table_t     *itable     = NULL;
+        int                ret        = 0, winds = 0;
+        fuse_private_t    *priv       = NULL;
+        glusterfs_graph_t *prev_graph = NULL;
 
         priv = this->private;
 
@@ -4875,12 +4928,29 @@ fuse_graph_setup (xlator_t *this, glusterfs_graph_t *graph)
 
         pthread_mutex_lock (&priv->sync_mutex);
         {
-                priv->next_graph = graph;
-                priv->event_recvd = 0;
+                prev_graph = priv->next_graph;
 
-                pthread_cond_signal (&priv->sync_cond);
+                if ((prev_graph != NULL) && (prev_graph->id > graph->id)) {
+                        /* there was a race and an old graph was initialised
+                         * before new one.
+                         */
+                        prev_graph = graph;
+                } else {
+                        priv->next_graph = graph;
+                        priv->event_recvd = 0;
+
+                        pthread_cond_signal (&priv->sync_cond);
+                }
+
+                if (prev_graph != NULL)
+                        winds = ((xlator_t *)prev_graph->top)->winds;
         }
         pthread_mutex_unlock (&priv->sync_mutex);
+
+        if ((prev_graph != NULL) && (winds == 0)) {
+                xlator_notify (prev_graph->top, GF_EVENT_PARENT_DOWN,
+                               prev_graph->top, NULL);
+        }
 
         gf_log ("fuse", GF_LOG_INFO, "switched to graph %d",
                 ((graph) ? graph->id : 0));
@@ -4932,8 +5002,8 @@ notify (xlator_t *this, int32_t event, void *data, ...)
                 if (!private->fuse_thread_started) {
                         private->fuse_thread_started = 1;
 
-                        ret = pthread_create (&private->fuse_thread, NULL,
-                                              fuse_thread_proc, this);
+                        ret = gf_thread_create (&private->fuse_thread, NULL,
+						fuse_thread_proc, this);
                         if (ret != 0) {
                                 gf_log (this->name, GF_LOG_DEBUG,
                                         "pthread_create() failed (%s)",
@@ -5021,7 +5091,9 @@ static fuse_handler_t *fuse_std_ops[FUSE_OP_HIGH] = {
      /* [FUSE_POLL] */
      /* [FUSE_NOTIFY_REPLY] */
 	[FUSE_BATCH_FORGET]= fuse_batch_forget,
+#ifdef FALLOC_FL_KEEP_SIZE
 	[FUSE_FALLOCATE]   = fuse_fallocate,
+#endif /* FALLOC_FL_KEEP_SIZE */
 	[FUSE_READDIRPLUS] = fuse_readdirp,
 };
 
@@ -5073,6 +5145,7 @@ init (xlator_t *this_xl)
         int                fsname_allocated = 0;
         glusterfs_ctx_t   *ctx = NULL;
         gf_boolean_t       sync_to_mount = _gf_false;
+        gf_boolean_t       fopen_keep_cache = _gf_false;
         unsigned long      mntflags = 0;
         char              *mnt_args = NULL;
         eh_t              *event = NULL;
@@ -5218,8 +5291,12 @@ init (xlator_t *this_xl)
                 GF_ASSERT (ret == 0);
         }
 
-        GF_OPTION_INIT("fopen-keep-cache", priv->fopen_keep_cache, bool,
-                cleanup_exit);
+	priv->fopen_keep_cache = 2;
+	if (dict_get (options, "fopen-keep-cache")) {
+		GF_OPTION_INIT("fopen-keep-cache", fopen_keep_cache, bool,
+			       cleanup_exit);
+		priv->fopen_keep_cache = fopen_keep_cache;
+	}
 
         GF_OPTION_INIT("gid-timeout", priv->gid_cache_timeout, int32,
                 cleanup_exit);
@@ -5308,7 +5385,7 @@ init (xlator_t *this_xl)
         if (priv->fd == -1)
                 goto cleanup_exit;
 
-        event = eh_new (FUSE_EVENT_HISTORY_SIZE, _gf_false);
+        event = eh_new (FUSE_EVENT_HISTORY_SIZE, _gf_false, NULL);
         if (!event) {
                 gf_log (this_xl->name, GF_LOG_ERROR,
                         "could not create a new event history");
@@ -5390,6 +5467,8 @@ struct xlator_fops fops;
 
 struct xlator_cbks cbks = {
         .invalidate = fuse_invalidate,
+        .forget     = fuse_forget_cbk,
+        .release    = fuse_internal_release
 };
 
 

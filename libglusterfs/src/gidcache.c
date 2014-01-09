@@ -35,11 +35,27 @@ int gid_cache_init(gid_cache_t *cache, uint32_t timeout)
 }
 
 /*
+ * Reconfigure the cache timeout.
+ */
+int gid_cache_reconf(gid_cache_t *cache, uint32_t timeout)
+{
+        if (!cache)
+                return -1;
+
+        LOCK(&cache->gc_lock);
+        cache->gc_max_age = timeout;
+        UNLOCK(&cache->gc_lock);
+
+        return 0;
+}
+
+/*
  * Look up an ID in the cache. If found, return the actual cache entry to avoid
  * an additional allocation and memory copy. The caller should copy the data and
  * release (unlock) the cache as soon as possible.
  */
-const gid_list_t *gid_cache_lookup(gid_cache_t *cache, uint64_t id)
+const gid_list_t *gid_cache_lookup(gid_cache_t *cache, uint64_t id,
+				   uint64_t uid, uint64_t gid)
 {
 	int bucket;
 	int i;
@@ -55,6 +71,17 @@ const gid_list_t *gid_cache_lookup(gid_cache_t *cache, uint64_t id)
 			continue;
 		if (agl->gl_id != id)
 			continue;
+
+		/*
+		  @uid and @gid reflect the latest UID/GID of the
+		   process performing the syscall (taken from frame->root).
+
+		   If the UID and GID has changed for the PID since the
+		   time we cached it, we should treat the cache as having
+		   stale values and query them freshly.
+		*/
+		if (agl->gl_uid != uid || agl->gl_gid != gid)
+			break;
 
 		/*
 		 * We don't put new entries in the cache when expiration=0, but
@@ -167,6 +194,8 @@ int gid_cache_add(gid_cache_t *cache, gid_list_t *gl)
 	}
 
 	agl->gl_id = gl->gl_id;
+	agl->gl_uid = gl->gl_uid;
+	agl->gl_gid = gl->gl_gid;
 	agl->gl_count = gl->gl_count;
 	agl->gl_list = gl->gl_list;
 	agl->gl_deadline = now + cache->gc_max_age;

@@ -2,19 +2,10 @@
   Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _NFS3_HELPER_H_
@@ -43,6 +34,9 @@ nfs3_extract_lookup_name (lookup3args *args);
 
 extern nfsstat3
 nfs3_errno_to_nfsstat3 (int errnum);
+
+extern nfsstat3
+nfs3_cbk_errno_status (int32_t, int32_t);
 
 extern void
 nfs3_fill_lookup3res (lookup3res *res, nfsstat3 stat, struct nfs3_fh *newfh,
@@ -339,5 +333,8 @@ nfs3_is_parentdir_entry (char *entry);
 
 uint32_t
 nfs3_request_to_accessbits (int32_t accbits);
+
+void
+nfs3_map_deviceid_to_statdev (struct iatt *ia, uint64_t deviceid);
 
 #endif

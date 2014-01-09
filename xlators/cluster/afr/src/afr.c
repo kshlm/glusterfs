@@ -388,7 +388,8 @@ init (xlator_t *this)
                 i++;
         }
 
-        ret = gf_asprintf (&priv->sh_domain, "%s-self-heal", this->name);
+        ret = gf_asprintf (&priv->sh_domain, AFR_SH_DATA_DOMAIN_FMT,
+                           this->name);
         if (-1 == ret) {
                 ret = -ENOMEM;
                 goto out;
@@ -438,15 +439,18 @@ init (xlator_t *this)
         if (!priv->shd.timer)
                 goto out;
 
-        priv->shd.healed = eh_new (AFR_EH_HEALED_LIMIT, _gf_false);
+        priv->shd.healed = eh_new (AFR_EH_HEALED_LIMIT, _gf_false,
+                                   _destroy_shd_event_data);
         if (!priv->shd.healed)
                 goto out;
 
-        priv->shd.heal_failed = eh_new (AFR_EH_HEAL_FAIL_LIMIT, _gf_false);
+        priv->shd.heal_failed = eh_new (AFR_EH_HEAL_FAIL_LIMIT, _gf_false,
+                                        _destroy_shd_event_data);
         if (!priv->shd.heal_failed)
                 goto out;
 
-        priv->shd.split_brain = eh_new (AFR_EH_SPLIT_BRAIN_LIMIT, _gf_false);
+        priv->shd.split_brain = eh_new (AFR_EH_SPLIT_BRAIN_LIMIT, _gf_false,
+                                        _destroy_shd_event_data);
         if (!priv->shd.split_brain)
                 goto out;
 
@@ -456,7 +460,9 @@ init (xlator_t *this)
         priv->root_inode = inode_ref (this->itable->root);
         GF_OPTION_INIT ("node-uuid", priv->shd.node_uuid, str, out);
         GF_OPTION_INIT ("heal-timeout", priv->shd.timeout, int32, out);
-
+        ret = afr_initialise_statistics (this);
+        if (ret)
+                goto out;
         ret = 0;
 out:
         return ret;
@@ -493,6 +499,7 @@ struct xlator_fops fops = {
         .fentrylk    = afr_fentrylk,
 	.fallocate   = afr_fallocate,
 	.discard     = afr_discard,
+        .zerofill    = afr_zerofill,
 
         /* inode read */
         .access      = afr_access,
@@ -577,8 +584,8 @@ struct volume_options options[] = {
         { .key  = {"choose-local" },
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "true",
-          .description = "Choose a local subvolume(i.e. Brick) to read from if "
-                         "read-subvolume is not explicitly set.",
+          .description = "Choose a local subvolume (i.e. Brick) to read from"
+                         " if read-subvolume is not explicitly set.",
         },
         { .key  = {"favorite-child"},
           .type = GF_OPTION_TYPE_XLATOR,
@@ -688,7 +695,7 @@ struct volume_options options[] = {
           .description = "Lock phase of a transaction has two sub-phases. "
                          "First is an attempt to acquire locks in parallel by "
                          "broadcasting non-blocking lock requests. If lock "
-                         "aquistion fails on any server, then the held locks "
+                         "acquisition fails on any server, then the held locks "
                          "are unlocked and revert to a blocking locked mode "
                          "sequentially on one server after another.  If this "
                          "option is enabled the initial broadcasting lock "
@@ -704,14 +711,14 @@ struct volume_options options[] = {
                          "arrives before the unlock phase of the \"optimized\" "
                          "transaction, that in turn \"takes over\" the lock as "
                          "well. The actual unlock now happens at the end of "
-                         "the last \"optimzed\" transaction."
+                         "the last \"optimized\" transaction."
 
         },
         { .key = {"self-heal-daemon"},
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "off",
           .description = "This option applies to only self-heal-daemon. "
-                         "Index directory crawl and automatic healing of files"
+                         "Index directory crawl and automatic healing of files "
                          "will not be performed if this option is turned off."
         },
         { .key = {"iam-self-heal-daemon"},

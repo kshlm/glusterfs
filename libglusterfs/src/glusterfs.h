@@ -84,22 +84,34 @@
 #define GF_XATTR_NODE_UUID_KEY  "trusted.glusterfs.node-uuid"
 #define GF_XATTR_VOL_ID_KEY   "trusted.glusterfs.volume-id"
 #define GF_XATTR_LOCKINFO_KEY   "trusted.glusterfs.lockinfo"
-#define GF_XATTR_GET_REAL_FILENAME_KEY "user.glusterfs.get_real_filename:"
+#define GF_XATTR_GET_REAL_FILENAME_KEY "glusterfs.get_real_filename:"
+#define GF_XATTR_USER_PATHINFO_KEY   "glusterfs.pathinfo"
+#define QUOTA_LIMIT_KEY "trusted.glusterfs.quota.limit-set"
 
 #define GF_READDIR_SKIP_DIRS       "readdir-filter-directories"
 
-#define XATTR_IS_PATHINFO(x)  (strncmp (x, GF_XATTR_PATHINFO_KEY,       \
-                                        strlen (GF_XATTR_PATHINFO_KEY)) == 0)
+#define BD_XATTR_KEY             "user.glusterfs"
+
+#define XATTR_IS_PATHINFO(x)  ((strncmp (x, GF_XATTR_PATHINFO_KEY,       \
+                                        strlen (x)) == 0) ||             \
+                              (strncmp (x, GF_XATTR_USER_PATHINFO_KEY,   \
+                                         strlen (x)) == 0))
 #define XATTR_IS_NODE_UUID(x) (strncmp (x, GF_XATTR_NODE_UUID_KEY,      \
                                         strlen (GF_XATTR_NODE_UUID_KEY)) == 0)
 #define XATTR_IS_LOCKINFO(x) (strncmp (x, GF_XATTR_LOCKINFO_KEY,        \
                                        strlen (GF_XATTR_LOCKINFO_KEY)) == 0)
 
+#define XATTR_IS_BD(x) (strncmp (x, BD_XATTR_KEY, strlen (BD_XATTR_KEY)) == 0)
+
 #define GF_XATTR_LINKINFO_KEY   "trusted.distribute.linkinfo"
 #define GFID_XATTR_KEY          "trusted.gfid"
+#define PGFID_XATTR_KEY_PREFIX  "trusted.pgfid."
 #define VIRTUAL_GFID_XATTR_KEY_STR  "glusterfs.gfid.string"
 #define VIRTUAL_GFID_XATTR_KEY      "glusterfs.gfid"
 #define UUID_CANONICAL_FORM_LEN 36
+
+#define GET_ANCESTRY_PATH_KEY "glusterfs.ancestry.path"
+#define GET_ANCESTRY_DENTRY_KEY "glusterfs.ancestry.dentry"
 
 #define GLUSTERFS_INTERNAL_FOP_KEY  "glusterfs-internal-fop"
 
@@ -119,6 +131,7 @@
 
 /* Index xlator related */
 #define GF_XATTROP_INDEX_GFID "glusterfs.xattrop_index_gfid"
+#define GF_BASE_INDICES_HOLDER_GFID "glusterfs.base_indicies_holder_gfid"
 
 #define GF_GFIDLESS_LOOKUP "gfidless-lookup"
 /* replace-brick and pump related internal xattrs */
@@ -128,9 +141,7 @@
 #define RB_PUMP_CMD_ABORT       "glusterfs.pump.abort"
 #define RB_PUMP_CMD_STATUS      "glusterfs.pump.status"
 
-#define POSIX_ACL_DEFAULT_XATTR "system.posix_acl_default"
-#define POSIX_ACL_ACCESS_XATTR "system.posix_acl_access"
-
+#define GLUSTERFS_MARKER_DONT_ACCOUNT_KEY "glusters.marker.dont-account"
 #define GLUSTERFS_RDMA_INLINE_THRESHOLD       (2048)
 #define GLUSTERFS_RDMA_MAX_HEADER_SIZE        (228) /* (sizeof (rdma_header_t)                 \
                                                        + RDMA_MAX_SEGMENTS \
@@ -158,6 +169,21 @@
 #define GF_REPLACE_BRICK_TID_KEY "replace-brick-id"
 
 #define UUID_CANONICAL_FORM_LEN  36
+
+/* Adding this here instead of any glusterd*.h files as it is also required by
+ * cli
+ */
+#define DEFAULT_GLUSTERD_SOCKFILE             DATADIR "/run/glusterd.socket"
+
+/* features/marker-quota also needs to have knowledge of link-files so as to
+ * exclude them from accounting.
+ */
+#define DHT_LINKFILE_MODE        (S_ISVTX)
+
+#define IS_DHT_LINKFILE_MODE(iabuf) ((st_mode_from_ia ((iabuf)->ia_prot, \
+                                                       (iabuf)->ia_type) & ~S_IFMT)\
+                                     == DHT_LINKFILE_MODE)
+#define DHT_LINKFILE_STR "linkto"
 
 /* NOTE: add members ONLY at the end (just before _MAXVALUE) */
 typedef enum {
@@ -209,6 +235,7 @@ typedef enum {
         GF_FOP_FREMOVEXATTR,
 	GF_FOP_FALLOCATE,
 	GF_FOP_DISCARD,
+        GF_FOP_ZEROFILL,
         GF_FOP_MAXVALUE,
 } glusterfs_fop_t;
 
@@ -294,6 +321,11 @@ struct _xlator_cmdline_option {
 };
 typedef struct _xlator_cmdline_option xlator_cmdline_option_t;
 
+struct _server_cmdline {
+        struct list_head  list;
+        char              *volfile_server;
+};
+typedef struct _server_cmdline server_cmdline_t;
 
 #define GF_OPTION_ENABLE   _gf_true
 #define GF_OPTION_DISABLE  _gf_false
@@ -301,9 +333,12 @@ typedef struct _xlator_cmdline_option xlator_cmdline_option_t;
 
 struct _cmd_args {
         /* basic options */
-        char            *volfile_server;
-        char            *volfile;
-        char            *log_server;
+        char             *volfile_server;
+        server_cmdline_t *curr_server;
+        /* List of backup volfile servers, including original */
+        struct list_head volfile_servers;
+        char             *volfile;
+        char             *log_server;
         gf_loglevel_t    log_level;
         char            *log_file;
         int32_t          max_connect_attempts;
@@ -322,14 +357,15 @@ struct _cmd_args {
         int              enable_ino32;
         int              worm;
         int              mac_compat;
-	int		 fopen_keep_cache;
-	int		 gid_timeout;
+        int              fopen_keep_cache;
+        int              gid_timeout;
+        char             gid_timeout_set;
         int              aux_gfid_mount;
-	struct list_head xlator_options;  /* list of xlator_option_t */
+        struct list_head xlator_options;  /* list of xlator_option_t */
 
-	/* fuse options */
-	int              fuse_direct_io_mode;
-	char             *use_readdirp;
+        /* fuse options */
+        int              fuse_direct_io_mode;
+        char             *use_readdirp;
         int              volfile_check;
         double           fuse_entry_timeout;
         double           fuse_negative_timeout;
@@ -343,7 +379,7 @@ struct _cmd_args {
         unsigned         uid_map_root;
         int              background_qlen;
         int              congestion_threshold;
-        char            *fuse_mountopts;
+        char             *fuse_mountopts;
 
         /* key args */
         char            *mount_point;
@@ -353,7 +389,6 @@ struct _cmd_args {
         int             brick_port;
         char           *brick_name;
         int             brick_port2;
-
 };
 typedef struct _cmd_args cmd_args_t;
 
@@ -382,7 +417,7 @@ struct _glusterfs_ctx {
         char                fin;
         void               *timer;
         void               *ib;
-        void               *pool;
+        struct call_pool   *pool;
         void               *event_pool;
         void               *iobuf_pool;
         pthread_mutex_t     lock;
@@ -420,7 +455,8 @@ struct _glusterfs_ctx {
 
         int                 daemon_pipe[2];
 
-        struct _clienttable *clienttable;
+        struct client_disconnect *client_disconnect;
+        struct clienttable *clienttable;
 };
 typedef struct _glusterfs_ctx glusterfs_ctx_t;
 

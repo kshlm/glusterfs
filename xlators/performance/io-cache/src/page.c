@@ -855,7 +855,10 @@ ioc_frame_unwind (call_frame_t *frame)
 
                         copied += (fill->count * sizeof (*vector));
 
-                        iobref_merge (iobref, fill->iobref);
+                        if (iobref_merge (iobref, fill->iobref)) {
+				op_ret = -1;
+				op_errno = ENOMEM;
+			}
                 }
 
                 list_del (&fill->list);
@@ -987,7 +990,7 @@ __ioc_page_error (ioc_page_t *page, int32_t op_ret, int32_t op_errno)
         waitq = page->waitq;
         page->waitq = NULL;
 
-        gf_log (page->inode->table->xl->name, GF_LOG_WARNING,
+        gf_log (page->inode->table->xl->name, GF_LOG_DEBUG,
                 "page error for page = %p & waitq = %p", page, waitq);
 
         for (trav = waitq; trav; trav = trav->next) {

@@ -18,6 +18,7 @@
 #include "dict.h"
 #include "xlator.h"
 #include "md-cache-mem-types.h"
+#include "glusterfs-acl.h"
 #include <assert.h>
 #include <sys/time.h>
 
@@ -42,12 +43,12 @@ static struct mdc_key {
 	int         check;
 } mdc_keys[] = {
 	{
-		.name = "system.posix_acl_access",
+		.name = POSIX_ACL_ACCESS_XATTR,
 		.load = 0,
 		.check = 1,
 	},
 	{
-		.name = "system.posix_acl_default",
+		.name = POSIX_ACL_DEFAULT_XATTR,
 		.load = 0,
 		.check = 1,
 	},
@@ -175,7 +176,7 @@ __mdc_inode_ctx_set (xlator_t *this, inode_t *inode, struct md_cache *mdc)
         uint64_t         mdc_int = 0;
 
 	mdc_int = (long) mdc;
-	ret = __inode_ctx_set2 (inode, this, &mdc_int, 0);
+	ret = __inode_ctx_set (inode, this, &mdc_int);
 
 	return ret;
 }
@@ -2097,6 +2098,46 @@ int mdc_discard(call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
 }
 
 int
+mdc_zerofill_cbk(call_frame_t *frame, void *cookie, xlator_t *this,
+                int32_t op_ret, int32_t op_errno,
+                struct iatt *prebuf, struct iatt *postbuf, dict_t *xdata)
+{
+        mdc_local_t  *local = NULL;
+
+        local = frame->local;
+
+        if (op_ret != 0)
+                goto out;
+
+        if (!local)
+                goto out;
+
+        mdc_inode_iatt_set_validate(this, local->fd->inode, prebuf, postbuf);
+
+out:
+        MDC_STACK_UNWIND(zerofill, frame, op_ret, op_errno, prebuf, postbuf,
+                         xdata);
+
+        return 0;
+}
+
+int mdc_zerofill(call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
+                off_t len, dict_t *xdata)
+{
+        mdc_local_t *local;
+
+        local = mdc_local_get(frame);
+        local->fd = fd_ref(fd);
+
+        STACK_WIND(frame, mdc_zerofill_cbk, FIRST_CHILD(this),
+                   FIRST_CHILD(this)->fops->zerofill, fd, offset, len,
+                   xdata);
+
+        return 0;
+}
+
+
+int
 mdc_forget (xlator_t *this, inode_t *inode)
 {
         mdc_inode_wipe (this, inode);
@@ -2228,6 +2269,7 @@ struct xlator_fops fops = {
 	.readdir     = mdc_readdir,
 	.fallocate   = mdc_fallocate,
 	.discard     = mdc_discard,
+        .zerofill    = mdc_zerofill,
 };
 
 

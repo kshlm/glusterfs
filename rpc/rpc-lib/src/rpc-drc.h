@@ -97,4 +97,10 @@ rpcsvc_drc_priv (rpcsvc_drc_globals_t *drc);
 int
 rpcsvc_drc_init (rpcsvc_t *svc, dict_t *options);
 
+int
+rpcsvc_drc_deinit (rpcsvc_t *svc);
+
+int
+rpcsvc_drc_reconfigure (rpcsvc_t *svc, dict_t *options);
+
 #endif /* RPC_DRC_H */

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2011-2012 Red Hat, Inc. <http://www.redhat.com>
+   Copyright (c) 2011-2013 Red Hat, Inc. <http://www.redhat.com>
    This file is part of GlusterFS.
 
    This file is licensed to you under your choice of the GNU Lesser
@@ -65,9 +65,9 @@ posix_acl_from_xattr (xlator_t *this, const char *xattr_buf, int xattr_size)
         count = size / sizeof (*entry);
 
         header = (struct posix_acl_xattr_header *) (xattr_buf);
-        entry = (struct posix_acl_xattr_entry *) (header + 1);
+        entry  = (struct posix_acl_xattr_entry *) (header + 1);
 
-        if (header->version != htole32 (POSIX_ACL_VERSION))
+        if (header->version != htole32 (POSIX_ACL_XATTR_VERSION))
                 return NULL;
 
         acl = posix_acl_new (this, count);
@@ -126,10 +126,10 @@ posix_acl_to_xattr (xlator_t *this, struct posix_acl *acl, char *xattr_buf,
                 return size;
 
         header = (struct posix_acl_xattr_header *) (xattr_buf);
-        entry = (struct posix_acl_xattr_entry *) (header + 1);
+        entry  = (struct posix_acl_xattr_entry *) (header + 1);
         ace = acl->entries;
 
-        header->version = htole32 (POSIX_ACL_VERSION);
+        header->version = htole32 (POSIX_ACL_XATTR_VERSION);
 
         for (i = 0; i < acl->count; i++) {
                 entry->tag   = htole16 (ace->tag);

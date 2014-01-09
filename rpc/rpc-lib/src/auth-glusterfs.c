@@ -50,12 +50,6 @@ ret:
 int
 auth_glusterfs_request_init (rpcsvc_request_t *req, void *priv)
 {
-        if (!req)
-                return -1;
-        memset (req->verf.authdata, 0, GF_MAX_AUTH_BYTES);
-        req->verf.datalen = 0;
-        req->verf.flavour = AUTH_NULL;
-
         return 0;
 }
 
@@ -95,6 +89,22 @@ int auth_glusterfs_authenticate (rpcsvc_request_t *req, void *priv)
                 ret = RPCSVC_AUTH_REJECT;
                 goto err;
         }
+
+	if (req->auxgidcount > SMALL_GROUP_COUNT) {
+		req->auxgidlarge = GF_CALLOC(req->auxgidcount,
+					     sizeof(req->auxgids[0]),
+					     gf_common_mt_auxgids);
+		req->auxgids = req->auxgidlarge;
+	} else {
+		req->auxgids = req->auxgidsmall;
+	}
+
+	if (!req->auxgids) {
+		gf_log ("auth-glusterfs", GF_LOG_WARNING,
+			"cannot allocate gid list");
+		ret = RPCSVC_AUTH_REJECT;
+		goto err;
+	}
 
         for (gidcount = 0; gidcount < au.ngrps; ++gidcount)
                 req->auxgids[gidcount] = au.groups[gidcount];
@@ -156,12 +166,6 @@ ret:
 int
 auth_glusterfs_v2_request_init (rpcsvc_request_t *req, void *priv)
 {
-        if (!req)
-                return -1;
-        memset (req->verf.authdata, 0, GF_MAX_AUTH_BYTES);
-        req->verf.datalen = 0;
-        req->verf.flavour = AUTH_NULL;
-
         return 0;
 }
 
@@ -202,6 +206,22 @@ int auth_glusterfs_v2_authenticate (rpcsvc_request_t *req, void *priv)
                 ret = RPCSVC_AUTH_REJECT;
                 goto err;
         }
+
+	if (req->auxgidcount > SMALL_GROUP_COUNT) {
+		req->auxgidlarge = GF_CALLOC(req->auxgidcount,
+					     sizeof(req->auxgids[0]),
+					     gf_common_mt_auxgids);
+		req->auxgids = req->auxgidlarge;
+	} else {
+		req->auxgids = req->auxgidsmall;
+	}
+
+	if (!req->auxgids) {
+		gf_log ("auth-glusterfs-v2", GF_LOG_WARNING,
+			"cannot allocate gid list");
+		ret = RPCSVC_AUTH_REJECT;
+		goto err;
+	}
 
         for (i = 0; i < req->auxgidcount; ++i)
                 req->auxgids[i] = au.groups.groups_val[i];

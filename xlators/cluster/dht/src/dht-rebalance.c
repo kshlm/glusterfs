@@ -16,6 +16,7 @@
 
 #include "dht-common.h"
 #include "xlator.h"
+#include <signal.h>
 #include <fnmatch.h>
 
 #define GF_DISK_SECTOR_SIZE             512
@@ -243,7 +244,7 @@ out:
 
 static inline int
 __dht_rebalance_create_dst_file (xlator_t *to, xlator_t *from, loc_t *loc, struct iatt *stbuf,
-                                 dict_t *dict, fd_t **dst_fd)
+                                 dict_t *dict, fd_t **dst_fd, dict_t *xattr)
 {
         xlator_t    *this = NULL;
         int          ret  = -1;
@@ -307,6 +308,12 @@ __dht_rebalance_create_dst_file (xlator_t *to, xlator_t *from, loc_t *loc, struc
                 goto out;
         }
 
+        ret = syncop_fsetxattr (to, fd, xattr, 0);
+        if (ret == -1)
+                gf_log (this->name, GF_LOG_WARNING,
+                        "%s: failed to set xattr on %s (%s)",
+                        loc->path, to->name, strerror (errno));
+
         ret = syncop_ftruncate (to, fd, stbuf->ia_size);
         if (ret < 0)
                 gf_log (this->name, GF_LOG_ERROR,
@@ -340,6 +347,9 @@ __dht_check_free_space (xlator_t *to, xlator_t *from, loc_t *loc,
         int             ret        = -1;
         xlator_t       *this       = NULL;
 
+        uint64_t        src_statfs_blocks = 1;
+        uint64_t        dst_statfs_blocks = 1;
+
         this = THIS;
 
         ret = syncop_statfs (from, loc, &src_statfs);
@@ -363,22 +373,34 @@ __dht_check_free_space (xlator_t *to, xlator_t *from, loc_t *loc,
         if (flag != GF_DHT_MIGRATE_DATA)
                 goto check_avail_space;
 
-        if (((dst_statfs.f_bavail *
-              dst_statfs.f_bsize) / GF_DISK_SECTOR_SIZE) <
-            (((src_statfs.f_bavail * src_statfs.f_bsize) /
-              GF_DISK_SECTOR_SIZE) - stbuf->ia_blocks)) {
-                gf_log (this->name, GF_LOG_WARNING,
-                        "data movement attempted from node (%s) with"
-                        " higher disk space to a node (%s) with "
-                        "lesser disk space (%s)", from->name,
-                        to->name, loc->path);
+        /* Check:
+           During rebalance `migrate-data` - Destination subvol experiences
+           a `reduction` in 'blocks' of free space, at the same time source
+           subvol gains certain 'blocks' of free space. A valid check is
+           necessary here to avoid errorneous move to destination where
+           the space could be scantily available.
+         */
+        if (stbuf) {
+                dst_statfs_blocks = ((dst_statfs.f_bavail *
+                                      dst_statfs.f_bsize) /
+                                     GF_DISK_SECTOR_SIZE);
+                src_statfs_blocks = ((src_statfs.f_bavail *
+                                      src_statfs.f_bsize) /
+                                     GF_DISK_SECTOR_SIZE);
+                if ((dst_statfs_blocks - stbuf->ia_blocks) <
+                    (src_statfs_blocks + stbuf->ia_blocks)) {
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "data movement attempted from node (%s) with"
+                                " higher disk space to a node (%s) with "
+                                "lesser disk space (%s)", from->name,
+                                to->name, loc->path);
 
-                /* this is not a 'failure', but we don't want to
-                   consider this as 'success' too :-/ */
-                ret = 1;
-                goto out;
+                        /* this is not a 'failure', but we don't want to
+                           consider this as 'success' too :-/ */
+                        ret = 1;
+                        goto out;
+                }
         }
-
 check_avail_space:
         if (((dst_statfs.f_bavail * dst_statfs.f_bsize) /
               GF_DISK_SECTOR_SIZE) < stbuf->ia_blocks) {
@@ -708,9 +730,16 @@ dht_migrate_file (xlator_t *this, loc_t *loc, xlator_t *from, xlator_t *to,
                 goto out;
         }
 
+        /* TODO: move all xattr related operations to fd based operations */
+        ret = syncop_listxattr (from, loc, &xattr);
+        if (ret == -1)
+                gf_log (this->name, GF_LOG_WARNING,
+                        "%s: failed to get xattr from %s (%s)",
+                        loc->path, from->name, strerror (errno));
+
         /* create the destination, with required modes/xattr */
         ret = __dht_rebalance_create_dst_file (to, from, loc, &stbuf,
-                                               dict, &dst_fd);
+                                               dict, &dst_fd, xattr);
         if (ret)
                 goto out;
 
@@ -726,6 +755,7 @@ dht_migrate_file (xlator_t *this, loc_t *loc, xlator_t *from, xlator_t *to,
                         loc->path, from->name);
                 goto out;
         }
+
 
         ret = syncop_fstat (from, src_fd, &stbuf);
         if (ret) {
@@ -755,19 +785,6 @@ dht_migrate_file (xlator_t *this, loc_t *loc, xlator_t *from, xlator_t *to,
                 ret = -1;
                 goto out;
         }
-
-        /* TODO: move all xattr related operations to fd based operations */
-        ret = syncop_listxattr (from, loc, &xattr);
-        if (ret == -1)
-                gf_log (this->name, GF_LOG_WARNING,
-                        "%s: failed to get xattr from %s (%s)",
-                        loc->path, from->name, strerror (errno));
-
-        ret = syncop_setxattr (to, loc, xattr, 0);
-        if (ret == -1)
-                gf_log (this->name, GF_LOG_WARNING,
-                        "%s: failed to set xattr on %s (%s)",
-                        loc->path, to->name, strerror (errno));
 
         /* TODO: Sync the locks */
 
@@ -1088,6 +1105,10 @@ gf_defrag_pattern_match (gf_defrag_info_t *defrag, char *name, uint64_t size)
  * have been fixed
  */
 
+#ifdef GF_LINUX_HOST_OS
+#pragma GCC push_options
+#pragma GCC optimize ("O0")
+#endif
 int
 gf_defrag_migrate_data (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
                         dict_t *migrate_data)
@@ -1111,6 +1132,7 @@ gf_defrag_migrate_data (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
         double                   elapsed        = {0,};
         struct timeval           start          = {0,};
         int32_t                  err            = 0;
+        int                      loglevel       = GF_LOG_TRACE;
 
         gf_log (this->name, GF_LOG_INFO, "migrate data called on %s",
                 loc->path);
@@ -1251,17 +1273,24 @@ gf_defrag_migrate_data (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
 
 
                         /* if distribute is present, it will honor this key.
-                         * -1 is returned if distribute is not present or file
-                         * doesn't have a link-file. If file has link-file, the
-                         * path of link-file will be the value, and also that
-                         * guarantees that file has to be mostly migrated */
+                         * -1, ENODATA is returned if distribute is not present
+                         * or file doesn't have a link-file. If file has
+                         * link-file, the path of link-file will be the value,
+                         * and also that guarantees that file has to be mostly
+                         * migrated */
 
                         ret = syncop_getxattr (this, &entry_loc, &dict,
                                                GF_XATTR_LINKINFO_KEY);
                         if (ret < 0) {
-                                gf_log (this->name, GF_LOG_TRACE, "failed to "
-                                        "get link-to key for %s",
-                                        entry_loc.path);
+                                if (errno != ENODATA) {
+                                        loglevel = GF_LOG_ERROR;
+                                        defrag->total_failures += 1;
+                                } else {
+                                        loglevel = GF_LOG_TRACE;
+                                }
+                                gf_log (this->name, loglevel, "%s: failed to "
+                                        "get "GF_XATTR_LINKINFO_KEY" key - %s",
+                                        entry_loc.path, strerror (errno));
                                 continue;
                         }
 
@@ -1346,6 +1375,9 @@ out:
         return ret;
 
 }
+#ifdef GF_LINUX_HOST_OS
+#pragma GCC pop_options
+#endif
 
 
 int
@@ -1760,6 +1792,8 @@ log:
         case GF_DEFRAG_STATUS_FAILED:
                 status = "failed";
                 break;
+        default:
+                break;
         }
 
         gf_log (THIS->name, GF_LOG_INFO, "Rebalance is %s. Time taken is %.2f "
@@ -1774,7 +1808,8 @@ out:
 }
 
 int
-gf_defrag_stop (gf_defrag_info_t *defrag, dict_t *output)
+gf_defrag_stop (gf_defrag_info_t *defrag, gf_defrag_status_t status,
+                dict_t *output)
 {
         /* TODO: set a variable 'stop_defrag' here, it should be checked
            in defrag loop */
@@ -1786,7 +1821,7 @@ gf_defrag_stop (gf_defrag_info_t *defrag, dict_t *output)
         }
 
         gf_log ("", GF_LOG_INFO, "Received stop command on rebalance");
-        defrag->defrag_status = GF_DEFRAG_STATUS_STOPPED;
+        defrag->defrag_status = status;
 
         if (output)
                 gf_defrag_status_get (defrag, output);

@@ -31,7 +31,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <signal.h>
-#include <stdlib.h>
+#include <assert.h>
 
 #if defined GF_BSD_HOST_OS || defined GF_DARWIN_HOST_OS
 #include <sys/sysctl.h>
@@ -787,12 +787,44 @@ gf_string2time (const char *str, uint32_t *n)
         if (errno == 0)
                 errno = old_errno;
 
-        if (!((tail[0] == '\0') ||
+        if (((tail[0] == '\0') ||
               ((tail[0] == 's') && (tail[1] == '\0')) ||
               ((tail[0] == 's') && (tail[1] == 'e') &&
 	       (tail[2] == 'c') && (tail[3] == '\0'))))
-                return -1;
+               goto out;
 
+        else if (((tail[0] == 'm') && (tail[1] == '\0')) ||
+                 ((tail[0] == 'm') && (tail[1] == 'i') &&
+                  (tail[2] == 'n') && (tail[3] == '\0'))) {
+                value = value * GF_MINUTE_IN_SECONDS;
+                goto out;
+        }
+
+        else if (((tail[0] == 'h') && (tail[1] == '\0')) ||
+                 ((tail[0] == 'h') && (tail[1] == 'r') &&
+	         (tail[2] == '\0'))) {
+                value = value * GF_HOUR_IN_SECONDS;
+                goto out;
+        }
+
+        else if (((tail[0] == 'd') && (tail[1] == '\0')) ||
+                 ((tail[0] == 'd') && (tail[1] == 'a') &&
+	         (tail[2] == 'y') && (tail[3] == 's') &&
+                 (tail[4] == '\0'))) {
+                value = value * GF_DAY_IN_SECONDS;
+                goto out;
+        }
+
+        else if (((tail[0] == 'w') && (tail[1] == '\0')) ||
+                 ((tail[0] == 'w') && (tail[1] == 'k') &&
+	         (tail[2] == '\0'))) {
+                value = value * GF_WEEK_IN_SECONDS;
+                goto out;
+        } else {
+                return -1;
+        }
+
+out:
         *n = value;
 
         return 0;
@@ -1125,7 +1157,7 @@ gf_string2int8 (const char *str, int8_t *n)
         if (rv != 0)
                 return rv;
 
-        if (l >= INT8_MIN && l <= INT8_MAX) {
+        if ((l >= INT8_MIN) && (l <= INT8_MAX)) {
                 *n = (int8_t) l;
                 return 0;
         }
@@ -1144,7 +1176,7 @@ gf_string2int16 (const char *str, int16_t *n)
         if (rv != 0)
                 return rv;
 
-        if (l >= INT16_MIN && l <= INT16_MAX) {
+        if ((l >= INT16_MIN) && (l <= INT16_MAX)) {
                 *n = (int16_t) l;
                 return 0;
         }
@@ -1163,7 +1195,7 @@ gf_string2int32 (const char *str, int32_t *n)
         if (rv != 0)
                 return rv;
 
-        if (l >= INT32_MIN && l <= INT32_MAX) {
+        if ((l >= INT32_MIN) && (l <= INT32_MAX)) {
                 *n = (int32_t) l;
                 return 0;
         }
@@ -1182,7 +1214,7 @@ gf_string2int64 (const char *str, int64_t *n)
         if (rv != 0)
                 return rv;
 
-        if (l >= INT64_MIN && l <= INT64_MAX) {
+        if ((l >= INT64_MIN) && (l <= INT64_MAX)) {
                 *n = (int64_t) l;
                 return 0;
         }
@@ -1441,6 +1473,11 @@ gf_string2bytesize (const char *str, uint64_t *n)
                         return -1;
         }
 
+        if ((UINT64_MAX - value) < 0) {
+                errno = ERANGE;
+                return -1;
+        }
+
         *n = (uint64_t) value;
 
         return 0;
@@ -1498,6 +1535,12 @@ gf_string2percent_or_bytesize (const char *str,
 			*is_percent = _gf_true;
                 else
                         return -1;
+        }
+
+        /* Error out if we cannot store the value in uint64 */
+        if ((UINT64_MAX - value) < 0) {
+                errno = ERANGE;
+                return -1;
         }
 
         *n = (uint64_t) value;
@@ -2283,6 +2326,9 @@ gf_canonicalize_path (char *path)
         if (!path || *path != '/')
                 goto out;
 
+        if (!strcmp (path, "/"))
+                return 0;
+
         tmppath = gf_strdup (path);
         if (!tmppath)
                 goto out;
@@ -2679,7 +2725,7 @@ get_ip_from_addrinfo (struct addrinfo *addr, char **ip)
                 return NULL;
         }
 
-        *ip = strdup (buf);
+        *ip = gf_strdup (buf);
         return *ip;
 }
 
@@ -2745,8 +2791,11 @@ gf_is_local_addr (char *hostname)
 
                 found = gf_is_loopback_localhost (res->ai_addr, hostname)
                         || gf_interface_search (ip);
-                if (found)
+                if (found) {
+                        GF_FREE (ip);
                         goto out;
+                }
+                GF_FREE (ip);
         }
 
 out:
@@ -2805,5 +2854,224 @@ out:
         }
         return ret;
 
+}
+
+/* Sets log file path from user provided arguments */
+int
+gf_set_log_file_path (cmd_args_t *cmd_args)
+{
+        int   i = 0;
+        int   j = 0;
+        int   ret = 0;
+        char  tmp_str[1024] = {0,};
+
+        if (!cmd_args)
+                goto done;
+
+        if (cmd_args->mount_point) {
+                j = 0;
+                i = 0;
+                if (cmd_args->mount_point[0] == '/')
+                        i = 1;
+                for (; i < strlen (cmd_args->mount_point); i++,j++) {
+                        tmp_str[j] = cmd_args->mount_point[i];
+                        if (cmd_args->mount_point[i] == '/')
+                                tmp_str[j] = '-';
+                }
+
+                ret = gf_asprintf (&cmd_args->log_file,
+                                   DEFAULT_LOG_FILE_DIRECTORY "/%s.log",
+                                   tmp_str);
+                if (ret > 0)
+                        ret = 0;
+                goto done;
+        }
+
+        if (cmd_args->volfile) {
+                j = 0;
+                i = 0;
+                if (cmd_args->volfile[0] == '/')
+                        i = 1;
+                for (; i < strlen (cmd_args->volfile); i++,j++) {
+                        tmp_str[j] = cmd_args->volfile[i];
+                        if (cmd_args->volfile[i] == '/')
+                                tmp_str[j] = '-';
+                }
+                ret = gf_asprintf (&cmd_args->log_file,
+                                   DEFAULT_LOG_FILE_DIRECTORY "/%s.log",
+                                   tmp_str);
+                if (ret > 0)
+                        ret = 0;
+                goto done;
+        }
+
+        if (cmd_args->volfile_server) {
+
+                ret = gf_asprintf (&cmd_args->log_file,
+                                   DEFAULT_LOG_FILE_DIRECTORY "/%s-%s-%d.log",
+                                   cmd_args->volfile_server,
+                                   cmd_args->volfile_id, getpid());
+                if (ret > 0)
+                        ret = 0;
+        }
+done:
+        return ret;
+}
+
+int
+gf_thread_create (pthread_t *thread, const pthread_attr_t *attr,
+		  void *(*start_routine)(void *), void *arg)
+{
+	sigset_t set, old;
+	int ret;
+
+	sigemptyset (&set);
+
+	sigfillset (&set);
+	sigdelset (&set, SIGSEGV);
+	sigdelset (&set, SIGBUS);
+	sigdelset (&set, SIGILL);
+	sigdelset (&set, SIGSYS);
+	sigdelset (&set, SIGFPE);
+	sigdelset (&set, SIGABRT);
+
+	pthread_sigmask (SIG_BLOCK, &set, &old);
+
+	ret = pthread_create (thread, attr, start_routine, arg);
+
+	pthread_sigmask (SIG_SETMASK, &old, NULL);
+
+	return ret;
+}
+
+#ifdef __NetBSD__
+#ifdef __MACHINE_STACK_GROWS_UP
+#define BELOW >
+#else
+#define BELOW <
+#endif
+
+struct frameinfo {
+	struct frameinfo *next;
+	void *return_address;
+};
+
+size_t
+backtrace(void **trace, size_t len)
+{
+	const struct frameinfo *frame = __builtin_frame_address(0);
+	void *stack = &stack;
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		if ((void *)frame BELOW stack)
+			return i;
+		trace[i] = frame->return_address;
+		frame = frame->next;
+	}
+
+	return len;
+}
+
+char **
+backtrace_symbols(void *const *trace, size_t len)
+{
+	static const size_t slen = sizeof("0x123456789abcdef");
+	char **ptr = calloc(len, sizeof(*ptr) + slen);
+	size_t i;
+
+	if (ptr == NULL)
+		return NULL;
+
+	char *str = (void *)(ptr + len);
+	size_t cur = 0, left = len * slen;
+
+	for (i = 0; i < len; i++) {
+		ptr[i] = str + cur;
+		cur += snprintf(str + cur, left - cur, "%p", trace[i]) + 1;
+		assert(cur < left);
+	}
+
+	return ptr;
+}
+#undef BELOW
+#endif /* __NetBSD__ */
+
+int
+gf_skip_header_section (int fd, int header_len)
+{
+        int  ret           = -1;
+
+        ret = lseek (fd, header_len, SEEK_SET);
+        if (ret == (off_t) -1) {
+                gf_log ("", GF_LOG_ERROR, "Failed to skip header "
+                        "section");
+        } else {
+                ret = 0;
+        }
+
+        return ret;
+}
+
+gf_boolean_t
+gf_is_service_running (char *pidfile, int *pid)
+{
+        FILE            *file = NULL;
+        gf_boolean_t    running = _gf_false;
+        int             ret = 0;
+        int             fno = 0;
+
+        file = fopen (pidfile, "r+");
+        if (!file)
+                goto out;
+
+        fno = fileno (file);
+        ret = lockf (fno, F_TEST, 0);
+        if (ret == -1)
+                running = _gf_true;
+        if (!pid)
+                goto out;
+
+        ret = fscanf (file, "%d", pid);
+        if (ret <= 0) {
+                gf_log ("", GF_LOG_ERROR, "Unable to read pidfile: %s, %s",
+                        pidfile, strerror (errno));
+                *pid = -1;
+        }
+
+out:
+        if (file)
+                fclose (file);
+        return running;
+}
+
+static inline int
+dht_is_linkfile_key (dict_t *this, char *key, data_t *value, void *data)
+{
+        gf_boolean_t *linkfile_key_found = NULL;
+
+        if (!data)
+                goto out;
+
+        linkfile_key_found = data;
+
+        *linkfile_key_found = _gf_true;
+out:
+        return 0;
+}
+
+
+inline gf_boolean_t
+dht_is_linkfile (struct iatt *buf, dict_t *dict)
+{
+        gf_boolean_t linkfile_key_found = _gf_false;
+
+        if (!IS_DHT_LINKFILE_MODE (buf))
+                return _gf_false;
+
+        dict_foreach_fnmatch (dict, "*."DHT_LINKFILE_STR, dht_is_linkfile_key,
+                              &linkfile_key_found);
+
+        return linkfile_key_found;
 }
 

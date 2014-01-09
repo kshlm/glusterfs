@@ -117,6 +117,8 @@ afr_access (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t mask,
 
         children = priv->children;
 
+        AFR_SBRAIN_CHECK_LOC (loc, out);
+
         AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
         local = frame->local;
 
@@ -231,6 +233,8 @@ afr_stat (call_frame_t *frame, xlator_t *this, loc_t *loc, dict_t *xdata)
         VALIDATE_OR_GOTO (priv->children, out);
 
         children = priv->children;
+
+        AFR_SBRAIN_CHECK_LOC (loc, out);
 
         AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
         local = frame->local;
@@ -348,10 +352,7 @@ afr_fstat (call_frame_t *frame, xlator_t *this,
 
         VALIDATE_OR_GOTO (fd->inode, out);
 
-        if (afr_is_split_brain (this, fd->inode)) {
-                op_errno = EIO;
-                goto out;
-        }
+        AFR_SBRAIN_CHECK_FD (fd, out);
 
         AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
         local = frame->local;
@@ -471,6 +472,8 @@ afr_readlink (call_frame_t *frame, xlator_t *this,
         VALIDATE_OR_GOTO (priv->children, out);
 
         children = priv->children;
+
+        AFR_SBRAIN_CHECK_LOC (loc, out);
 
         AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
         local = frame->local;
@@ -1124,6 +1127,14 @@ afr_fgetxattr_pathinfo_cbk (call_frame_t *frame, void *cookie,
         {
                 callcnt = --local->call_count;
 
+                if (op_ret < 0) {
+                        local->op_errno = op_errno;
+                } else {
+                        local->op_ret = op_ret;
+                        if (!local->xdata_rsp && xdata)
+                                local->xdata_rsp = dict_ref (xdata);
+                }
+
                 if (!dict || (op_ret < 0))
                         goto out;
 
@@ -1201,8 +1212,8 @@ out:
                                 " key in dict");
 
         unwind:
-                AFR_STACK_UNWIND (fgetxattr, frame, op_ret, op_errno, nxattr,
-                                  xdata);
+                AFR_STACK_UNWIND (fgetxattr, frame, local->op_ret,
+                                  local->op_errno, nxattr, local->xdata_rsp);
 
                 if (nxattr)
                         dict_unref (nxattr);
@@ -1238,6 +1249,14 @@ afr_getxattr_pathinfo_cbk (call_frame_t *frame, void *cookie,
         LOCK (&frame->lock);
                 {
                         callcnt = --local->call_count;
+
+                        if (op_ret < 0) {
+                                local->op_errno = op_errno;
+                        } else {
+                                local->op_ret = op_ret;
+                                if (!local->xdata_rsp && xdata)
+                                        local->xdata_rsp = dict_ref (xdata);
+                        }
 
                         if (!dict || (op_ret < 0))
                                 goto out;
@@ -1313,8 +1332,8 @@ afr_getxattr_pathinfo_cbk (call_frame_t *frame, void *cookie,
                                 " key in dict");
 
         unwind:
-                AFR_STACK_UNWIND (getxattr, frame, op_ret, op_errno, nxattr,
-                                  xdata);
+                AFR_STACK_UNWIND (getxattr, frame, local->op_ret,
+                                  local->op_errno, nxattr, local->xdata_rsp);
 
                 if (nxattr)
                         dict_unref (nxattr);
@@ -1329,7 +1348,7 @@ afr_aggregate_stime_xattr (dict_t *this, char *key, data_t *value, void *data)
         int ret = 0;
 
         if (fnmatch (GF_XATTR_STIME_PATTERN, key, FNM_NOESCAPE) == 0)
-                ret = gf_get_min_stime (THIS, data, key, value);
+                ret = gf_get_max_stime (THIS, data, key, value);
 
         return ret;
 }
@@ -1386,12 +1405,13 @@ afr_is_special_xattr (const char *name, fop_getxattr_cbk_t *cbk,
         gf_boolean_t    is_spl = _gf_true;
 
         GF_ASSERT (cbk);
-        if (!cbk) {
+        if (!cbk || !name) {
                 is_spl = _gf_false;
                 goto out;
         }
 
-        if (!strcmp (name, GF_XATTR_PATHINFO_KEY)) {
+        if (!strcmp (name, GF_XATTR_PATHINFO_KEY) ||
+                        !strcmp (name, GF_XATTR_USER_PATHINFO_KEY)) {
                 if (is_fgetxattr) {
                         *cbk = afr_fgetxattr_pathinfo_cbk;
                 } else {
@@ -1430,18 +1450,27 @@ afr_getxattr_frm_all_children (xlator_t *this, call_frame_t *frame,
         afr_local_t     *local          = NULL;
         xlator_t        **children      = NULL;
         int             i               = 0;
+        int             call_count      = 0;
 
         priv     = this->private;
         children = priv->children;
 
         local = frame->local;
-        local->call_count = priv->child_count;
+        //local->call_count set in afr_local_init
+        call_count = local->call_count;
+
+        //If up-children count is 0, afr_local_init would have failed already
+        //and the call would have unwound so not handling it here.
 
         for (i = 0; i < priv->child_count; i++) {
-                STACK_WIND_COOKIE (frame, cbk,
-                                   (void *) (long) i,
-                                   children[i], children[i]->fops->getxattr,
-                                   loc, name, NULL);
+                if (local->child_up[i]) {
+                        STACK_WIND_COOKIE (frame, cbk,
+                                           (void *) (long) i, children[i],
+                                           children[i]->fops->getxattr,
+                                           loc, name, NULL);
+                        if (!--call_count)
+                                break;
+                }
         }
         return;
 }
@@ -1471,6 +1500,8 @@ afr_getxattr (call_frame_t *frame, xlator_t *this,
         VALIDATE_OR_GOTO (priv->children, out);
 
         children = priv->children;
+
+        AFR_SBRAIN_CHECK_LOC (loc, out);
 
         AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
         local = frame->local;
@@ -1688,18 +1719,28 @@ afr_fgetxattr_frm_all_children (xlator_t *this, call_frame_t *frame,
         afr_local_t     *local          = NULL;
         xlator_t        **children      = NULL;
         int             i               = 0;
+        int             call_count      = 0;
 
         priv     = this->private;
         children = priv->children;
 
         local = frame->local;
-        local->call_count = priv->child_count;
+        //local->call_count set in afr_local_init
+        call_count = local->call_count;
+
+        //If up-children count is 0, afr_local_init would have failed already
+        //and the call would have unwound so not handling it here.
 
         for (i = 0; i < priv->child_count; i++) {
-                STACK_WIND_COOKIE (frame, cbk,
-                                   (void *) (long) i,
-                                   children[i], children[i]->fops->fgetxattr,
-                                   fd, name, NULL);
+                if (local->child_up[i]) {
+                        STACK_WIND_COOKIE (frame, cbk,
+                                           (void *) (long) i,
+                                           children[i],
+                                           children[i]->fops->fgetxattr,
+                                           fd, name, NULL);
+                        if (!--call_count)
+                                break;
+                }
         }
 
         return;
@@ -1727,10 +1768,8 @@ afr_fgetxattr (call_frame_t *frame, xlator_t *this,
 
         children = priv->children;
 
-        if (afr_is_split_brain (this, fd->inode)) {
-                op_errno = EIO;
-                goto out;
-        }
+        AFR_SBRAIN_CHECK_FD (fd, out);
+
         AFR_LOCAL_ALLOC_OR_GOTO (local, out);
         frame->local = local;
 
@@ -1886,10 +1925,7 @@ afr_readv (call_frame_t *frame, xlator_t *this,
         priv     = this->private;
         children = priv->children;
 
-        if (afr_is_split_brain (this, fd->inode)) {
-                op_errno = EIO;
-                goto out;
-        }
+        AFR_SBRAIN_CHECK_FD (fd, out);
 
         AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
         local = frame->local;

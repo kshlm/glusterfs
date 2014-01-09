@@ -34,11 +34,15 @@ size_t
 entry_fn (void *data, char *buffer, gf_boolean_t encode);
 size_t
 fop_fn (void *data, char *buffer, gf_boolean_t encode);
+size_t
+number_fn (void *data, char *buffer, gf_boolean_t encode);
 void
 entry_free_fn (void *data);
 int
 changelog_encode_binary (xlator_t *, changelog_log_data_t *);
 int
 changelog_encode_ascii (xlator_t *, changelog_log_data_t *);
+void
+changelog_encode_change(changelog_priv_t *);
 
 #endif /* _CHANGELOG_ENCODERS_H */

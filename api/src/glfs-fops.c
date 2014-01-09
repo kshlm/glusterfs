@@ -13,21 +13,17 @@
 #include "glfs-mem-types.h"
 #include "syncop.h"
 #include "glfs.h"
+#include <limits.h>
 
-#define DEFAULT_REVAL_COUNT 1
+#ifdef NAME_MAX
+#define GF_NAME_MAX NAME_MAX
+#else
+#define GF_NAME_MAX 255
+#endif
 
-#define ESTALE_RETRY(ret,errno,reval,loc,label) do {	\
-	if (ret == -1 && errno == ESTALE) {	        \
-		if (reval < DEFAULT_REVAL_COUNT) {	\
-			reval++;			\
-			loc_wipe (loc);			\
-			goto label;			\
-		}					\
-	}						\
-	} while (0)
+#define READDIRBUF_SIZE (sizeof(struct dirent) + GF_NAME_MAX + 1)
 
-
-static int
+int
 glfs_loc_link (loc_t *loc, struct iatt *iatt)
 {
 	int ret = -1;
@@ -52,7 +48,7 @@ glfs_loc_link (loc_t *loc, struct iatt *iatt)
 }
 
 
-static void
+void
 glfs_iatt_to_stat (struct glfs *fs, struct iatt *iatt, struct stat *stat)
 {
 	iatt_to_stat (iatt, stat);
@@ -60,7 +56,7 @@ glfs_iatt_to_stat (struct glfs *fs, struct iatt *iatt, struct stat *stat)
 }
 
 
-static int
+int
 glfs_loc_unlink (loc_t *loc)
 {
 	inode_unlink (loc->inode, loc->parent, loc->name);
@@ -137,6 +133,7 @@ out:
 		glfs_fd_destroy (glfd);
 		glfd = NULL;
 	} else if (glfd) {
+                glfd->fd->flags = flags;
 		fd_bind (glfd->fd);
 		glfs_fd_bind (glfd);
 	}
@@ -414,6 +411,7 @@ out:
 		glfs_fd_destroy (glfd);
 		glfd = NULL;
 	} else if (glfd) {
+                glfd->fd->flags = flags;
 		fd_bind (glfd->fd);
 		glfs_fd_bind (glfd);
 	}
@@ -493,13 +491,13 @@ glfs_preadv (struct glfs_fd *glfd, const struct iovec *iovec, int iovcnt,
 
 	glfd->offset = (offset + size);
 
-	if (iov)
-		GF_FREE (iov);
-	if (iobref)
-		iobref_unref (iobref);
-
 	ret = size;
 out:
+        if (iov)
+                GF_FREE (iov);
+        if (iobref)
+                iobref_unref (iobref);
+
 	if (fd)
 		fd_unref (fd);
 
@@ -585,10 +583,6 @@ glfs_io_async_task (void *data)
 	ssize_t         ret = 0;
 
 	switch (gio->op) {
-	case GF_FOP_READ:
-		ret = glfs_preadv (gio->glfd, gio->iov, gio->count,
-				   gio->offset, gio->flags);
-		break;
 	case GF_FOP_WRITE:
 		ret = glfs_pwritev (gio->glfd, gio->iov, gio->count,
 				    gio->offset, gio->flags);
@@ -605,9 +599,49 @@ glfs_io_async_task (void *data)
 	case GF_FOP_DISCARD:
 		ret = glfs_discard (gio->glfd, gio->offset, gio->count);
 		break;
+        case GF_FOP_ZEROFILL:
+                ret = glfs_zerofill(gio->glfd, gio->offset, gio->count);
+                break;
 	}
 
 	return (int) ret;
+}
+
+
+int
+glfs_preadv_async_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+		       int op_ret, int op_errno, struct iovec *iovec,
+		       int count, struct iatt *stbuf, struct iobref *iobref,
+		       dict_t *xdata)
+{
+	struct glfs_io *gio = NULL;
+	xlator_t       *subvol = NULL;
+	struct glfs    *fs = NULL;
+	struct glfs_fd *glfd = NULL;
+
+
+	gio = frame->local;
+	frame->local = NULL;
+	subvol = cookie;
+	glfd = gio->glfd;
+	fs = glfd->fs;
+
+	if (op_ret <= 0)
+		goto out;
+
+	op_ret = iov_copy (gio->iov, gio->count, iovec, count);
+
+	glfd->offset = gio->offset + op_ret;
+out:
+	errno = op_errno;
+	gio->fn (gio->glfd, op_ret, gio->data);
+
+	GF_FREE (gio->iov);
+	GF_FREE (gio);
+	STACK_DESTROY (frame->root);
+	glfs_subvol_done (fs, subvol);
+
+	return 0;
 }
 
 
@@ -617,18 +651,48 @@ glfs_preadv_async (struct glfs_fd *glfd, const struct iovec *iovec, int count,
 {
 	struct glfs_io *gio = NULL;
 	int             ret = 0;
+	call_frame_t   *frame = NULL;
+	xlator_t       *subvol = NULL;
+	glfs_t         *fs = NULL;
+	fd_t           *fd = NULL;
+
+	__glfs_entry_fd (glfd);
+
+	subvol = glfs_active_subvol (glfd->fs);
+	if (!subvol) {
+		ret = -1;
+		errno = EIO;
+		goto out;
+	}
+
+	fd = glfs_resolve_fd (glfd->fs, subvol, glfd);
+	if (!fd) {
+		ret = -1;
+		errno = EBADFD;
+		goto out;
+	}
+
+	fs = glfd->fs;
+
+	frame = syncop_create_frame (THIS);
+	if (!frame) {
+		ret = -1;
+		errno = ENOMEM;
+		goto out;
+	}
 
 	gio = GF_CALLOC (1, sizeof (*gio), glfs_mt_glfs_io_t);
 	if (!gio) {
+		ret = -1;
 		errno = ENOMEM;
-		return -1;
+		goto out;
 	}
 
 	gio->iov = iov_dup (iovec, count);
 	if (!gio->iov) {
-		GF_FREE (gio);
+		ret = -1;
 		errno = ENOMEM;
-		return -1;
+		goto out;
 	}
 
 	gio->op     = GF_FOP_READ;
@@ -639,14 +703,22 @@ glfs_preadv_async (struct glfs_fd *glfd, const struct iovec *iovec, int count,
 	gio->fn     = fn;
 	gio->data   = data;
 
-	ret = synctask_new (glfs_from_glfd (glfd)->ctx->env,
-			    glfs_io_async_task, glfs_io_async_cbk,
-			    NULL, gio);
+	frame->local = gio;
 
+	STACK_WIND_COOKIE (frame, glfs_preadv_async_cbk, subvol, subvol,
+			   subvol->fops->readv, fd, iov_length (iovec, count),
+			   offset, flags, NULL);
+
+out:
 	if (ret) {
 		GF_FREE (gio->iov);
 		GF_FREE (gio);
+		STACK_DESTROY (frame->root);
+		glfs_subvol_done (fs, subvol);
 	}
+
+	if (fd)
+		fd_unref (fd);
 
 	return ret;
 }
@@ -1491,7 +1563,7 @@ retry:
 		goto out;
 	}
 
-	ret = syncop_rmdir (subvol, &loc);
+	ret = syncop_rmdir (subvol, &loc, 0);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 
@@ -1804,6 +1876,38 @@ glfs_discard_async (struct glfs_fd *glfd, off_t offset, size_t len,
 	return ret;
 }
 
+int
+glfs_zerofill_async (struct glfs_fd *glfd, off_t offset, off_t len,
+                      glfs_io_cbk fn, void *data)
+{
+        struct glfs_io *gio  = NULL;
+        int             ret  = 0;
+
+        gio = GF_CALLOC (1, sizeof (*gio), glfs_mt_glfs_io_t);
+        if (!gio) {
+                errno = ENOMEM;
+                return -1;
+        }
+
+        gio->op     = GF_FOP_ZEROFILL;
+        gio->glfd   = glfd;
+        gio->offset = offset;
+        gio->count  = len;
+        gio->fn     = fn;
+        gio->data   = data;
+
+        ret = synctask_new (glfs_from_glfd (glfd)->ctx->env,
+                            glfs_io_async_task, glfs_io_async_cbk,
+                            NULL, gio);
+
+        if (ret) {
+                GF_FREE (gio->iov);
+                GF_FREE (gio);
+        }
+
+        return ret;
+}
+
 
 void
 gf_dirent_to_dirent (gf_dirent_t *gf_dirent, struct dirent *dirent)
@@ -1822,7 +1926,7 @@ gf_dirent_to_dirent (gf_dirent_t *gf_dirent, struct dirent *dirent)
 	dirent->d_namlen = strlen (gf_dirent->d_name);
 #endif
 
-	strncpy (dirent->d_name, gf_dirent->d_name, 256);
+	strncpy (dirent->d_name, gf_dirent->d_name, GF_NAME_MAX + 1);
 }
 
 
@@ -1916,16 +2020,56 @@ glfd_entry_next (struct glfs_fd *glfd, int plus)
 }
 
 
+static struct dirent *
+glfs_readdirbuf_get (struct glfs_fd *glfd)
+{
+        struct dirent *buf = NULL;
+
+        LOCK (&glfd->fd->lock);
+        {
+                buf = glfd->readdirbuf;
+                if (buf) {
+                        memset (buf, 0, READDIRBUF_SIZE);
+                        goto unlock;
+                }
+
+                buf = GF_CALLOC (1, READDIRBUF_SIZE, glfs_mt_readdirbuf_t);
+                if (!buf) {
+                        errno = ENOMEM;
+                        goto unlock;
+                }
+
+                glfd->readdirbuf = buf;
+        }
+unlock:
+        UNLOCK (&glfd->fd->lock);
+
+        return buf;
+}
+
+
 int
-glfs_readdirplus_r (struct glfs_fd *glfd, struct stat *stat, struct dirent *buf,
+glfs_readdirplus_r (struct glfs_fd *glfd, struct stat *stat, struct dirent *ext,
 		    struct dirent **res)
 {
 	int              ret = 0;
 	gf_dirent_t     *entry = NULL;
+	struct dirent   *buf = NULL;
 
 	__glfs_entry_fd (glfd);
 
 	errno = 0;
+
+	if (ext)
+		buf = ext;
+	else
+		buf = glfs_readdirbuf_get (glfd);
+
+	if (!buf) {
+		errno = ENOMEM;
+		return -1;
+	}
+
 	entry = glfd_entry_next (glfd, !!stat);
 	if (errno)
 		ret = -1;
@@ -1951,6 +2095,28 @@ int
 glfs_readdir_r (struct glfs_fd *glfd, struct dirent *buf, struct dirent **res)
 {
 	return glfs_readdirplus_r (glfd, 0, buf, res);
+}
+
+
+struct dirent *
+glfs_readdirplus (struct glfs_fd *glfd, struct stat *stat)
+{
+        struct dirent *res = NULL;
+        int ret = -1;
+
+        ret = glfs_readdirplus_r (glfd, stat, NULL, &res);
+        if (ret)
+                return NULL;
+
+        return res;
+}
+
+
+
+struct dirent *
+glfs_readdir (struct glfs_fd *glfd)
+{
+        return glfs_readdirplus (glfd, NULL);
 }
 
 
@@ -2760,6 +2926,36 @@ out:
 	return ret;
 }
 
+int
+glfs_zerofill (struct glfs_fd *glfd, off_t offset, off_t len)
+{
+        int               ret             = -1;
+        xlator_t         *subvol          = NULL;
+        fd_t             *fd              = NULL;
+
+        __glfs_entry_fd (glfd);
+
+        subvol = glfs_active_subvol (glfd->fs);
+        if (!subvol) {
+                errno = EIO;
+                goto out;
+        }
+
+        fd = glfs_resolve_fd (glfd->fs, subvol, glfd);
+        if (!fd) {
+                errno = EBADFD;
+                goto out;
+        }
+
+        ret = syncop_zerofill (subvol, fd, offset, len);
+out:
+        if (fd)
+                fd_unref(fd);
+
+        glfs_subvol_done (glfd->fs, subvol);
+
+        return ret;
+}
 
 int
 glfs_chdir (struct glfs *fs, const char *path)

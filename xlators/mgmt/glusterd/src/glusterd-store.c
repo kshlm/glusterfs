@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2007-2012 Red Hat, Inc. <http://www.redhat.com>
+   Copyright (c) 2007-2013 Red Hat, Inc. <http://www.redhat.com>
    This file is part of GlusterFS.
 
    This file is licensed to you under your choice of the GNU Lesser
@@ -166,7 +166,7 @@ out:
         if (brickinfo)
                 glusterd_brickinfo_delete (brickinfo);
         if (volinfo)
-                glusterd_volinfo_delete (volinfo);
+                glusterd_volinfo_unref (volinfo);
 
         return ret;
 }
@@ -241,6 +241,11 @@ glusterd_store_brickinfo_write (int fd, glusterd_brickinfo_t *brickinfo)
         if (ret)
                 goto out;
 
+        if (!brickinfo->vg[0])
+                goto out;
+
+        ret = gf_store_save_value (fd, GLUSTERD_STORE_KEY_BRICK_VGNAME,
+                                         brickinfo->vg);
 out:
         gf_log (THIS->name, GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
@@ -571,9 +576,19 @@ glusterd_volume_exclude_options_write (int fd, glusterd_volinfo_t *volinfo)
                         goto out;
         }
 
-        if (volinfo->backend == GD_VOL_BK_BD)  {
-                snprintf (buf, sizeof (buf), "%d", volinfo->backend);
-                ret = gf_store_save_value (fd, GLUSTERD_STORE_KEY_VOL_BACKEND,
+        snprintf (buf, sizeof (buf), "%d", volinfo->op_version);
+        ret = gf_store_save_value (fd, GLUSTERD_STORE_KEY_VOL_OP_VERSION, buf);
+        if (ret)
+                goto out;
+
+        snprintf (buf, sizeof (buf), "%d", volinfo->client_op_version);
+        ret = gf_store_save_value (fd, GLUSTERD_STORE_KEY_VOL_CLIENT_OP_VERSION,
+                                   buf);
+        if (ret)
+                goto out;
+        if (volinfo->caps) {
+                snprintf (buf, sizeof (buf), "%d", volinfo->caps);
+                ret = gf_store_save_value (fd, GLUSTERD_STORE_KEY_VOL_CAPS,
                                            buf);
                 if (ret)
                         goto out;
@@ -683,6 +698,21 @@ glusterd_store_node_state_path_set (glusterd_volinfo_t *volinfo,
                   GLUSTERD_NODE_STATE_FILE);
 }
 
+static void
+glusterd_store_quota_conf_path_set (glusterd_volinfo_t *volinfo,
+                                    char *quota_conf_path, size_t len)
+{
+        char    voldirpath[PATH_MAX] = {0,};
+        GF_ASSERT (volinfo);
+        GF_ASSERT (quota_conf_path);
+        GF_ASSERT (len <= PATH_MAX);
+
+        glusterd_store_voldirpath_set (volinfo, voldirpath,
+                                       sizeof (voldirpath));
+        snprintf (quota_conf_path, len, "%s/%s", voldirpath,
+                  GLUSTERD_VOLUME_QUOTA_CONFIG);
+}
+
 int32_t
 glusterd_store_create_rbstate_shandle_on_absence (glusterd_volinfo_t *volinfo)
 {
@@ -727,6 +757,22 @@ glusterd_store_create_nodestate_sh_on_absence (glusterd_volinfo_t *volinfo)
         return ret;
 }
 
+int32_t
+glusterd_store_create_quota_conf_sh_on_absence (glusterd_volinfo_t *volinfo)
+{
+        char            quota_conf_path[PATH_MAX] = {0};
+        int32_t         ret                       = 0;
+
+        GF_ASSERT (volinfo);
+
+        glusterd_store_quota_conf_path_set (volinfo, quota_conf_path,
+                                            sizeof (quota_conf_path));
+        ret =
+          gf_store_handle_create_on_absence (&volinfo->quota_conf_shandle,
+                                             quota_conf_path);
+
+        return ret;
+}
 int32_t
 glusterd_store_brickinfos (glusterd_volinfo_t *volinfo, int vol_fd)
 {
@@ -837,6 +883,19 @@ out:
         return ret;
 }
 
+int
+_gd_store_rebalance_dict (dict_t *dict, char *key, data_t *value, void *data)
+{
+        int             ret = -1;
+        int             fd = 0;
+
+        fd = *(int *)data;
+
+        ret = gf_store_save_value (fd, key, value->data);
+
+        return ret;
+}
+
 int32_t
 glusterd_store_node_state_write (int fd, glusterd_volinfo_t *volinfo)
 {
@@ -861,9 +920,14 @@ glusterd_store_node_state_write (int fd, glusterd_volinfo_t *volinfo)
         if (ret)
                 goto out;
 
-        if (volinfo->rebal.defrag_cmd) {
-                uuid_unparse (volinfo->rebal.rebalance_id, buf);
-                ret = gf_store_save_value (fd, GF_REBALANCE_TID_KEY, buf);
+        uuid_unparse (volinfo->rebal.rebalance_id, buf);
+        ret = gf_store_save_value (fd, GF_REBALANCE_TID_KEY, buf);
+        if (ret)
+                goto out;
+
+        if (volinfo->rebal.dict) {
+                dict_foreach (volinfo->rebal.dict, _gd_store_rebalance_dict,
+                              &fd);
         }
 out:
         gf_log (THIS->name, GF_LOG_DEBUG, "Returning %d", ret);
@@ -1068,7 +1132,7 @@ glusterd_store_volinfo (glusterd_volinfo_t *volinfo, glusterd_volinfo_ver_ac_t a
                 goto out;
 
         //checksum should be computed at the end
-        ret = glusterd_volume_compute_cksum (volinfo);
+        ret = glusterd_compute_cksum (volinfo, _gf_false);
         if (ret)
                 goto out;
 
@@ -1265,12 +1329,14 @@ glusterd_store_global_info (xlator_t *this)
 
         ret = gf_store_rename_tmppath (handle);
 out:
-        if (ret && (handle->fd > 0))
-                gf_store_unlink_tmppath (handle);
+        if (handle) {
+                if (ret && (handle->fd > 0))
+                        gf_store_unlink_tmppath (handle);
 
-        if (handle->fd > 0) {
-                close (handle->fd);
-                handle->fd = 0;
+                if (handle->fd > 0) {
+                        close (handle->fd);
+                        handle->fd = 0;
+                }
         }
 
         if (uuid_str)
@@ -1502,7 +1568,7 @@ glusterd_store_retrieve_bricks (glusterd_volinfo_t *volinfo)
                                     strlen (GLUSTERD_STORE_KEY_BRICK_PORT))) {
                                 gf_string2int (value, &brickinfo->port);
 
-                                if (brickinfo->port < GF_IANA_PRIV_PORTS_START){
+                                if (brickinfo->port < priv->base_port) {
                                         /* This is required to adhere to the
                                            IANA standards */
                                         brickinfo->port = 0;
@@ -1518,8 +1584,7 @@ glusterd_store_retrieve_bricks (glusterd_volinfo_t *volinfo)
                                     strlen (GLUSTERD_STORE_KEY_BRICK_RDMA_PORT))) {
                                 gf_string2int (value, &brickinfo->rdma_port);
 
-                                if (brickinfo->rdma_port <
-                                    GF_IANA_PRIV_PORTS_START){
+                                if (brickinfo->rdma_port < priv->base_port) {
                                         /* This is required to adhere to the
                                            IANA standards */
                                         brickinfo->rdma_port = 0;
@@ -1536,6 +1601,11 @@ glusterd_store_retrieve_bricks (glusterd_volinfo_t *volinfo)
                         } else if (!strncmp (key, GLUSTERD_STORE_KEY_BRICK_DECOMMISSIONED,
                                              strlen (GLUSTERD_STORE_KEY_BRICK_DECOMMISSIONED))) {
                                 gf_string2int (value, &brickinfo->decommissioned);
+                        } else if (!strncmp (key,
+                                    GLUSTERD_STORE_KEY_BRICK_VGNAME,
+                                    strlen (GLUSTERD_STORE_KEY_BRICK_VGNAME))) {
+                                strncpy (brickinfo->vg, value,
+                                         sizeof (brickinfo->vg));
                         } else {
                                 gf_log ("", GF_LOG_ERROR, "Unknown key: %s",
                                         key);
@@ -1676,17 +1746,22 @@ out:
 int32_t
 glusterd_store_retrieve_node_state (char   *volname)
 {
-        int32_t                   ret                   = -1;
-        glusterd_volinfo_t        *volinfo              = NULL;
-        gf_store_iter_t           *iter                 = NULL;
-        char                      *key                  = NULL;
-        char                      *value                = NULL;
-        char                      volpath[PATH_MAX]     = {0,};
-        glusterd_conf_t           *priv                 = NULL;
-        char                      path[PATH_MAX]        = {0,};
-        gf_store_op_errno_t       op_errno              = GD_STORE_SUCCESS;
+        int32_t              ret               = -1;
+        glusterd_volinfo_t  *volinfo           = NULL;
+        gf_store_iter_t     *iter              = NULL;
+        char                *key               = NULL;
+        char                *value             = NULL;
+        char                *dup_value         = NULL;
+        char                 volpath[PATH_MAX] = {0,};
+        glusterd_conf_t     *priv              = NULL;
+        char                 path[PATH_MAX]    = {0,};
+        gf_store_op_errno_t  op_errno          = GD_STORE_SUCCESS;
+        dict_t              *tmp_dict          = NULL;
+        xlator_t            *this              = NULL;
 
-        priv = THIS->private;
+        this = THIS;
+        GF_ASSERT (this);
+        priv = this->private;
 
         ret = glusterd_volinfo_find (volname, &volinfo);
         if (ret) {
@@ -1716,16 +1791,35 @@ glusterd_store_retrieve_node_state (char   *volname)
                 if (!strncmp (key, GLUSTERD_STORE_KEY_VOL_DEFRAG,
                               strlen (GLUSTERD_STORE_KEY_VOL_DEFRAG))) {
                         volinfo->rebal.defrag_cmd = atoi (value);
-                }
-
-                if (volinfo->rebal.defrag_cmd) {
-                        if (!strncmp (key, GF_REBALANCE_TID_KEY,
-                                       strlen (GF_REBALANCE_TID_KEY)))
-                                uuid_parse (value, volinfo->rebal.rebalance_id);
-
-                        if (!strncmp (key, GLUSTERD_STORE_KEY_DEFRAG_OP,
-                                      strlen (GLUSTERD_STORE_KEY_DEFRAG_OP)))
-                                volinfo->rebal.op = atoi (value);
+                } else if (!strncmp (key, GF_REBALANCE_TID_KEY,
+                                     strlen (GF_REBALANCE_TID_KEY))) {
+                        uuid_parse (value, volinfo->rebal.rebalance_id);
+                } else if (!strncmp (key, GLUSTERD_STORE_KEY_DEFRAG_OP,
+                                        strlen (GLUSTERD_STORE_KEY_DEFRAG_OP))) {
+                        volinfo->rebal.op = atoi (value);
+                } else {
+                        if (!tmp_dict) {
+                                tmp_dict = dict_new ();
+                                if (!tmp_dict) {
+                                        ret = -1;
+                                        goto out;
+                                }
+                        }
+                        dup_value = gf_strdup (value);
+                        if (!dup_value) {
+                                ret = -1;
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "Failed to strdup value string");
+                                goto out;
+                        }
+                        ret = dict_set_str (tmp_dict, key, dup_value);
+                        if (ret) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                                "Error setting data in rebal "
+                                                "dict.");
+                                goto out;
+                        }
+                        dup_value = NULL;
                 }
 
                 GF_FREE (key);
@@ -1735,9 +1829,13 @@ glusterd_store_retrieve_node_state (char   *volname)
 
                 ret = gf_store_iter_get_next (iter, &key, &value, &op_errno);
         }
+        if (tmp_dict)
+                volinfo->rebal.dict = dict_ref (tmp_dict);
 
-        if (op_errno != GD_STORE_EOF)
+        if (op_errno != GD_STORE_EOF) {
+                ret = -1;
                 goto out;
+        }
 
         ret = gf_store_iter_destroy (iter);
 
@@ -1745,6 +1843,12 @@ glusterd_store_retrieve_node_state (char   *volname)
                 goto out;
 
 out:
+        if (dup_value)
+                GF_FREE (dup_value);
+        if (ret && volinfo->rebal.dict)
+                dict_unref (volinfo->rebal.dict);
+        if (tmp_dict)
+                dict_unref (tmp_dict);
         gf_log ("", GF_LOG_DEBUG, "Returning with %d", ret);
 
         return ret;
@@ -1765,7 +1869,6 @@ glusterd_store_retrieve_volume (char    *volname)
         gf_store_op_errno_t       op_errno              = GD_STORE_SUCCESS;
 
         ret = glusterd_volinfo_new (&volinfo);
-
         if (ret)
                 goto out;
 
@@ -1778,12 +1881,10 @@ glusterd_store_retrieve_volume (char    *volname)
                   GLUSTERD_VOLUME_INFO_FILE);
 
         ret = gf_store_handle_retrieve (path, &volinfo->shandle);
-
         if (ret)
                 goto out;
 
         ret = gf_store_iter_new (volinfo->shandle, &iter);
-
         if (ret)
                 goto out;
 
@@ -1851,9 +1952,15 @@ glusterd_store_retrieve_volume (char    *volname)
                         gf_log ("", GF_LOG_DEBUG, "Parsed as "GEOREP" "
                                 " slave:key=%s,value:%s", key, value);
 
-                } else if (!strncmp (key, GLUSTERD_STORE_KEY_VOL_BACKEND,
-                                     strlen (GLUSTERD_STORE_KEY_VOL_BACKEND))) {
-                        volinfo->backend = atoi (value);
+                } else if (!strncmp (key, GLUSTERD_STORE_KEY_VOL_OP_VERSION,
+                                strlen (GLUSTERD_STORE_KEY_VOL_OP_VERSION))) {
+                        volinfo->op_version = atoi (value);
+                } else if (!strncmp (key, GLUSTERD_STORE_KEY_VOL_CLIENT_OP_VERSION,
+                                strlen (GLUSTERD_STORE_KEY_VOL_CLIENT_OP_VERSION))) {
+                        volinfo->client_op_version = atoi (value);
+                } else if (!strncmp (key, GLUSTERD_STORE_KEY_VOL_CAPS,
+                                     strlen (GLUSTERD_STORE_KEY_VOL_CAPS))) {
+                        volinfo->caps = atoi (value);
                 } else {
 
                         if (is_key_glusterd_hooks_friendly (key)) {
@@ -1875,6 +1982,14 @@ glusterd_store_retrieve_volume (char    *volname)
                                 break;
 
                         case 1:
+                                /*The following strcmp check is to ensure that
+                                 * glusterd does not restore the quota limits
+                                 * into volinfo->dict post upgradation from 3.3
+                                 * to 3.4 as the same limits will now be stored
+                                 * in xattrs on the respective directories.
+                                 */
+                                if (!strcmp (key, "features.limit-usage"))
+                                        break;
                                 ret = dict_set_str(volinfo->dict, key,
                                                    gf_strdup (value));
                                 if (ret) {
@@ -1932,6 +2047,9 @@ glusterd_store_retrieve_volume (char    *volname)
                 volinfo->subvol_count = (volinfo->brick_count /
                                          volinfo->dist_leaf_count);
 
+                /* Only calculate volume op-versions if they are not found */
+                if (!volinfo->op_version && !volinfo->client_op_version)
+                        gd_update_volume_op_versions (volinfo);
         }
 
         if (op_errno != GD_STORE_EOF)
@@ -1946,11 +2064,26 @@ glusterd_store_retrieve_volume (char    *volname)
         if (ret)
                 goto out;
 
-        ret = glusterd_volume_compute_cksum (volinfo);
+        ret = glusterd_compute_cksum (volinfo, _gf_false);
         if (ret)
                 goto out;
 
-        gd_update_volume_op_versions (volinfo);
+        ret = glusterd_store_retrieve_quota_version (volinfo);
+        if (ret)
+                goto out;
+
+        ret = glusterd_store_create_quota_conf_sh_on_absence (volinfo);
+        if (ret)
+                goto out;
+
+        ret = glusterd_compute_cksum (volinfo, _gf_true);
+        if (ret)
+                goto out;
+
+        ret = glusterd_store_save_quota_version_and_cksum (volinfo);
+        if (ret)
+                goto out;
+
 
         list_add_tail (&volinfo->vol_list, &priv->volumes);
 
@@ -2539,5 +2672,108 @@ glusterd_restore ()
 
 out:
         gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
+        return ret;
+}
+
+int
+glusterd_store_retrieve_quota_version (glusterd_volinfo_t *volinfo)
+{
+        int                 ret                  = -1;
+        uint32_t            version              = 0;
+        char                cksum_path[PATH_MAX] = {0,};
+        char                path[PATH_MAX]       = {0,};
+        char               *version_str          = NULL;
+        char               *tmp                  = NULL;
+        xlator_t           *this                 = NULL;
+        glusterd_conf_t    *conf                 = NULL;
+        gf_store_handle_t  *handle               = NULL;
+
+        this = THIS;
+        GF_ASSERT (this);
+        conf = this->private;
+        GF_ASSERT (conf);
+
+        GLUSTERD_GET_VOLUME_DIR (path, volinfo, conf);
+        snprintf (cksum_path, sizeof (cksum_path), "%s/%s", path,
+                  GLUSTERD_VOL_QUOTA_CKSUM_FILE);
+
+        ret = gf_store_handle_new (cksum_path, &handle);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Unable to get store handle "
+                        "for %s", cksum_path);
+                goto out;
+        }
+
+        ret = gf_store_retrieve_value (handle, "version", &version_str);
+        if (ret) {
+                gf_log (this->name, GF_LOG_DEBUG, "Version absent");
+                ret = 0;
+                goto out;
+        }
+
+        version = strtoul (version_str, &tmp, 10);
+         if (version < 0) {
+                 gf_log (this->name, GF_LOG_DEBUG, "Invalid version number");
+                 goto out;
+        }
+        volinfo->quota_conf_version = version;
+        ret = 0;
+
+out:
+        if (version_str)
+                GF_FREE (version_str);
+        gf_store_handle_destroy (handle);
+        return ret;
+}
+
+int
+glusterd_store_save_quota_version_and_cksum (glusterd_volinfo_t *volinfo)
+{
+        int                 ret                  = -1;
+        char                cksum_path[PATH_MAX] = {0,};
+        char                path[PATH_MAX]       = {0,};
+        xlator_t           *this                 = NULL;
+        glusterd_conf_t    *conf                 = NULL;
+        char                buf[256]             = {0,};
+        int                 fd                   = -1;
+
+        this = THIS;
+        GF_ASSERT (this);
+        conf = this->private;
+        GF_ASSERT (conf);
+
+        GLUSTERD_GET_VOLUME_DIR (path, volinfo, conf);
+        snprintf (cksum_path, sizeof (cksum_path), "%s/%s", path,
+                  GLUSTERD_VOL_QUOTA_CKSUM_FILE);
+
+        fd = open (cksum_path, O_RDWR | O_APPEND | O_CREAT| O_TRUNC, 0600);
+
+        if (-1 == fd) {
+                gf_log (this->name, GF_LOG_ERROR, "Unable to open %s,"
+                        "Reason: %s", cksum_path, strerror (errno));
+                ret = -1;
+                goto out;
+        }
+
+        snprintf (buf, sizeof (buf)-1, "%u", volinfo->quota_conf_cksum);
+        ret = gf_store_save_value (fd, "cksum", buf);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to store cksum");
+                goto out;
+        }
+
+        memset (buf, 0, sizeof (buf));
+        snprintf (buf, sizeof (buf)-1, "%u", volinfo->quota_conf_version);
+        ret = gf_store_save_value (fd, "version", buf);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to store version");
+                goto out;
+        }
+
+        ret = 0;
+
+out:
+        if (fd != -1)
+                close (fd);
         return ret;
 }

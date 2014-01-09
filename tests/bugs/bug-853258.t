@@ -20,7 +20,7 @@ EXPECT_WITHIN 15 'Started' volinfo_field $V0 'Status';
 
 # Force assignment of initial ranges.
 TEST $CLI volume rebalance $V0 fix-layout start
-EXPECT_WITHIN 15 "completed" rebalance_status_field $V0
+EXPECT_WITHIN 15 "fix-layout completed" rebalance_status_field $V0
 
 # Get the original values.
 xattrs=""
@@ -32,13 +32,13 @@ done
 TEST $CLI volume add-brick $V0 $H0:$B0/${V0}3
 # Force assignment of initial ranges.
 TEST $CLI volume rebalance $V0 fix-layout start
-EXPECT_WITHIN 15 "completed" rebalance_status_field $V0
+EXPECT_WITHIN 15 "fix-layout completed" rebalance_status_field $V0
 
 for i in $(seq 0 3); do
 	xattrs="$xattrs $(dht_get_layout $B0/${V0}$i)"
 done
 
-overlap=$($(dirname $0)/overlap.py $xattrs)
+overlap=$(python2 $(dirname $0)/overlap.py $xattrs)
 # 2863311531 = 0xaaaaaaab = 2/3 overlap
 TEST [ "$overlap" -ge 2863311531 ]
 
