@@ -200,6 +200,7 @@ enum glusterd_brick_procnum {
         GLUSTERD_NODE_PROFILE,
         GLUSTERD_NODE_STATUS,
         GLUSTERD_VOLUME_BARRIER_OP,
+        GLUSTERD_BRICK_BARRIER,
         GLUSTERD_BRICK_MAXVALUE,
 };
 
