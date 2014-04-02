@@ -47,7 +47,7 @@ nfs_fix_groups (xlator_t *this, call_stack_t *root)
                 return;
         }
 
-	agl = gid_cache_lookup(&priv->gid_cache, root->uid);
+	agl = gid_cache_lookup(&priv->gid_cache, root->uid, 0, 0);
 	if (agl) {
 		for (ngroups = 0; ngroups < agl->gl_count; ngroups++) 
 			root->groups[ngroups] = agl->gl_list[ngroups];
@@ -84,6 +84,8 @@ nfs_fix_groups (xlator_t *this, call_stack_t *root)
 	if (gl.gl_list) {
 		/* It's not fatal if the alloc failed. */
 		gl.gl_id = root->uid;
+		gl.gl_uid = 0;
+		gl.gl_gid = 0;
 		gl.gl_count = ngroups;
 		memcpy(gl.gl_list, mygroups, sizeof(gid_t) * ngroups);
 		if (gid_cache_add(&priv->gid_cache, &gl) != 1)
@@ -315,6 +317,9 @@ nfs_gfid_dict (inode_t *inode)
         uuid_t  rootgfid = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
 
         dyngfid = GF_CALLOC (1, sizeof (uuid_t), gf_common_mt_char);
+        if (dyngfid == NULL)
+                return (NULL);
+
         uuid_generate (newgfid);
 
         if (uuid_compare (inode->gfid, rootgfid) == 0)
@@ -325,16 +330,17 @@ nfs_gfid_dict (inode_t *inode)
         dictgfid = dict_new ();
         if (!dictgfid) {
                 gf_log (GF_NFS, GF_LOG_ERROR, "Failed to create gfid dict");
-                goto out;
+                GF_FREE (dyngfid);
+                return (NULL);
         }
 
         ret = dict_set_bin (dictgfid, "gfid-req", dyngfid, sizeof (uuid_t));
         if (ret < 0) {
+                GF_FREE (dyngfid);
                 dict_unref (dictgfid);
-                dictgfid = NULL;
+                return (NULL);
         }
 
-out:
         return dictgfid;
 }
 

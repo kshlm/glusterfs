@@ -746,7 +746,15 @@ reconfigure (xlator_t *this, dict_t *options)
 
         (void) rpcsvc_set_allow_insecure (rpc_conf, options);
         (void) rpcsvc_set_root_squash (rpc_conf, options);
-        (void) rpcsvc_set_outstanding_rpc_limit (rpc_conf, options);
+
+        ret = rpcsvc_set_outstanding_rpc_limit (rpc_conf, options,
+                                         RPCSVC_DEFAULT_OUTSTANDING_RPC_LIMIT);
+        if (ret < 0) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Failed to reconfigure outstanding-rpc-limit");
+                goto out;
+        }
+
         list_for_each_entry (listeners, &(rpc_conf->listeners), list) {
                 if (listeners->trans != NULL) {
                         if (listeners->trans->reconfigure )
@@ -770,7 +778,7 @@ client_destroy_cbk (xlator_t *this, client_t *client)
         server_ctx_t *ctx = NULL;
 
         client_ctx_del (client, this, &tmp);
- 
+
         ctx = tmp;
 
         if (ctx == NULL)
@@ -860,9 +868,17 @@ init (xlator_t *this)
         /* RPC related */
         conf->rpc = rpcsvc_init (this, this->ctx, this->options, 0);
         if (conf->rpc == NULL) {
-                gf_log (this->name, GF_LOG_WARNING,
+                gf_log (this->name, GF_LOG_ERROR,
                         "creation of rpcsvc failed");
                 ret = -1;
+                goto out;
+        }
+
+        ret = rpcsvc_set_outstanding_rpc_limit (conf->rpc, this->options,
+                                         RPCSVC_DEFAULT_OUTSTANDING_RPC_LIMIT);
+        if (ret < 0) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Failed to configure outstanding-rpc-limit");
                 goto out;
         }
 
@@ -1052,10 +1068,26 @@ struct volume_options options[] = {
         { .key   = {"root-squash"},
           .type  = GF_OPTION_TYPE_BOOL,
           .default_value = "off",
-          .description = "Map  requests  from  uid/gid 0 to the anonymous "
-                         "uid/gid. Note that this does not apply to any other"
-                         "uids or gids that might be equally sensitive, such as"
-                         "user bin or group staff."
+          .description = "Map requests from uid/gid 0 to the anonymous "
+                         "uid/gid. Note that this does not apply to any other "
+                         "uids or gids that might be equally sensitive, such "
+                         "as user bin or group staff."
+        },
+        { .key           = {"anonuid"},
+          .type          = GF_OPTION_TYPE_INT,
+          .default_value = "65534", /* RPC_NOBODY_UID */
+          .min           = 0,
+          .max           = (uint32_t) -1,
+          .description   = "value of the uid used for the anonymous "
+                           "user/nfsnobody when root-squash is enabled."
+        },
+        { .key           = {"anongid"},
+          .type          = GF_OPTION_TYPE_INT,
+          .default_value = "65534", /* RPC_NOBODY_GID */
+          .min           = 0,
+          .max           = (uint32_t) -1,
+          .description   = "value of the gid used for the anonymous "
+                           "user/nfsnobody when root-squash is enabled."
         },
         { .key           = {"statedump-path"},
           .type          = GF_OPTION_TYPE_PATH,
@@ -1085,13 +1117,15 @@ struct volume_options options[] = {
         { .key   = {"auth.addr.*.allow"},
           .type  = GF_OPTION_TYPE_INTERNET_ADDRESS_LIST,
           .description = "Allow a comma separated list of addresses and/or "
-                         "hostnames to connect to the server. By default, all"
-                         " connections are allowed."
+                         "hostnames to connect to the server. Option "
+                         "auth.reject overrides this option. By default, all "
+                         "connections are allowed."
         },
         { .key   = {"auth.addr.*.reject"},
           .type  = GF_OPTION_TYPE_INTERNET_ADDRESS_LIST,
           .description = "Reject a comma separated list of addresses and/or "
-                         "hostnames to connect to the server. By default, all"
+                         "hostnames to connect to the server. This option "
+                         "overrides the auth.allow option. By default, all"
                          " connections are allowed."
         },
 

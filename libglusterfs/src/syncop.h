@@ -31,6 +31,7 @@
 #define SYNCOPCTX_UID    0x00000001
 #define SYNCOPCTX_GID    0x00000002
 #define SYNCOPCTX_GROUPS 0x00000004
+#define SYNCOPCTX_PID    0x00000008
 
 struct synctask;
 struct syncproc;
@@ -164,6 +165,7 @@ struct syncopctx {
         int          grpsize;
         int          ngrps;
         gid_t       *groups;
+	pid_t        pid;
 };
 
 #define __yawn(args) do {                                       \
@@ -260,6 +262,7 @@ int synctask_setid (struct synctask *task, uid_t uid, gid_t gid);
 int syncopctx_setfsuid (void *uid);
 int syncopctx_setfsgid (void *gid);
 int syncopctx_setfsgroups (int count, const void *groups);
+int syncopctx_setfspid (void *pid);
 
 static inline call_frame_t *
 syncop_create_frame (xlator_t *this)
@@ -272,9 +275,13 @@ syncop_create_frame (xlator_t *this)
 	if (!frame)
 		return NULL;
 
-	frame->root->pid = getpid ();
-
 	opctx = syncopctx_getctx ();
+
+	if (opctx && (opctx->valid & SYNCOPCTX_PID))
+		frame->root->pid = opctx->pid;
+	else
+		frame->root->pid = getpid ();
+
 	if (opctx && (opctx->valid & SYNCOPCTX_UID))
 		frame->root->uid = opctx->uid;
 	else
@@ -360,8 +367,10 @@ int syncop_fsetxattr (xlator_t *subvol, fd_t *fd, dict_t *dict, int32_t flags);
 int syncop_listxattr (xlator_t *subvol, loc_t *loc, dict_t **dict);
 int syncop_getxattr (xlator_t *xl, loc_t *loc, dict_t **dict, const char *key);
 int syncop_fgetxattr (xlator_t *xl, fd_t *fd, dict_t **dict, const char *key);
-int syncop_removexattr (xlator_t *subvol, loc_t *loc, const char *name);
-int syncop_fremovexattr (xlator_t *subvol, fd_t *fd, const char *name);
+int syncop_removexattr (xlator_t *subvol, loc_t *loc, const char *name,
+			dict_t *xdata);
+int syncop_fremovexattr (xlator_t *subvol, fd_t *fd, const char *name,
+			 dict_t *xdata);
 
 int syncop_create (xlator_t *subvol, loc_t *loc, int32_t flags, mode_t mode,
                    fd_t *fd, dict_t *dict, struct iatt *iatt);
@@ -382,7 +391,7 @@ int syncop_ftruncate (xlator_t *subvol, fd_t *fd, off_t offset);
 int syncop_truncate (xlator_t *subvol, loc_t *loc, off_t offset);
 
 int syncop_unlink (xlator_t *subvol, loc_t *loc);
-int syncop_rmdir (xlator_t *subvol, loc_t *loc);
+int syncop_rmdir (xlator_t *subvol, loc_t *loc, int flags);
 
 int syncop_fsync (xlator_t *subvol, fd_t *fd, int dataonly);
 int syncop_flush (xlator_t *subvol, fd_t *fd);

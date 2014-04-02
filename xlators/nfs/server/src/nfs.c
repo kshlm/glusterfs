@@ -959,10 +959,20 @@ nfs_init_state (xlator_t *this)
                 nfs->enable_nlm = _gf_false;
         }
 
-        nfs->rpcsvc =  rpcsvc_init (this, this->ctx, this->options, 0);
+        nfs->rpcsvc =  rpcsvc_init (this, this->ctx,
+                                    this->options, fopspoolsize);
         if (!nfs->rpcsvc) {
                 ret = -1;
                 gf_log (GF_NFS, GF_LOG_ERROR, "RPC service init failed");
+                goto free_foppool;
+        }
+
+        ret = rpcsvc_set_outstanding_rpc_limit (nfs->rpcsvc,
+                                  this->options,
+                                  RPCSVC_DEF_NFS_OUTSTANDING_RPC_LIMIT);
+        if (ret < 0) {
+                gf_log (GF_NFS, GF_LOG_ERROR,
+                        "Failed to configure outstanding-rpc-limit");
                 goto free_foppool;
         }
 
@@ -994,6 +1004,9 @@ nfs_drc_init (xlator_t *this)
 {
         int       ret     = -1;
         rpcsvc_t *svc     = NULL;
+
+        GF_VALIDATE_OR_GOTO (GF_NFS, this, out);
+        GF_VALIDATE_OR_GOTO (GF_NFS, this->private, out);
 
         svc = ((struct nfs_state *)(this->private))->rpcsvc;
         if (!svc)
@@ -1206,6 +1219,17 @@ reconfigure (xlator_t *this, dict_t *options)
                         "rpcsvc reconfigure options failed");
                 return (-1);
         }
+
+        /* Reconfigure rpc.outstanding-rpc-limit */
+        ret = rpcsvc_set_outstanding_rpc_limit (nfs->rpcsvc,
+                                       options,
+                                       RPCSVC_DEF_NFS_OUTSTANDING_RPC_LIMIT);
+        if (ret < 0) {
+                gf_log (GF_NFS, GF_LOG_ERROR,
+                        "Failed to reconfigure outstanding-rpc-limit");
+                return (-1);
+        }
+
         regpmap = rpcsvc_register_portmap_enabled(nfs->rpcsvc);
         if (nfs->register_portmap != regpmap) {
                 nfs->register_portmap = regpmap;
@@ -1227,6 +1251,23 @@ reconfigure (xlator_t *this, dict_t *options)
         return (0);
 }
 
+/* Main init() routine for NFS server xlator. It inits NFS v3 protocol
+ * and its dependent protocols e.g. ACL, MOUNT v3 (mount3), NLM and
+ * DRC.
+ *
+ * Usage: glusterfsd:
+ *            glusterfs_process_volfp() =>
+ *              glusterfs_graph_activate() =>
+ *                glusterfs_graph_init() =>
+ *                  xlator_init () => NFS init() routine
+ *
+ * If init() routine fails, the glusterfsd cleans up the NFS process
+ * by invoking cleanup_and_exit().
+ *
+ * RETURN:
+ *       0 (SUCCESS) if all protocol specific inits PASS.
+ *      -1 (FAILURE) if any of them FAILS.
+ */
 int
 init (xlator_t *this) {
 
@@ -1234,59 +1275,52 @@ init (xlator_t *this) {
         int                     ret = -1;
 
         if (!this)
-                return -1;
+                return (-1);
 
         nfs = nfs_init_state (this);
         if (!nfs) {
                 gf_log (GF_NFS, GF_LOG_ERROR, "Failed to init nfs option");
-                return -1;
+                return (-1);
         }
 
         ret = nfs_add_all_initiators (nfs);
-        if (ret == -1) {
+        if (ret) {
                 gf_log (GF_NFS, GF_LOG_ERROR, "Failed to add initiators");
-                goto err;
+                return (-1);
         }
 
         ret = nfs_init_subvolumes (nfs, this->children);
-        if (ret == -1) {
-                gf_log (GF_NFS, GF_LOG_CRITICAL, "Failed to init NFS "
-                        "exports");
-                goto err;
+        if (ret) {
+                gf_log (GF_NFS, GF_LOG_CRITICAL, "Failed to init NFS exports");
+                return (-1);
         }
 
         ret = mount_init_state (this);
-        if (ret == -1) {
-                gf_log (GF_NFS, GF_LOG_CRITICAL, "Failed to init Mount"
-                        "state");
-                goto err;
+        if (ret) {
+                gf_log (GF_NFS, GF_LOG_CRITICAL, "Failed to init Mount state");
+                return (-1);
         }
 
         ret = nlm4_init_state (this);
-        if (ret == -1) {
-                gf_log (GF_NFS, GF_LOG_CRITICAL, "Failed to init NLM"
-                        "state");
-                goto err;
+        if (ret) {
+                gf_log (GF_NFS, GF_LOG_CRITICAL, "Failed to init NLM state");
+                return (-1);
         }
 
         ret = nfs_init_versions (nfs, this);
-        if (ret == -1) {
-                gf_log (GF_NFS, GF_LOG_ERROR, "Failed to initialize "
-                        "protocols");
-                /* Do not return an error on this. If we dont return
-                 * an error, the process keeps running and it helps
-                 * to point out where the log is by doing ps ax|grep gluster.
-                 */
-                ret = 0;
-                goto err;
+        if (ret) {
+                gf_log (GF_NFS, GF_LOG_ERROR, "Failed to initialize protocols");
+                return (-1);
         }
 
         ret = nfs_drc_init (this);
-        if (ret == 0)
-                gf_log (GF_NFS, GF_LOG_INFO, "NFS service started");
-err:
+        if (ret) {
+                gf_log (GF_NFS, GF_LOG_ERROR, "Failed to initialize DRC");
+                return (-1);
+        }
 
-        return ret;
+        gf_log (GF_NFS, GF_LOG_INFO, "NFS service started");
+        return (0); /* SUCCESS */
 }
 
 
@@ -1590,8 +1624,8 @@ struct volume_options options[] = {
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "on",
           .description = "Disable or enable the AUTH_UNIX authentication type."
-                         "Must always be enabled for better interoperability."
-                         "However, can be disabled if needed. Enabled by"
+                         "Must always be enabled for better interoperability. "
+                         "However, can be disabled if needed. Enabled by "
                          "default"
         },
         { .key  = {"rpc-auth.auth-null"},
@@ -1607,8 +1641,8 @@ struct volume_options options[] = {
           .description = "Disable or enable the AUTH_UNIX authentication type "
                          "for a particular exported volume overriding defaults"
                          " and general setting for AUTH_UNIX scheme. Must "
-                         "always be enabled for better interoperability."
-                         "However, can be disabled if needed. Enabled by"
+                         "always be enabled for better interoperability. "
+                         "However, can be disabled if needed. Enabled by "
                          "default."
         },
         { .key  = {"rpc-auth.auth-unix.*.allow"},
@@ -1617,8 +1651,8 @@ struct volume_options options[] = {
           .description = "Disable or enable the AUTH_UNIX authentication type "
                          "for a particular exported volume overriding defaults"
                          " and general setting for AUTH_UNIX scheme. Must "
-                         "always be enabled for better interoperability."
-                         "However, can be disabled if needed. Enabled by"
+                         "always be enabled for better interoperability. "
+                         "However, can be disabled if needed. Enabled by "
                          "default."
         },
         { .key  = {"rpc-auth.auth-null.*"},
@@ -1659,7 +1693,7 @@ struct volume_options options[] = {
           .default_value = "none",
           .description = "Reject a comma separated list of addresses and/or"
                          " hostnames from connecting to the server. By default,"
-                         " all connections are allowed. This allows users to"
+                         " all connections are allowed. This allows users to "
                          "define a rule for a specific exported volume."
         },
         { .key  = {"rpc-auth.ports.insecure"},
@@ -1727,7 +1761,7 @@ struct volume_options options[] = {
           .type = GF_OPTION_TYPE_INT,
           .min  = RPCSVC_MIN_OUTSTANDING_RPC_LIMIT,
           .max  = RPCSVC_MAX_OUTSTANDING_RPC_LIMIT,
-          .default_value = TOSTRING(RPCSVC_DEFAULT_OUTSTANDING_RPC_LIMIT),
+          .default_value = TOSTRING(RPCSVC_DEF_NFS_OUTSTANDING_RPC_LIMIT),
           .description = "Parameter to throttle the number of incoming RPC "
                          "requests from a client. 0 means no limit (can "
                          "potentially run out of memory)"
@@ -1756,8 +1790,8 @@ struct volume_options options[] = {
         { .key  = {"nfs.*.disable"},
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "false",
-          .description = "This option is used to start or stop NFS server"
-                         "for individual volume."
+          .description = "This option is used to start or stop the NFS server "
+                         "for individual volumes."
         },
 
         { .key  = {"nfs.nlm"},

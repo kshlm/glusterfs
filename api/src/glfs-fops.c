@@ -124,6 +124,7 @@ retry:
 	}
 
 	ret = syncop_open (subvol, &loc, flags, glfd->fd);
+        DECODE_SYNCOP_ERR (ret);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 out:
@@ -169,6 +170,7 @@ glfs_close (struct glfs_fd *glfd)
 	}
 
 	ret = syncop_flush (subvol, fd);
+        DECODE_SYNCOP_ERR (ret);
 out:
 	fs = glfd->fs;
 	glfs_fd_destroy (glfd);
@@ -273,6 +275,7 @@ glfs_fstat (struct glfs_fd *glfd, struct stat *stat)
 	}
 
 	ret = syncop_fstat (subvol, fd, &iatt);
+        DECODE_SYNCOP_ERR (ret);
 
 	if (ret == 0 && stat)
 		glfs_iatt_to_stat (glfd->fs, &iatt, stat);
@@ -392,9 +395,11 @@ retry:
 
 	if (ret == 0) {
 		ret = syncop_open (subvol, &loc, flags, glfd->fd);
+                DECODE_SYNCOP_ERR (ret);
 	} else {
 		ret = syncop_create (subvol, &loc, flags, mode, glfd->fd,
 				     xattr_req, &iatt);
+                DECODE_SYNCOP_ERR (ret);
 	}
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
@@ -484,6 +489,7 @@ glfs_preadv (struct glfs_fd *glfd, const struct iovec *iovec, int iovcnt,
 	size = iov_length (iovec, iovcnt);
 
 	ret = syncop_readv (subvol, fd, size, offset, 0, &iov, &cnt, &iobref);
+        DECODE_SYNCOP_ERR (ret);
 	if (ret <= 0)
 		goto out;
 
@@ -710,10 +716,14 @@ glfs_preadv_async (struct glfs_fd *glfd, const struct iovec *iovec, int count,
 			   offset, flags, NULL);
 
 out:
-	if (ret) {
-		GF_FREE (gio->iov);
-		GF_FREE (gio);
-		STACK_DESTROY (frame->root);
+        if (ret) {
+                if (gio) {
+                        GF_FREE (gio->iov);
+                        GF_FREE (gio);
+                }
+                if (frame) {
+                        STACK_DESTROY (frame->root);
+                }
 		glfs_subvol_done (fs, subvol);
 	}
 
@@ -829,6 +839,7 @@ glfs_pwritev (struct glfs_fd *glfd, const struct iovec *iovec, int iovcnt,
 	iov.iov_len = size;
 
 	ret = syncop_writev (subvol, fd, &iov, 1, offset, iobref, flags);
+        DECODE_SYNCOP_ERR (ret);
 
 	iobuf_unref (iobuf);
 	iobref_unref (iobref);
@@ -1001,6 +1012,7 @@ glfs_fsync (struct glfs_fd *glfd)
 	}
 
 	ret = syncop_fsync (subvol, fd, 0);
+        DECODE_SYNCOP_ERR (ret);
 out:
 	if (fd)
 		fd_unref (fd);
@@ -1075,6 +1087,7 @@ glfs_fdatasync (struct glfs_fd *glfd)
 	}
 
 	ret = syncop_fsync (subvol, fd, 1);
+        DECODE_SYNCOP_ERR (ret);
 out:
 	if (fd)
 		fd_unref (fd);
@@ -1116,6 +1129,7 @@ glfs_ftruncate (struct glfs_fd *glfd, off_t offset)
 	}
 
 	ret = syncop_ftruncate (subvol, fd, offset);
+        DECODE_SYNCOP_ERR (ret);
 out:
 	if (fd)
 		fd_unref (fd);
@@ -1184,6 +1198,7 @@ retry:
 		goto out;
 
 	ret = syncop_access (subvol, &loc, mode);
+        DECODE_SYNCOP_ERR (ret);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 out:
@@ -1259,6 +1274,7 @@ retry:
 	}
 
 	ret = syncop_symlink (subvol, &loc, data, xattr_req, &iatt);
+        DECODE_SYNCOP_ERR (ret);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 
@@ -1309,6 +1325,7 @@ retry:
 	}
 
 	ret = syncop_readlink (subvol, &loc, &linkval, bufsiz);
+        DECODE_SYNCOP_ERR (ret);
 	if (ret > 0) {
 		memcpy (buf, linkval, ret);
 		GF_FREE (linkval);
@@ -1388,6 +1405,7 @@ retry:
 	}
 
 	ret = syncop_mknod (subvol, &loc, mode, dev, xattr_req, &iatt);
+        DECODE_SYNCOP_ERR (ret);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 
@@ -1469,6 +1487,7 @@ retry:
 	}
 
 	ret = syncop_mkdir (subvol, &loc, mode, xattr_req, &iatt);
+        DECODE_SYNCOP_ERR (ret);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 
@@ -1518,6 +1537,7 @@ retry:
 	}
 
 	ret = syncop_unlink (subvol, &loc);
+        DECODE_SYNCOP_ERR (ret);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 
@@ -1563,7 +1583,8 @@ retry:
 		goto out;
 	}
 
-	ret = syncop_rmdir (subvol, &loc);
+	ret = syncop_rmdir (subvol, &loc, 0);
+        DECODE_SYNCOP_ERR (ret);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 
@@ -1627,6 +1648,7 @@ retrynew:
 	/* TODO: check if new or old is a prefix of the other, and fail EINVAL */
 
 	ret = syncop_rename (subvol, &oldloc, &newloc);
+        DECODE_SYNCOP_ERR (ret);
 
 	if (ret == -1 && errno == ESTALE) {
 		if (reval < DEFAULT_REVAL_COUNT) {
@@ -1704,6 +1726,7 @@ retrynew:
         newloc.inode = inode_ref (oldloc.inode);
 
 	ret = syncop_link (subvol, &oldloc, &newloc);
+        DECODE_SYNCOP_ERR (ret);
 
 	if (ret == -1 && errno == ESTALE) {
 		loc_wipe (&oldloc);
@@ -1778,6 +1801,7 @@ retry:
 	}
 
 	ret = syncop_opendir (subvol, &loc, glfd->fd);
+        DECODE_SYNCOP_ERR (ret);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 out:
@@ -1786,7 +1810,7 @@ out:
 	if (ret && glfd) {
 		glfs_fd_destroy (glfd);
 		glfd = NULL;
-	} else {
+	} else if (glfd) {
 		fd_bind (glfd->fd);
 		glfs_fd_bind (glfd);
 	}
@@ -1968,6 +1992,7 @@ glfd_entry_refresh (struct glfs_fd *glfd, int plus)
 	else
 		ret = syncop_readdir (subvol, fd, 131072, glfd->offset,
 				      &entries);
+        DECODE_SYNCOP_ERR (ret);
 	if (ret >= 0) {
 		if (plus)
 			gf_link_inodes_from_dirent (THIS, fd->inode, &entries);
@@ -2146,6 +2171,7 @@ retry:
 		goto out;
 
 	ret = syncop_statfs (subvol, &loc, buf);
+        DECODE_SYNCOP_ERR (ret);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 out:
@@ -2187,6 +2213,7 @@ retry:
 		goto out;
 
 	ret = syncop_setattr (subvol, &loc, iatt, valid, 0, 0);
+        DECODE_SYNCOP_ERR (ret);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 out:
@@ -2222,6 +2249,7 @@ glfs_fsetattr (struct glfs_fd *glfd, struct iatt *iatt, int valid)
 	}
 
 	ret = syncop_fsetattr (subvol, fd, iatt, valid, 0, 0);
+        DECODE_SYNCOP_ERR (ret);
 out:
 	if (fd)
 		fd_unref (fd);
@@ -2438,6 +2466,7 @@ retry:
 		goto out;
 
 	ret = syncop_getxattr (subvol, &loc, &xattr, name);
+        DECODE_SYNCOP_ERR (ret);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 
@@ -2496,6 +2525,7 @@ glfs_fgetxattr (struct glfs_fd *glfd, const char *name, void *value,
 	}
 
 	ret = syncop_fgetxattr (subvol, fd, &xattr, name);
+        DECODE_SYNCOP_ERR (ret);
 	if (ret)
 		goto out;
 
@@ -2513,23 +2543,23 @@ out:
 int
 glfs_listxattr_process (void *value, size_t size, dict_t *xattr)
 {
-	int     ret = -1;
+	int ret = -1;
+
+	if (!value || !size || !xattr)
+		goto out;
 
 	ret = dict_keys_join (NULL, 0, xattr, NULL);
-
-	if (!value || !size)
-		goto out;
 
 	if (size < ret) {
 		ret = -1;
 		errno = ERANGE;
-		goto out;
+	} else {
+		dict_keys_join (value, size, xattr, NULL);
 	}
 
-	dict_keys_join (value, size, xattr, NULL);
+	dict_unref (xattr);
+
 out:
-	if (xattr)
-		dict_unref (xattr);
 	return ret;
 }
 
@@ -2566,6 +2596,7 @@ retry:
 		goto out;
 
 	ret = syncop_getxattr (subvol, &loc, &xattr, NULL);
+        DECODE_SYNCOP_ERR (ret);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 
@@ -2621,6 +2652,7 @@ glfs_flistxattr (struct glfs_fd *glfd, void *value, size_t size)
 	}
 
 	ret = syncop_fgetxattr (subvol, fd, &xattr, NULL);
+        DECODE_SYNCOP_ERR (ret);
 	if (ret)
 		goto out;
 
@@ -2693,6 +2725,7 @@ retry:
 	}
 
 	ret = syncop_setxattr (subvol, &loc, xattr, flags);
+        DECODE_SYNCOP_ERR (ret);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 
@@ -2756,6 +2789,7 @@ glfs_fsetxattr (struct glfs_fd *glfd, const char *name, const void *value,
 	}
 
 	ret = syncop_fsetxattr (subvol, fd, xattr, flags);
+        DECODE_SYNCOP_ERR (ret);
 out:
 	if (xattr)
 		dict_unref (xattr);
@@ -2798,7 +2832,8 @@ retry:
 	if (ret)
 		goto out;
 
-	ret = syncop_removexattr (subvol, &loc, name);
+	ret = syncop_removexattr (subvol, &loc, name, 0);
+        DECODE_SYNCOP_ERR (ret);
 
 	ESTALE_RETRY (ret, errno, reval, &loc, retry);
 
@@ -2848,7 +2883,8 @@ glfs_fremovexattr (struct glfs_fd *glfd, const char *name)
 		goto out;
 	}
 
-	ret = syncop_fremovexattr (subvol, fd, name);
+	ret = syncop_fremovexattr (subvol, fd, name, 0);
+        DECODE_SYNCOP_ERR (ret);
 out:
 	if (fd)
 		fd_unref (fd);
@@ -2883,6 +2919,7 @@ glfs_fallocate (struct glfs_fd *glfd, int keep_size, off_t offset, size_t len)
 	}
 
 	ret = syncop_fallocate (subvol, fd, keep_size, offset, len);
+        DECODE_SYNCOP_ERR (ret);
 out:
 	if (fd)
 		fd_unref(fd);
@@ -2917,6 +2954,7 @@ glfs_discard (struct glfs_fd *glfd, off_t offset, size_t len)
 	}
 
 	ret = syncop_discard (subvol, fd, offset, len);
+        DECODE_SYNCOP_ERR (ret);
 out:
 	if (fd)
 		fd_unref(fd);
@@ -2948,6 +2986,7 @@ glfs_zerofill (struct glfs_fd *glfd, off_t offset, off_t len)
         }
 
         ret = syncop_zerofill (subvol, fd, offset, len);
+        DECODE_SYNCOP_ERR (ret);
 out:
         if (fd)
                 fd_unref(fd);
@@ -3196,6 +3235,7 @@ glfs_posix_lock (struct glfs_fd *glfd, int cmd, struct flock *flock)
 	gf_flock_from_flock (&gf_flock, flock);
 	gf_flock_from_flock (&saved_flock, flock);
 	ret = syncop_lk (subvol, fd, cmd, &gf_flock);
+        DECODE_SYNCOP_ERR (ret);
 	gf_flock_to_flock (&gf_flock, flock);
 
 	if (ret == 0 && (cmd == F_SETLK || cmd == F_SETLKW))

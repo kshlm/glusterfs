@@ -3,18 +3,19 @@ M1=${M1:=/mnt/glusterfs/1};   # 1st mount point for FUSE
 N0=${N0:=/mnt/nfs/0};         # 0th mount point for NFS
 N1=${N1:=/mnt/nfs/1};         # 1st mount point for NFS
 V0=${V0:=patchy};             # volume name to use in tests
+V1=${V1:=patchy1};            # volume name to use in tests
 B0=${B0:=/d/backends};        # top level of brick directories
 H0=${H0:=`hostname --fqdn`};  # hostname
 DEBUG=${DEBUG:=0}             # turn on debugging?
 statedumpdir=`gluster --print-statedumpdir`; # Default directory for statedump
 
-CLI="gluster --mode=script";
+CLI="gluster --mode=script --wignore";
 
 mkdir -p $B0;
 mkdir -p $M0 $M1;
 mkdir -p $N0 $N1;
 
-testcnt=`egrep '^[[:space:]]*(EXPECT|TEST|EXPECT_WITHIN|EXPECT_KEYWORD)[[:space:]]' $0 | wc -l`
+testcnt=`egrep '^[[:space:]]*(EXPECT|EXPECT_NOT|TEST|EXPECT_WITHIN|EXPECT_KEYWORD)[[:space:]]' $0 | wc -l`
 expect_tests=`egrep '^[[:space:]]*TESTS_EXPECTED_IN_LOOP[[:space:]]*' $0`
 
 x_ifs=$IFS
@@ -67,10 +68,11 @@ function test_expect_footer()
         local a=$2
         local err=""
 
-        if [ "x${e}" != "x${a}" ]; then
+        if ! [[ "$a" =~ $e ]]; then
                 err="Got \"$a\" instead of \"$e\""
         fi
-        [[ "x${e}" == "x${a}" ]];
+        [[ "$a" =~ $e ]];
+
         test_footer "$err";
 }
 
@@ -87,6 +89,35 @@ function _EXPECT()
 	a=$("$@" | tail -1)
 
 	test_expect_footer "$e" "$a";
+}
+
+function test_expect_not_footer()
+{
+        local e=$1
+        local a=$2
+        local err=""
+
+        if [[ "$a" =~ $e ]]; then
+                err="Got \"$a\" when not expecting it"
+        fi
+
+        ! [[ "$a" =~ "$e" ]];
+        test_footer "$err";
+}
+
+function _EXPECT_NOT()
+{
+	TESTLINE=$1;
+	shift;
+        local a=""
+
+	test_header "$@";
+
+	e="$1";
+	shift;
+	a=$("$@" | tail -1)
+
+	test_expect_not_footer "$e" "$a";
 }
 
 function _EXPECT_KEYWORD()
@@ -184,6 +215,8 @@ function _TEST_IN_LOOP()
 function cleanup()
 {
 	killall -15 glusterfs glusterfsd glusterd 2>/dev/null || true;
+        # allow completion of signal handlers for SIGTERM before issue SIGKILL
+        sleep 1
 	killall -9 glusterfs glusterfsd glusterd 2>/dev/null || true;
 
         MOUNTPOINTS=`mount | grep "$B0/" | awk '{print $3}'`
@@ -238,6 +271,7 @@ function process_leak_count ()
 }
 
 alias EXPECT='_EXPECT $LINENO'
+alias EXPECT_NOT='_EXPECT_NOT $LINENO'
 alias TEST='_TEST $LINENO'
 alias EXPECT_WITHIN='_EXPECT_WITHIN $LINENO'
 alias EXPECT_KEYWORD='_EXPECT_KEYWORD $LINENO'

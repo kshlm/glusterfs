@@ -363,10 +363,9 @@ volopt_trie_section (int lvl, char **patt, char *word, char **hint, int hints)
         GF_ASSERT (hints <= 2);
         nodevec.cnt = hints;
         ret = trie_measure_vec (trie, word, &nodevec);
-        if (ret || !nodevec.nodes[0])
-                trie_destroy (trie);
+        if (!ret && nodevec.nodes[0])
+                ret = process_nodevec (&nodevec, hint);
 
-        ret = process_nodevec (&nodevec, hint);
         trie_destroy (trie);
 
         return ret;
@@ -1404,25 +1403,28 @@ static int
 server_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
                       dict_t *set_dict, void *param)
 {
-        char     *volname                 = NULL;
-        char     *path                    = NULL;
-        int       pump                    = 0;
-        xlator_t *xl                      = NULL;
-        xlator_t *txl                     = NULL;
-        xlator_t *rbxl                    = NULL;
-        char      transt[16]              = {0,};
-        char     *ptranst                 = NULL;
-        char      volume_id[64]           = {0,};
-        char      tstamp_file[PATH_MAX]   = {0,};
-        int       ret                     = 0;
-        char     *xlator                  = NULL;
-        char     *loglevel                = NULL;
-        char     *username                = NULL;
-        char     *password                = NULL;
-        char     index_basepath[PATH_MAX] = {0};
-        char     key[1024]                = {0};
-        glusterd_brickinfo_t *brickinfo   = NULL;
-        char changelog_basepath[PATH_MAX] = {0,};
+        char                 *volname       = NULL;
+        char                 *path          = NULL;
+        int                   pump          = 0;
+        xlator_t             *xl            = NULL;
+        xlator_t             *txl           = NULL;
+        xlator_t             *rbxl          = NULL;
+        char      transt[16]                = {0,};
+        char                 *ptranst       = NULL;
+        char      volume_id[64]             = {0,};
+        char      tstamp_file[PATH_MAX]     = {0,};
+        int                   ret           = 0;
+        char                 *xlator        = NULL;
+        char                 *loglevel      = NULL;
+        char                 *username      = NULL;
+        char                 *password      = NULL;
+        char     index_basepath[PATH_MAX]   = {0};
+        char     key[1024]                  = {0};
+        glusterd_brickinfo_t *brickinfo     = NULL;
+        char changelog_basepath[PATH_MAX]   = {0,};
+        gf_boolean_t          quota_enabled = _gf_true;
+        gf_boolean_t          pgfid_feat    = _gf_false;
+        char                 *value         = NULL;
 
         brickinfo = param;
         path      = brickinfo->path;
@@ -1441,6 +1443,22 @@ server_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
                 }
         }
 
+        ret = glusterd_volinfo_get (volinfo, VKEY_FEATURES_QUOTA, &value);
+        if (value) {
+                ret = gf_string2boolean (value, &quota_enabled);
+                if (ret)
+                        goto out;
+        }
+
+        ret = glusterd_volinfo_get (volinfo,
+                                    "update-link-count-parent",
+                                    &value);
+        if (value) {
+                ret = gf_string2boolean (value, &pgfid_feat);
+                if (ret)
+                        goto out;
+        }
+
         xl = volgen_graph_add (graph, "storage/posix", volname);
         if (!xl)
                 return -1;
@@ -1453,6 +1471,10 @@ server_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
                                  uuid_utoa (volinfo->volume_id));
         if (ret)
                 return -1;
+
+        if (quota_enabled || pgfid_feat)
+                xlator_set_option (xl, "update-link-count-parent",
+                                   "on");
 
         ret = check_and_add_debug_xl (graph, set_dict, volname,
                                       "posix");
@@ -1603,7 +1625,21 @@ server_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
         if (ret)
                 return -1;
 
-        if (dict_get_str_boolean (set_dict, "features.read-only", 0) &&
+        xl = volgen_graph_add (graph, "features/quota", volname);
+        if (!xl)
+                return -1;
+        ret = xlator_set_option (xl, "volume-uuid", volname);
+        if (ret)
+                return -1;
+
+        ret = glusterd_volinfo_get (volinfo, VKEY_FEATURES_QUOTA, &value);
+        if (value) {
+                ret = xlator_set_option (xl, "server-quota", value);
+                if (ret)
+                        return -1;
+        }
+
+         if (dict_get_str_boolean (set_dict, "features.read-only", 0) &&
             dict_get_str_boolean (set_dict, "features.worm",0)) {
                 gf_log (THIS->name, GF_LOG_ERROR,
                         "read-only and worm cannot be set together");
@@ -1630,13 +1666,16 @@ server_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
         }
 
         /* Check for compress volume option, and add it to the graph on server side */
-        if (dict_get_str_boolean (set_dict, "features.compress", 0)) {
+        ret = dict_get_str_boolean (set_dict, "network.compression", 0);
+        if (ret == -1)
+                goto out;
+        if (ret) {
                 xl = volgen_graph_add (graph, "features/cdc", volname);
                 if (!xl) {
                         ret = -1;
                         goto out;
                 }
-                ret = dict_set_str (set_dict, "compress.mode", "server");
+                ret = xlator_set_option (xl, "mode", "server");
                 if (ret)
                         goto out;
         }
@@ -1955,7 +1994,7 @@ glusterd_get_volopt_content (dict_t * ctx, gf_boolean_t xml_out)
         int                      ret = -1;
         char                    *def_val = NULL;
         char                    *descr = NULL;
-        char                     output_string[25600] = {0, };
+        char                     output_string[51200] = {0, };
         char                    *output = NULL;
         char                     tmp_str[2048] = {0, };
 #if (HAVE_LIB_XML)
@@ -2112,7 +2151,7 @@ volgen_graph_build_clients (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
         list_for_each_entry (brick, &volinfo->bricks, brick_list) {
                 ret = -1;
                 xl = volgen_graph_add_nolink (graph, "protocol/client",
-                                              "%s-client-%d", volname, i);
+                                              "%s", brick->brick_id);
                 if (!xl)
                         goto out;
                 ret = xlator_set_option (xl, "remote-host", brick->hostname);
@@ -2318,13 +2357,15 @@ out:
 
 static int
 volgen_graph_build_dht_cluster (volgen_graph_t *graph,
-                                glusterd_volinfo_t *volinfo, size_t child_count)
+                                glusterd_volinfo_t *volinfo, size_t child_count,
+                                gf_boolean_t is_quotad)
 {
         int32_t                 clusters                 = 0;
         int                     ret                      = -1;
         char                    *decommissioned_children = NULL;
         xlator_t                *dht                     = NULL;
         char                    *voltype                 = "cluster/distribute";
+        char                    *name_fmt                = NULL;
 
         /* NUFA and Switch section */
         if (dict_get_str_boolean (volinfo->dict, "cluster.nufa", 0) &&
@@ -2343,9 +2384,14 @@ volgen_graph_build_dht_cluster (volgen_graph_t *graph,
         if (dict_get_str_boolean (volinfo->dict, "cluster.switch", 0))
                 voltype = "cluster/switch";
 
+        if (is_quotad)
+                name_fmt = "%s";
+        else
+                name_fmt = "%s-dht";
+
         clusters = volgen_graph_build_clusters (graph,  volinfo,
                                                 voltype,
-                                                "%s-dht",
+                                                name_fmt,
                                                 child_count,
                                                 child_count);
         if (clusters < 0)
@@ -2370,7 +2416,8 @@ out:
 
 static int
 volume_volgen_graph_build_clusters (volgen_graph_t *graph,
-                                    glusterd_volinfo_t *volinfo)
+                                    glusterd_volinfo_t *volinfo,
+                                    gf_boolean_t is_quotad)
 {
         char                    *replicate_args[]   = {"cluster/replicate",
                                                        "%s-replicate-%d"};
@@ -2443,8 +2490,8 @@ build_distribute:
         }
 
         ret = volgen_graph_build_dht_cluster (graph, volinfo,
-                                              dist_count);
-        if (ret == -1)
+                                              dist_count, is_quotad);
+        if (ret)
                 goto out;
 
         ret = 0;
@@ -2479,30 +2526,38 @@ static int
 client_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
                       dict_t *set_dict, void *param)
 {
-        int       ret      = 0;
-        xlator_t *xl       = NULL;
-        char     *volname  = NULL;
+        int              ret     = 0;
+        xlator_t        *xl      = NULL;
+        char            *volname = NULL;
+        glusterd_conf_t *conf    = THIS->private;
+        char            *tmp     = NULL;
+        gf_boolean_t     var     = _gf_false;
+        gf_boolean_t     ob      = _gf_false;
+
+        GF_ASSERT (conf);
 
         volname = volinfo->volname;
         ret = volgen_graph_build_clients (graph, volinfo, set_dict, param);
         if (ret)
                 goto out;
 
-        ret = volume_volgen_graph_build_clusters (graph, volinfo);
+        ret = volume_volgen_graph_build_clusters (graph, volinfo, _gf_false);
         if (ret == -1)
                 goto out;
 
         /* Check for compress volume option, and add it to the graph on client side */
-        if (dict_get_str_boolean (set_dict, "features.compress", 0)) {
+        ret = dict_get_str_boolean (set_dict, "network.compression", 0);
+        if (ret == -1)
+                goto out;
+        if (ret) {
                 xl = volgen_graph_add (graph, "features/cdc", volname);
                 if (!xl) {
                         ret = -1;
                         goto out;
                 }
-                ret = dict_set_str (set_dict, "compress.mode", "client");
+                ret = xlator_set_option (xl, "mode", "client");
                 if (ret)
                         goto out;
-
         }
 
         ret = glusterd_volinfo_get_boolean (volinfo, "features.encryption");
@@ -2517,15 +2572,18 @@ client_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
                 }
         }
 
-        ret = glusterd_volinfo_get_boolean (volinfo, VKEY_FEATURES_QUOTA);
-        if (ret == -1)
-                goto out;
-        if (ret) {
-                xl = volgen_graph_add (graph, "features/quota", volname);
-
-                if (!xl) {
-                        ret = -1;
+        if (conf->op_version == GD_OP_VERSION_MIN) {
+                ret = glusterd_volinfo_get_boolean (volinfo,
+                                                    VKEY_FEATURES_QUOTA);
+                if (ret == -1)
                         goto out;
+                if (ret) {
+                        xl = volgen_graph_add (graph, "features/quota",
+                                              volname);
+                        if (!xl) {
+                                ret = -1;
+                                goto out;
+                        }
                 }
         }
 
@@ -2542,7 +2600,93 @@ client_graph_builder (volgen_graph_t *graph, glusterd_volinfo_t *volinfo,
                 }
         }
 
-	ret = client_graph_set_perf_options(graph, volinfo, set_dict);
+        /* Do not allow changing read-after-open option if root-squash is
+           enabled.
+        */
+        ret = dict_get_str (set_dict, "performance.read-after-open", &tmp);
+        if (!ret) {
+                ret = dict_get_str (volinfo->dict, "server.root-squash", &tmp);
+                if (!ret) {
+                        ob = _gf_false;
+                        ret = gf_string2boolean (tmp, &ob);
+                        if (!ret && ob) {
+                                gf_log (THIS->name, GF_LOG_WARNING,
+                                        "root-squash is enabled. Please turn it"
+                                        " off to change read-after-open "
+                                        "option");
+                                ret = -1;
+                                goto out;
+                        }
+                }
+        }
+
+        /* open behind causes problems when root-squash is enabled
+           (by allowing reads to happen even though the squashed user
+           does not have permissions to do so) as it fakes open to be
+           successful and later sends reads on anonymous fds. So when
+           root-squash is enabled, open-behind's option to read after
+           open is done is also enabled.
+        */
+        ret = dict_get_str (set_dict, "server.root-squash", &tmp);
+        if (!ret) {
+                ret = gf_string2boolean (tmp, &var);
+                if (ret)
+                        goto out;
+
+                if (var) {
+                        ret = dict_get_str (volinfo->dict,
+                                            "performance.read-after-open",
+                                            &tmp);
+                        if (!ret) {
+                                ret = gf_string2boolean (tmp, &ob);
+                                /* go ahead with turning read-after-open on
+                                   even if string2boolean conversion fails,
+                                   OR if read-after-open option is turned off
+                                */
+                                if (ret || !ob)
+                                        ret = dict_set_str (set_dict,
+                                                 "performance.read-after-open",
+                                                            "yes");
+                        } else {
+                                ret = dict_set_str (set_dict,
+                                                    "performance.read-after-open",
+                                                    "yes");
+                        }
+                } else {
+                        /* When root-squash has to be turned off, open-behind's
+                           read-after-open option should be reset to what was
+                           there before root-squash was turned on. If the option
+                           cannot be found in volinfo's dict, it means that
+                           option was not set before turning on root-squash.
+                        */
+                        ob = _gf_false;
+                        ret = dict_get_str (volinfo->dict,
+                                            "performance.read-after-open",
+                                            &tmp);
+                        if (!ret) {
+                                ret = gf_string2boolean (tmp, &ob);
+
+                                if (!ret && ob) {
+                                        ret = dict_set_str (set_dict,
+                                                 "performance.read-after-open",
+                                                            "yes");
+                                }
+                        }
+                        /* consider operation is failure only if read-after-open
+                           option is enabled and could not set into set_dict
+                        */
+                        if (!ob)
+                                ret = 0;
+                }
+                if (ret) {
+                        gf_log (THIS->name, GF_LOG_WARNING, "setting "
+                                "open behind option as part of root "
+                                "squash failed");
+                        goto out;
+                }
+        }
+
+        ret = client_graph_set_perf_options(graph, volinfo, set_dict);
         if (ret)
                 goto out;
 
@@ -3083,9 +3227,6 @@ build_nfs_graph (volgen_graph_t *graph, dict_t *mod_dict)
         return ret;
 }
 
-
-
-
 /****************************
  *
  * Volume generation interface
@@ -3146,7 +3287,7 @@ out:
         if (brickinfo)
                 glusterd_brickinfo_delete (brickinfo);
         if (volinfo)
-                glusterd_volinfo_delete (volinfo);
+                glusterd_volinfo_unref (volinfo);
         return ret;
 }
 
@@ -3172,7 +3313,100 @@ glusterd_generate_brick_volfile (glusterd_volinfo_t *volinfo,
         return ret;
 }
 
+static int
+build_quotad_graph (volgen_graph_t *graph, dict_t *mod_dict)
+{
+        volgen_graph_t     cgraph         = {0};
+        glusterd_volinfo_t *voliter       = NULL;
+        xlator_t           *this          = NULL;
+        glusterd_conf_t    *priv          = NULL;
+        dict_t             *set_dict      = NULL;
+        int                ret            = 0;
+        xlator_t           *quotad_xl     = NULL;
+	char		   *skey	  = NULL;
 
+        this = THIS;
+        priv = this->private;
+
+        set_dict = dict_new ();
+        if (!set_dict) {
+                ret = -ENOMEM;
+                goto out;
+        }
+
+        quotad_xl = volgen_graph_add_as (graph, "features/quotad", "quotad");
+        if (!quotad_xl) {
+                ret = -1;
+                goto out;
+        }
+
+        list_for_each_entry (voliter, &priv->volumes, vol_list) {
+                if (voliter->status != GLUSTERD_STATUS_STARTED)
+                        continue;
+
+                if (1 != glusterd_is_volume_quota_enabled (voliter))
+                        continue;
+
+                ret = dict_set_uint32 (set_dict, "trusted-client",
+                                       GF_CLIENT_TRUSTED);
+                if (ret)
+                        goto out;
+
+                dict_copy (voliter->dict, set_dict);
+                if (mod_dict)
+                        dict_copy (mod_dict, set_dict);
+
+                ret = gf_asprintf(&skey, "%s.volume-id", voliter->volname);
+                if (ret == -1) {
+                        gf_log("", GF_LOG_ERROR, "Out of memory");
+                        goto out;
+                }
+                ret = xlator_set_option(quotad_xl, skey, voliter->volname);
+                GF_FREE(skey);
+                if (ret)
+                        goto out;
+
+                memset (&cgraph, 0, sizeof (cgraph));
+                ret = volgen_graph_build_clients (&cgraph, voliter, set_dict,
+                                                  NULL);
+                if (ret)
+                        goto out;
+
+                ret = volume_volgen_graph_build_clusters (&cgraph, voliter,
+                                                          _gf_true);
+                if (ret) {
+                        ret = -1;
+                        goto out;
+                }
+
+                if (mod_dict) {
+                        dict_copy (mod_dict, set_dict);
+                        ret = volgen_graph_set_options_generic (&cgraph, set_dict,
+                                                        voliter,
+                                                        basic_option_handler);
+                } else {
+                        ret = volgen_graph_set_options_generic (&cgraph,
+                                                                voliter->dict,
+                                                                voliter,
+                                                                basic_option_handler);
+                }
+                if (ret)
+                        goto out;
+
+                ret = volgen_graph_merge_sub (graph, &cgraph, 1);
+                if (ret)
+                        goto out;
+
+                ret = dict_reset (set_dict);
+                if (ret)
+                        goto out;
+        }
+
+out:
+        if (set_dict)
+                dict_unref (set_dict);
+        return ret;
+}
 
 static void
 get_vol_tstamp_file (char *filename, glusterd_volinfo_t *volinfo)
@@ -3440,6 +3674,57 @@ out:
 }
 
 int
+glusterd_check_nfs_volfile_identical (gf_boolean_t *identical)
+{
+        char            nfsvol[PATH_MAX]        = {0,};
+        char            tmpnfsvol[PATH_MAX]     = {0,};
+        glusterd_conf_t *conf                   = NULL;
+        xlator_t        *this                   = NULL;
+        int             ret                     = -1;
+        int             need_unlink             = 0;
+        int             tmp_fd                  = -1;
+
+        this = THIS;
+
+        GF_ASSERT (this);
+        GF_ASSERT (identical);
+        conf = this->private;
+
+        glusterd_get_nodesvc_volfile ("nfs", conf->workdir,
+                                      nfsvol, sizeof (nfsvol));
+
+        snprintf (tmpnfsvol, sizeof (tmpnfsvol), "/tmp/gnfs-XXXXXX");
+
+        tmp_fd = mkstemp (tmpnfsvol);
+        if (tmp_fd < 0) {
+                gf_log ("", GF_LOG_WARNING, "Unable to create temp file %s: "
+                                "(%s)", tmpnfsvol, strerror (errno));
+                goto out;
+        }
+
+        need_unlink = 1;
+
+        ret = glusterd_create_global_volfile (build_nfs_graph,
+                                              tmpnfsvol, NULL);
+        if (ret)
+                goto out;
+
+        ret = glusterd_check_files_identical (nfsvol, tmpnfsvol,
+                                              identical);
+        if (ret)
+                goto out;
+
+out:
+        if (need_unlink)
+                unlink (tmpnfsvol);
+
+        if (tmp_fd >= 0)
+                close (tmp_fd);
+
+        return ret;
+}
+
+int
 glusterd_check_nfs_topology_identical (gf_boolean_t *identical)
 {
         char            nfsvol[PATH_MAX]        = {0,};
@@ -3488,56 +3773,17 @@ out:
 }
 
 int
-glusterd_check_nfs_volfile_identical (gf_boolean_t *identical)
+glusterd_create_quotad_volfile ()
 {
-        char            nfsvol[PATH_MAX]        = {0,};
-        char            tmpnfsvol[PATH_MAX]     = {0,};
-        glusterd_conf_t *conf                   = NULL;
-        xlator_t        *this                   = NULL;
-        int             ret                     = -1;
-        int             need_unlink             = 0;
-        int             tmp_fd                  = -1;
+        char             filepath[PATH_MAX] = {0,};
+        glusterd_conf_t *conf               = THIS->private;
 
-        this = THIS;
-
-        GF_ASSERT (this);
-        GF_ASSERT (identical);
-
-        conf = this->private;
-
-        glusterd_get_nodesvc_volfile ("nfs", conf->workdir,
-                                      nfsvol, sizeof (nfsvol));
-
-        snprintf (tmpnfsvol, sizeof (tmpnfsvol), "/tmp/gnfs-XXXXXX");
-
-        tmp_fd = mkstemp (tmpnfsvol);
-        if (tmp_fd < 0) {
-                gf_log ("", GF_LOG_WARNING, "Unable to create temp file %s: "
-                                "(%s)", tmpnfsvol, strerror (errno));
-                goto out;
-        }
-
-        need_unlink = 1;
-
-        ret = glusterd_create_global_volfile (build_nfs_graph,
-                                              tmpnfsvol, NULL);
-        if (ret)
-                goto out;
-
-        ret = glusterd_check_files_identical (nfsvol, tmpnfsvol,
-                                              identical);
-        if (ret)
-                goto out;
-
-out:
-        if (need_unlink)
-                unlink (tmpnfsvol);
-
-        if (tmp_fd >= 0)
-                close (tmp_fd);
-
-        return ret;
+        glusterd_get_nodesvc_volfile ("quotad", conf->workdir,
+                                            filepath, sizeof (filepath));
+        return glusterd_create_global_volfile (build_quotad_graph,
+                                               filepath, NULL);
 }
+
 
 int
 glusterd_delete_volfile (glusterd_volinfo_t *volinfo,

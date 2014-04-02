@@ -37,9 +37,18 @@
 #include "syscall.h"
 #include "glusterfs3.h"
 #include "portmap-xdr.h"
+#include "byte-order.h"
 
+#include "cli-quotad-client.h"
 #include "run.h"
 
+enum gf_task_types {
+        GF_TASK_TYPE_REBALANCE,
+        GF_TASK_TYPE_REMOVE_BRICK
+};
+
+extern struct rpc_clnt *global_quotad_rpc;
+extern rpc_clnt_prog_t cli_quotad_clnt;
 extern rpc_clnt_prog_t *cli_rpc_prog;
 extern int              cli_op_ret;
 extern int              connected;
@@ -67,6 +76,7 @@ char *cli_vol_task_status_str[] = {"not started",
                                    "fix-layout stopped",
                                    "fix-layout completed",
                                    "fix-layout failed",
+                                   "unknown"
 };
 
 int32_t
@@ -1220,32 +1230,147 @@ out:
 }
 
 int
+gf_cli_print_rebalance_status (dict_t *dict, enum gf_task_types task_type)
+{
+        int                ret          = -1;
+        int                count        = 0;
+        int                i            = 1;
+        char               key[256]     = {0,};
+        gf_defrag_status_t status_rcd   = GF_DEFRAG_STATUS_NOT_STARTED;
+        uint64_t           files        = 0;
+        uint64_t           size         = 0;
+        uint64_t           lookup       = 0;
+        char               *node_name   = NULL;
+        uint64_t           failures     = 0;
+        uint64_t           skipped      = 0;
+        double             elapsed      = 0;
+        char               *status_str  = NULL;
+        char               *size_str    = NULL;
+
+        ret = dict_get_int32 (dict, "count", &count);
+        if (ret) {
+                gf_log ("cli", GF_LOG_ERROR, "count not set");
+                goto out;
+        }
+
+
+        cli_out ("%40s %16s %13s %13s %13s %13s %20s %18s", "Node",
+                 "Rebalanced-files", "size", "scanned", "failures", "skipped",
+                 "status", "run time in secs");
+        cli_out ("%40s %16s %13s %13s %13s %13s %20s %18s", "---------",
+                 "-----------", "-----------", "-----------", "-----------",
+                 "-----------", "------------", "--------------");
+        for (i = 1; i <= count; i++) {
+                /* Reset the variables to prevent carryover of values */
+                node_name = NULL;
+                files = 0;
+                size = 0;
+                lookup = 0;
+                skipped = 0;
+                status_str = NULL;
+                elapsed = 0;
+
+                /* Check if status is NOT_STARTED, and continue early */
+                memset (key, 0, 256);
+                snprintf (key, 256, "status-%d", i);
+                ret = dict_get_int32 (dict, key, (int32_t *)&status_rcd);
+                if (ret) {
+                        gf_log ("cli", GF_LOG_TRACE, "failed to get status");
+                        goto out;
+                }
+                if (GF_DEFRAG_STATUS_NOT_STARTED == status_rcd)
+                        continue;
+
+
+                snprintf (key, 256, "node-name-%d", i);
+                ret = dict_get_str (dict, key, &node_name);
+                if (ret)
+                        gf_log ("cli", GF_LOG_TRACE, "failed to get node-name");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "files-%d", i);
+                ret = dict_get_uint64 (dict, key, &files);
+                if (ret)
+                        gf_log ("cli", GF_LOG_TRACE,
+                                "failed to get file count");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "size-%d", i);
+                ret = dict_get_uint64 (dict, key, &size);
+                if (ret)
+                        gf_log ("cli", GF_LOG_TRACE,
+                                "failed to get size of xfer");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "lookups-%d", i);
+                ret = dict_get_uint64 (dict, key, &lookup);
+                if (ret)
+                        gf_log ("cli", GF_LOG_TRACE,
+                                "failed to get lookedup file count");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "failures-%d", i);
+                ret = dict_get_uint64 (dict, key, &failures);
+                if (ret)
+                        gf_log ("cli", GF_LOG_TRACE,
+                                "failed to get failures count");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "skipped-%d", i);
+                ret = dict_get_uint64 (dict, key, &skipped);
+                if (ret)
+                        gf_log ("cli", GF_LOG_TRACE,
+                                "failed to get skipped count");
+
+                /* For remove-brick include skipped count into failure count*/
+                if (task_type != GF_TASK_TYPE_REBALANCE) {
+                        failures += skipped;
+                        skipped = 0;
+                }
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "run-time-%d", i);
+                ret = dict_get_double (dict, key, &elapsed);
+                if (ret)
+                        gf_log ("cli", GF_LOG_TRACE, "failed to get run-time");
+
+                /* Check for array bound */
+                if (status_rcd >= GF_DEFRAG_STATUS_MAX)
+                        status_rcd = GF_DEFRAG_STATUS_MAX;
+
+                status_str = cli_vol_task_status_str[status_rcd];
+                size_str = gf_uint64_2human_readable(size);
+                if (size_str) {
+                        cli_out ("%40s %16"PRIu64 " %13s" " %13"PRIu64 " %13"
+                                 PRIu64" %13"PRIu64 " %20s %18.2f", node_name,
+                                 files, size_str, lookup, failures, skipped,
+                                 status_str, elapsed);
+                } else {
+                        cli_out ("%40s %16"PRIu64 " %13"PRIu64 " %13"PRIu64
+                                 " %13"PRIu64" %13"PRIu64 " %20s %18.2f",
+                                 node_name, files, size, lookup, failures,
+                                 skipped, status_str, elapsed);
+                }
+                GF_FREE(size_str);
+        }
+out:
+        return ret;
+}
+
+int
 gf_cli_defrag_volume_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
-        gf_cli_rsp               rsp     = {0,};
-        cli_local_t             *local   = NULL;
-        char                    *volname = NULL;
-        call_frame_t            *frame   = NULL;
-        char                    *status  = "unknown";
-        int                      cmd     = 0;
-        int                      ret     = -1;
-        dict_t                  *dict    = NULL;
-        dict_t                  *local_dict = NULL;
-        uint64_t                 files   = 0;
-        uint64_t                 size    = 0;
-        uint64_t                 lookup  = 0;
-        char                     msg[1024] = {0,};
-        gf_defrag_status_t       status_rcd = GF_DEFRAG_STATUS_NOT_STARTED;
-        int32_t                  counter = 0;
-        char                    *node_name = NULL;
-        char                     key[256] = {0,};
-        int32_t                  i = 1;
-        uint64_t                 failures = 0;
-        uint64_t                 skipped = 0;
-        double                   elapsed = 0;
-        char                    *size_str = NULL;
-        char                    *task_id_str = NULL;
+        gf_cli_rsp   rsp          = {0,};
+        cli_local_t  *local       = NULL;
+        char         *volname     = NULL;
+        call_frame_t *frame       = NULL;
+        int          cmd          = 0;
+        int          ret          = -1;
+        dict_t       *dict        = NULL;
+        dict_t       *local_dict  = NULL;
+        char         msg[1024]    = {0,};
+        char         *task_id_str = NULL;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -1357,83 +1482,10 @@ gf_cli_defrag_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
         }
 
-        ret = dict_get_int32 (dict, "count", &counter);
-        if (ret) {
-                gf_log (frame->this->name, GF_LOG_ERROR, "count not set");
-                goto out;
-        }
-
-        cli_out ("%40s %16s %13s %13s %13s %13s %20s %18s", "Node",
-                 "Rebalanced-files", "size", "scanned", "failures", "skipped",
-                 "status", "run time in secs");
-        cli_out ("%40s %16s %13s %13s %13s %13s %20s %18s", "---------",
-                 "-----------", "-----------", "-----------", "-----------",
-                 "-----------", "------------", "--------------");
-        do {
-                snprintf (key, 256, "node-name-%d", i);
-                ret = dict_get_str (dict, key, &node_name);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "failed to get node-name");
-
-                memset (key, 0, 256);
-                snprintf (key, 256, "files-%d", i);
-                ret = dict_get_uint64 (dict, key, &files);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "failed to get file count");
-
-                memset (key, 0, 256);
-                snprintf (key, 256, "size-%d", i);
-                ret = dict_get_uint64 (dict, key, &size);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "failed to get size of xfer");
-
-                memset (key, 0, 256);
-                snprintf (key, 256, "lookups-%d", i);
-                ret = dict_get_uint64 (dict, key, &lookup);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "failed to get lookedup file count");
-
-                memset (key, 0, 256);
-                snprintf (key, 256, "status-%d", i);
-                ret = dict_get_int32 (dict, key, (int32_t *)&status_rcd);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "failed to get status");
-
-                memset (key, 0, 256);
-                snprintf (key, 256, "failures-%d", i);
-                ret = dict_get_uint64 (dict, key, &failures);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "failed to get failures count");
-
-                memset (key, 0, 256);
-                snprintf (key, 256, "skipped-%d", i);
-                ret = dict_get_uint64 (dict, key, &skipped);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "failed to get skipped count");
-                memset (key, 0, 256);
-                snprintf (key, 256, "run-time-%d", i);
-                ret = dict_get_double (dict, key, &elapsed);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "failed to get run-time");
-
-                status = cli_vol_task_status_str[status_rcd];
-                size_str = gf_uint64_2human_readable(size);
-                cli_out ("%40s %16"PRIu64 " %13s" " %13"PRIu64 " %13"PRIu64
-                         " %13"PRIu64 " %20s %18.2f", node_name, files,
-                         size_str, lookup, failures, skipped, status, elapsed);
-                GF_FREE(size_str);
-
-                i++;
-        } while (i <= counter);
-
+        ret = gf_cli_print_rebalance_status (dict, GF_TASK_TYPE_REBALANCE);
+        if (ret)
+                gf_log ("cli", GF_LOG_ERROR,
+                        "Failed to print rebalance status");
 
 done:
         if (global_state->mode & GLUSTER_MODE_XML)
@@ -1634,7 +1686,7 @@ gf_cli_set_volume_cbk (struct rpc_req *req, struct iovec *iov,
         ret = dict_unserialize (rsp.dict.dict_val, rsp.dict.dict_len, &dict);
 
         /* For brick processes graph change does not happen on the fly.
-         * The proces has to be restarted. So this is a check from the
+         * The process has to be restarted. So this is a check from the
          * volume set option such that if debug xlators such as trace/errorgen
          * are provided in the set command, warn the user.
          */
@@ -1739,22 +1791,9 @@ gf_cli3_remove_brick_status_cbk (struct rpc_req *req, struct iovec *iov,
                                  int count, void *myframe)
 {
         gf_cli_rsp               rsp     = {0,};
-        char                    *status  = "unknown";
         int                      ret     = -1;
-        uint64_t                 files   = 0;
-        uint64_t                 size    = 0;
-        uint64_t                 lookup  = 0;
         dict_t                  *dict    = NULL;
         char                     msg[1024] = {0,};
-        char                     key[256] = {0,};
-        int32_t                  i       = 1;
-        int32_t                  counter = 0;
-        char                    *node_name = 0;
-        gf_defrag_status_t       status_rcd = GF_DEFRAG_STATUS_NOT_STARTED;
-        uint64_t                 failures = 0;
-        uint64_t                 skipped = 0;
-        double                   elapsed = 0;
-        char                    *size_str = NULL;
         int32_t                  command = 0;
         gf1_op_commands          cmd = GF_OP_CMD_NONE;
         cli_local_t             *local = NULL;
@@ -1846,105 +1885,12 @@ xml_output:
                 goto out;
         }
 
-        ret = dict_get_int32 (dict, "count", &counter);
+        ret = gf_cli_print_rebalance_status (dict, GF_TASK_TYPE_REMOVE_BRICK);
         if (ret) {
-                gf_log (frame->this->name, GF_LOG_ERROR, "count not set");
+                gf_log ("cli", GF_LOG_ERROR, "Failed to print remove-brick "
+                        "rebalance status");
                 goto out;
         }
-
-
-        cli_out ("%40s %16s %13s %13s %13s %13s %14s %s", "Node",
-                 "Rebalanced-files", "size", "scanned", "failures", "skipped",
-                 "status", "run-time in secs");
-        cli_out ("%40s %16s %13s %13s %13s %13s %14s %16s", "---------",
-                 "-----------", "-----------", "-----------", "-----------",
-                  "-----------","------------", "--------------");
-
-        do {
-                snprintf (key, 256, "node-name-%d", i);
-                ret = dict_get_str (dict, key, &node_name);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "failed to get node-name");
-
-                memset (key, 0, 256);
-                snprintf (key, 256, "files-%d", i);
-                ret = dict_get_uint64 (dict, key, &files);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "failed to get file count");
-
-                memset (key, 0, 256);
-                snprintf (key, 256, "size-%d", i);
-                ret = dict_get_uint64 (dict, key, &size);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "failed to get size of xfer");
-
-                memset (key, 0, 256);
-                snprintf (key, 256, "lookups-%d", i);
-                ret = dict_get_uint64 (dict, key, &lookup);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "failed to get lookedup file count");
-
-                memset (key, 0, 256);
-                snprintf (key, 256, "status-%d", i);
-                ret = dict_get_int32 (dict, key, (int32_t *)&status_rcd);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "failed to get status");
-
-                snprintf (key, 256, "failures-%d", i);
-                ret = dict_get_uint64 (dict, key, &failures);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "Failed to get failure on files");
-
-                snprintf (key, 256, "failures-%d", i);
-                ret = dict_get_uint64 (dict, key, &skipped);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "Failed to get skipped files");
-                memset (key, 0, 256);
-                snprintf (key, 256, "run-time-%d", i);
-                ret = dict_get_double (dict, key, &elapsed);
-                if (ret)
-                        gf_log (frame->this->name, GF_LOG_TRACE,
-                                "Failed to get run-time");
-
-                switch (status_rcd) {
-                case GF_DEFRAG_STATUS_NOT_STARTED:
-                        status = "not started";
-                        break;
-                case GF_DEFRAG_STATUS_STARTED:
-                        status = "in progress";
-                        break;
-                case GF_DEFRAG_STATUS_STOPPED:
-                        status = "stopped";
-                        break;
-                case GF_DEFRAG_STATUS_COMPLETE:
-                        status = "completed";
-                        break;
-                case GF_DEFRAG_STATUS_FAILED:
-                        status = "failed";
-                        break;
-                default:
-                        break;
-                }
-
-                size_str = gf_uint64_2human_readable(size);
-                
-		if (strcmp (status, "not started")) {
-			cli_out ("%40s %16"PRIu64 " %13s" " %13"PRIu64 " %13"
-				PRIu64 " %13"PRIu64 " %14s %16.2f", node_name,
-                                files, size_str, lookup, failures, skipped,
-                                status, elapsed);
-		}
-                GF_FREE(size_str);
-
-                i++;
-        } while (i <= counter);
 
         if ((cmd == GF_OP_CMD_STOP) && (rsp.op_ret == 0)) {
                 cli_out ("'remove-brick' process may be in the middle of a "
@@ -2363,131 +2309,282 @@ out:
         return ret;
 }
 
-int32_t
-gf_cli_print_limit_list (char *volname, char *limit_list,
-                            char *op_errstr)
+static int
+print_quota_list_output (char *mountdir, char *default_sl, char *path)
 {
-        int64_t  size            = 0;
-        int64_t  limit_value     = 0;
-        int32_t  i, j;
-        int32_t  len = 0, ret    = -1;
-        char     *size_str       = NULL;
-        char     path [PATH_MAX] = {0, };
-        char     ret_str [1024]  = {0, };
-        char     value [1024]    = {0, };
-        char     mountdir []     = "/tmp/mntXXXXXX";
-        char     abspath [PATH_MAX] = {0, };
-        char     *colon_ptr      = NULL;
-        runner_t runner          = {0,};
+        int64_t used_space       = 0;
+        int64_t avail            = 0;
+        char    *used_str         = NULL;
+        char    *avail_str        = NULL;
+        int     ret               = -1;
+        char    *sl_final         = NULL;
+        char    *hl_str           = NULL;
+        double  sl_num           = 0;
+        gf_boolean_t sl          = _gf_false;
+        gf_boolean_t hl          = _gf_false;
+        char percent_str[20]     = {0};
 
-        GF_VALIDATE_OR_GOTO ("cli", volname, out);
-        GF_VALIDATE_OR_GOTO ("cli", limit_list, out);
+        struct quota_limit {
+                int64_t hl;
+                int64_t sl;
+        } __attribute__ ((__packed__)) existing_limits;
 
-        if (!connected)
-                goto out;
-
-        len = strlen (limit_list);
-        if (len == 0) {
-                cli_err ("%s", op_errstr?op_errstr:"quota limit not set ");
-                goto out;
-        }
-
-        if (mkdtemp (mountdir) == NULL) {
-                gf_log ("cli", GF_LOG_WARNING, "failed to create a temporary "
-                        "mount directory");
-                ret = -1;
-                goto out;
-        }
-
-        /* Mount a temporary client to fetch the disk usage
-         * of the directory on which the limit is set.
-         */
-        ret = runcmd (SBIN_DIR"/glusterfs", "-s",
-                      "localhost", "--volfile-id", volname, "-l",
-                      DEFAULT_LOG_FILE_DIRECTORY"/quota-list.log",
-                      mountdir, NULL);
-        if (ret) {
-                gf_log ("cli", GF_LOG_WARNING, "failed to mount glusterfs client");
-                ret = -1;
-                goto rm_dir;
-        }
-
-        len = strlen (limit_list);
-        if (len == 0) {
-                cli_err ("quota limit not set ");
-                goto unmount;
-        }
-
-        i = 0;
-
-        cli_out ("\tpath\t\t  limit_set\t     size");
-        cli_out ("-----------------------------------------------------------"
-                 "-----------------------");
-        while (i < len) {
-                j = 0;
-
-                while (limit_list [i] != ',' && limit_list [i] != '\0') {
-                        path [j++] = limit_list[i++];
-                }
-                path [j] = '\0';
-                //here path[] contains both path and limit value
-
-                colon_ptr = strrchr (path, ':');
-                *colon_ptr = '\0';
-                strcpy (value, ++colon_ptr);
-
-                snprintf (abspath, sizeof (abspath), "%s/%s", mountdir, path);
-
-                ret = sys_lgetxattr (abspath, "trusted.limit.list", (void *) ret_str, 4096);
-                if (ret < 0) {
-                        cli_out ("%-20s %10s", path, value);
-                } else {
-                        sscanf (ret_str, "%"PRId64",%"PRId64, &size,
-                                &limit_value);
-                        size_str = gf_uint64_2human_readable ((uint64_t) size);
-                        if (size_str == NULL) {
-                                cli_out ("%-20s %10s %20"PRId64, path,
-                                         value, size);
-                        } else {
-                                cli_out ("%-20s %10s %20s", path,
-                                         value, size_str);
-                                GF_FREE (size_str);
-                        }
-                }
-                i++;
-        }
-
-unmount:
-
-        runinit (&runner);
-        runner_add_args (&runner, "umount",
-#if GF_LINUX_HOST_OS
-                         "-l",
+        ret = sys_lgetxattr (mountdir, "trusted.glusterfs.quota.limit-set",
+                             (void *)&existing_limits,
+                             sizeof (existing_limits));
+        if (ret < 0) {
+                gf_log ("cli", GF_LOG_ERROR, "Failed to get the xattr "
+                        "trusted.glusterfs.quota.limit-set on %s. Reason : %s",
+                        mountdir, strerror (errno));
+                switch (errno) {
+#if defined(ENODATA)
+                case ENODATA:
 #endif
-                         mountdir, NULL);
-        ret = runner_run_reuse (&runner);
-        if (ret)
-                runner_log (&runner, "cli", GF_LOG_WARNING, "error executing");
-        runner_end (&runner);
+#if defined(ENOATTR) && (ENOATTR != ENODATA)
+                case ENOATTR:
+#endif
+                        cli_err ("%-40s %s", path, "Limit not set");
+                        break;
+                default:
+                        cli_err ("%-40s %s", path, strerror (errno));
+                        break;
+                }
 
-rm_dir:
-        rmdir (mountdir);
+                goto out;
+        }
+
+        existing_limits.hl = ntoh64 (existing_limits.hl);
+        existing_limits.sl = ntoh64 (existing_limits.sl);
+
+        hl_str = gf_uint64_2human_readable (existing_limits.hl);
+
+        if (existing_limits.sl < 0) {
+                ret = gf_string2percent (default_sl, &sl_num);
+                sl_num = (sl_num * existing_limits.hl) / 100;
+                sl_final = default_sl;
+        } else {
+                sl_num = (existing_limits.sl * existing_limits.hl) / 100;
+                snprintf (percent_str, sizeof (percent_str), "%"PRIu64"%%",
+                          existing_limits.sl);
+                sl_final = percent_str;
+        }
+
+        ret = sys_lgetxattr (mountdir, "trusted.glusterfs.quota.size",
+                             &used_space, sizeof (used_space));
+
+        if (ret < 0) {
+                cli_out ("%-40s %7s %9s %11s %7s %15s %20s",
+                         path, hl_str, sl_final,
+                         "N/A", "N/A", "N/A", "N/A");
+        } else {
+                used_space = ntoh64 (used_space);
+
+                used_str = gf_uint64_2human_readable (used_space);
+
+                if (existing_limits.hl > used_space) {
+                        avail = existing_limits.hl - used_space;
+                        hl = _gf_false;
+                        if (used_space > sl_num)
+                                sl = _gf_true;
+                        else
+                                sl = _gf_false;
+                } else {
+                        avail = 0;
+                        hl = sl = _gf_true;
+                }
+
+                avail_str = gf_uint64_2human_readable (avail);
+                if (used_str == NULL) {
+                        cli_out ("%-40s %7s %9s %11"PRIu64
+                                 "%9"PRIu64" %15s %18s", path, hl_str,
+                                  sl_final, used_space, avail, sl? "Yes" : "No",
+                                  hl? "Yes" : "No");
+                } else {
+                        cli_out ("%-40s %7s %9s %11s %7s %15s %20s", path, hl_str,
+                                 sl_final, used_str, avail_str, sl? "Yes" : "No",
+                                 hl? "Yes" : "No");
+                }
+        }
+
+out:
+        GF_FREE (used_str);
+        GF_FREE (avail_str);
+        GF_FREE (hl_str);
+        return ret;
+}
+
+int
+gf_cli_print_limit_list_from_dict (char *volname, dict_t *dict,
+                                   char *default_sl, int count, char *op_errstr)
+{
+        int  ret               = -1;
+        int  i                 = 0;
+        char key[1024]         = {0,};
+        char mountdir[PATH_MAX] = {0,};
+        char *path              = NULL;
+
+        if (!dict|| count <= 0)
+                goto out;
+
+        /* Need to check if any quota limits are set on the volume before trying
+         * to list them
+         */
+        if (!_limits_set_on_volume (volname)) {
+                ret = 0;
+                cli_out ("quota: No quota configured on volume %s", volname);
+                goto out;
+        }
+
+        /* Check if the mount is online before doing any listing */
+        if (!_quota_aux_mount_online (volname)) {
+                ret = -1;
+                goto out;
+        }
+
+        cli_out ("                  Path                   Hard-limit "
+                 "Soft-limit   Used  Available  Soft-limit exceeded?"
+                 "  Hard-limit exceeded?");
+        cli_out ("--------------------------------------------------------"
+                 "--------------------------------------------------------"
+                 "-----------");
+
+        while (count--) {
+                snprintf (key, sizeof (key), "path%d", i++);
+
+                ret = dict_get_str (dict, key, &path);
+                if (ret < 0) {
+                        gf_log ("cli", GF_LOG_DEBUG, "Path not present in limit"
+                                " list");
+                        continue;
+                }
+
+                ret = gf_canonicalize_path (path);
+                if (ret)
+                        goto out;
+                GLUSTERD_GET_QUOTA_AUX_MOUNT_PATH (mountdir, volname, path);
+                ret = print_quota_list_output (mountdir, default_sl, path);
+
+        }
 out:
         return ret;
 }
 
 int
-gf_cli_quota_cbk (struct rpc_req *req, struct iovec *iov,
-                     int count, void *myframe)
+print_quota_list_from_quotad (call_frame_t *frame, dict_t *rsp_dict)
 {
-        gf_cli_rsp         rsp        = {0,};
-        int                ret        = -1;
-        dict_t            *dict       = NULL;
-        char              *volname    = NULL;
-        char              *limit_list = NULL;
-        int32_t            type       = 0;
-        char               msg[1024]  = {0,};
-        call_frame_t      *frame      = NULL;
+        int64_t used_space    = 0;
+        int64_t avail         = 0;
+        int64_t *limit         = NULL;
+        char    *used_str      = NULL;
+        char    *avail_str     = NULL;
+        char    *hl_str        = NULL;
+        char    *sl_final      = NULL;
+        char    *path          = NULL;
+        char    *default_sl    = NULL;
+        int     ret            = -1;
+        cli_local_t *local     = NULL;
+        dict_t *gd_rsp_dict    = NULL;
+        double sl_num          = 0;
+        gf_boolean_t sl        = _gf_false;
+        gf_boolean_t hl        = _gf_false;
+        char  percent_str[20]  = {0,};
+
+        local = frame->local;
+        gd_rsp_dict = local->dict;
+
+        struct quota_limit {
+                int64_t hl;
+                int64_t sl;
+        } __attribute__ ((__packed__)) *existing_limits = NULL;
+
+        ret = dict_get_str (rsp_dict, GET_ANCESTRY_PATH_KEY, &path);
+        if (ret) {
+                gf_log ("cli", GF_LOG_WARNING, "path key is not present "
+                        "in dict");
+                goto out;
+        }
+
+        ret = dict_get_bin (rsp_dict, QUOTA_LIMIT_KEY, (void**)&limit);
+        if (ret) {
+                gf_log ("cli", GF_LOG_WARNING,
+                        "limit key not present in dict");
+                goto out;
+        }
+
+        ret = dict_get_str (gd_rsp_dict, "default-soft-limit", &default_sl);
+        if (ret) {
+                gf_log (frame->this->name, GF_LOG_ERROR, "failed to "
+                        "get default soft limit");
+                goto out;
+        }
+        existing_limits = (struct quota_limit *)limit;
+        existing_limits->hl = ntoh64 (existing_limits->hl);
+        existing_limits->sl = ntoh64 (existing_limits->sl);
+
+        hl_str = gf_uint64_2human_readable (existing_limits->hl);
+
+        if (existing_limits->sl < 0) {
+                ret = gf_string2percent (default_sl, &sl_num);
+                sl_num = (sl_num * existing_limits->hl) / 100;
+                sl_final = default_sl;
+        } else {
+                sl_num = (existing_limits->sl * existing_limits->hl) / 100;
+                snprintf (percent_str, sizeof (percent_str), "%"PRIu64"%%",
+                          existing_limits->sl);
+                sl_final =  percent_str;
+        }
+
+        ret = dict_get_bin (rsp_dict, QUOTA_SIZE_KEY, (void**)&limit);
+        if (ret < 0) {
+                gf_log ("cli", GF_LOG_WARNING,
+                        "size key not present in dict");
+                cli_out ("%-40s %7s %9s %11s %7s %15s %20s", path, hl_str,
+                         sl_final, "N/A", "N/A", "N/A", "N/A");
+        } else {
+                used_space = *limit;
+                used_space = ntoh64 (used_space);
+                used_str = gf_uint64_2human_readable (used_space);
+
+                if (existing_limits->hl > used_space) {
+                        avail = existing_limits->hl - used_space;
+                        hl = _gf_false;
+                        if (used_space > sl_num)
+                                sl = _gf_true;
+                        else
+                                sl = _gf_false;
+                } else {
+                        avail = 0;
+                        hl = sl = _gf_true;
+                }
+                avail_str = gf_uint64_2human_readable (avail);
+                if (used_str == NULL)
+                        cli_out ("%-40s %7s %9s %11"PRIu64
+                                 "%9"PRIu64" %15s %20s", path, hl_str,
+                                 sl_final, used_space, avail, sl? "Yes" : "No",
+                                 hl? "Yes" : "No");
+                else
+                        cli_out ("%-40s %7s %9s %11s %7s %15s %20s", path,
+                                 hl_str, sl_final, used_str, avail_str,
+                                 sl? "Yes" : "No", hl? "Yes" : "No");
+        }
+
+        ret = 0;
+out:
+        GF_FREE (used_str);
+        GF_FREE (avail_str);
+        GF_FREE (hl_str);
+        return ret;
+}
+
+int
+cli_quotad_getlimit_cbk (struct rpc_req *req, struct iovec *iov,
+                          int count, void *myframe)
+{
+    //TODO: we need to gather the path, hard-limit, soft-limit and used space
+        gf_cli_rsp         rsp         = {0,};
+        int                ret         = -1;
+        dict_t            *dict        = NULL;
+        call_frame_t      *frame       = NULL;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -2502,13 +2599,12 @@ gf_cli_quota_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
         }
 
-        if (rsp.op_ret &&
-            strcmp (rsp.op_errstr, "") == 0) {
-                snprintf (msg, sizeof (msg), "command unsuccessful %s",
-                          rsp.op_errstr);
-
-                if (global_state->mode & GLUSTER_MODE_XML)
-                        goto xml_output;
+        if (rsp.op_ret) {
+                ret = -1;
+                if (strcmp (rsp.op_errstr, ""))
+                        cli_err ("quota command failed : %s", rsp.op_errstr);
+                else
+                        cli_err ("quota command : failed");
                 goto out;
         }
 
@@ -2520,27 +2616,169 @@ gf_cli_quota_cbk (struct rpc_req *req, struct iovec *iov,
                                         rsp.dict.dict_len,
                                         &dict);
                 if (ret < 0) {
-                        gf_log ("glusterd", GF_LOG_ERROR,
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "failed to "
+                                "unserialize req-buffer to dictionary");
+                        goto out;
+                }
+                print_quota_list_from_quotad (frame, dict);
+        }
+
+out:
+        cli_cmd_broadcast_response (ret);
+        if (dict)
+                dict_unref (dict);
+
+        free (rsp.dict.dict_val);
+        return ret;
+}
+
+int
+cli_quotad_getlimit (call_frame_t *frame, xlator_t *this, void *data)
+{
+        gf_cli_req          req = {{0,}};
+        int                 ret = 0;
+        dict_t             *dict = NULL;
+
+        if (!frame || !this ||  !data) {
+                ret = -1;
+                goto out;
+        }
+
+        dict = data;
+        ret = dict_allocate_and_serialize (dict, &req.dict.dict_val,
+                                           &req.dict.dict_len);
+        if (ret < 0) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "failed to serialize the data");
+
+                goto out;
+        }
+
+        ret = cli_cmd_submit (global_quotad_rpc, &req, frame, &cli_quotad_clnt,
+                              GF_AGGREGATOR_GETLIMIT, NULL,
+                              this, cli_quotad_getlimit_cbk,
+                              (xdrproc_t) xdr_gf_cli_req);
+
+out:
+        gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
+        return ret;
+
+
+}
+
+void
+gf_cli_quota_list (char *volname, dict_t *dict, int count, char *op_errstr,
+                   char *default_sl)
+{
+        GF_VALIDATE_OR_GOTO ("cli", volname, out);
+
+        if (!connected)
+                goto out;
+
+        if (count > 0)
+                gf_cli_print_limit_list_from_dict (volname, dict, default_sl,
+                                                   count, op_errstr);
+out:
+        return;
+}
+
+int
+gf_cli_quota_cbk (struct rpc_req *req, struct iovec *iov,
+                     int count, void *myframe)
+{
+        gf_cli_rsp         rsp         = {0,};
+        int                ret         = -1;
+        dict_t            *dict        = NULL;
+        char              *volname     = NULL;
+        int32_t            type        = 0;
+        call_frame_t      *frame       = NULL;
+        char              *default_sl  = NULL;
+        char              *limit_list  = NULL;
+        cli_local_t       *local       = NULL;
+        dict_t            *aggr        = NULL;
+        char              *default_sl_dup  = NULL;
+        int32_t            entry_count      = 0;
+        if (-1 == req->rpc_status) {
+                goto out;
+        }
+
+        frame = myframe;
+        local = frame->local;
+        aggr  = local->dict;
+
+        ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gf_cli_rsp);
+        if (ret < 0) {
+                gf_log (frame->this->name, GF_LOG_ERROR,
+                        "Failed to decode xdr response");
+                goto out;
+        }
+
+        if (rsp.op_ret) {
+                ret = -1;
+                if (global_state->mode & GLUSTER_MODE_XML)
+                        goto xml_output;
+
+                if (strcmp (rsp.op_errstr, ""))
+                        cli_err ("quota command failed : %s", rsp.op_errstr);
+                else
+                        cli_err ("quota command : failed");
+
+                goto out;
+        }
+
+        if (rsp.dict.dict_len) {
+                /* Unserialize the dictionary */
+                dict  = dict_new ();
+
+                ret = dict_unserialize (rsp.dict.dict_val,
+                                        rsp.dict.dict_len,
+                                        &dict);
+                if (ret < 0) {
+                        gf_log ("cli", GF_LOG_ERROR,
                                 "failed to "
                                 "unserialize req-buffer to dictionary");
                         goto out;
                 }
         }
 
+        gf_log ("cli", GF_LOG_DEBUG, "Received resp to quota command");
+
         ret = dict_get_str (dict, "volname", &volname);
         if (ret)
-                gf_log (frame->this->name, GF_LOG_TRACE,
+                gf_log (frame->this->name, GF_LOG_ERROR,
                         "failed to get volname");
 
-        ret = dict_get_str (dict, "limit_list", &limit_list);
+        ret = dict_get_str (dict, "default-soft-limit", &default_sl);
         if (ret)
-                gf_log (frame->this->name, GF_LOG_TRACE,
-                        "failed to get limit_list");
+                gf_log (frame->this->name, GF_LOG_TRACE, "failed to get "
+                        "default soft limit");
+
+        // default-soft-limit is part of rsp_dict only iff we sent
+        // GLUSTER_CLI_QUOTA with type being GF_QUOTA_OPTION_TYPE_LIST
+        if (default_sl) {
+                default_sl_dup = gf_strdup (default_sl);
+                if (!default_sl_dup) {
+                        ret = -1;
+                        goto out;
+                }
+                ret = dict_set_dynstr (aggr, "default-soft-limit",
+                                       default_sl_dup);
+                if (ret) {
+                        gf_log (frame->this->name, GF_LOG_TRACE,
+                                "failed to set default soft limit");
+                        GF_FREE (default_sl_dup);
+                }
+        }
 
         ret = dict_get_int32 (dict, "type", &type);
         if (ret)
                 gf_log (frame->this->name, GF_LOG_TRACE,
                         "failed to get type");
+
+        ret = dict_get_int32 (dict, "count", &entry_count);
+        if (ret)
+                gf_log (frame->this->name, GF_LOG_TRACE, "failed to get count");
 
         if (type == GF_QUOTA_OPTION_TYPE_LIST) {
                 if (global_state->mode & GLUSTER_MODE_XML) {
@@ -2551,31 +2789,15 @@ gf_cli_quota_cbk (struct rpc_req *req, struct iovec *iov,
                                 gf_log ("cli", GF_LOG_ERROR,
                                         "Error outputting to xml");
                         goto out;
-
                 }
 
-                if (limit_list) {
-                        gf_cli_print_limit_list (volname,
-                                                    limit_list,
-                                                    rsp.op_errstr);
-                } else {
-                        gf_log ("cli", GF_LOG_INFO, "Received resp to quota "
-                                "command ");
-                        if (rsp.op_errstr)
-                                snprintf (msg, sizeof (msg), "%s",
-                                          rsp.op_errstr);
-                }
-        } else {
-                gf_log ("cli", GF_LOG_INFO, "Received resp to quota command ");
-                if (rsp.op_errstr)
-                        snprintf (msg, sizeof (msg), "%s", rsp.op_errstr);
-                else
-                        snprintf (msg, sizeof (msg), "successful");
+                gf_cli_quota_list (volname, dict, entry_count, rsp.op_errstr,
+                                   default_sl);
         }
 
 xml_output:
         if (global_state->mode & GLUSTER_MODE_XML) {
-                ret = cli_xml_output_str ("volQuota", msg, rsp.op_ret,
+                ret = cli_xml_output_str ("volQuota", NULL, rsp.op_ret,
                                           rsp.op_errno, rsp.op_errstr);
                 if (ret)
                         gf_log ("cli", GF_LOG_ERROR,
@@ -2583,12 +2805,8 @@ xml_output:
                 goto out;
         }
 
-        if (strlen (msg) > 0) {
-                if (rsp.op_ret)
-                        cli_err ("%s", msg);
-                else
-                        cli_out ("%s", msg);
-        }
+        if (!rsp.op_ret && type != GF_QUOTA_OPTION_TYPE_LIST)
+                cli_out ("volume quota : success");
 
         ret = rsp.op_ret;
 out:
@@ -2782,7 +3000,7 @@ gf_cli_list_friends (call_frame_t *frame, xlator_t *this,
         flags = (long)data;
         req.flags = flags;
         frame->local = (void*)flags;
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
+        ret = cli_cmd_submit (NULL, &req, frame, cli_rpc_prog,
                               GLUSTER_CLI_LIST_FRIENDS, NULL,
                               this, gf_cli_list_friends_cbk,
                               (xdrproc_t) xdr_gf1_cli_peer_list_req);
@@ -2896,7 +3114,7 @@ gf_cli_get_volume (call_frame_t *frame, xlator_t *this,
         ret = dict_allocate_and_serialize (dict, &req.dict.dict_val,
                                            &req.dict.dict_len);
 
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
+        ret = cli_cmd_submit (NULL, &req, frame, cli_rpc_prog,
                               GLUSTER_CLI_GET_VOLUME, NULL,
                               this, gf_cli_get_volume_cbk,
                               (xdrproc_t) xdr_gf_cli_req);
@@ -3115,7 +3333,7 @@ gf_cli_rename_volume (call_frame_t *frame, xlator_t *this,
         }
 
 
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
+        ret = cli_cmd_submit (NULL, &req, frame, cli_rpc_prog,
                               GLUSTER_CLI_RENAME_VOLUME, NULL,
                               this, gf_cli_rename_volume_cbk,
                               (xdrproc_t) xdr_gf_cli_req);
@@ -3467,7 +3685,7 @@ gf_cli_getspec (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        ret = cli_cmd_submit (&req, frame, &cli_handshake_prog,
+        ret = cli_cmd_submit (NULL, &req, frame, &cli_handshake_prog,
                               GF_HNDSK_GETSPEC, NULL,
                               this, gf_cli_getspec_cbk,
                               (xdrproc_t) xdr_gf_getspec_req);
@@ -3524,7 +3742,7 @@ gf_cli_pmap_b2p (call_frame_t *frame, xlator_t *this, void *data)
         if (ret)
                 goto out;
 
-        ret = cli_cmd_submit (&req, frame, &cli_pmap_prog,
+        ret = cli_cmd_submit (NULL, &req, frame, &cli_pmap_prog,
                               GF_PMAP_PORTBYBRICK, NULL,
                               this, gf_cli_pmap_b2p_cbk,
                               (xdrproc_t) xdr_pmap_port_by_brick_req);
@@ -3639,7 +3857,7 @@ gf_cli_fsm_log (call_frame_t *frame, xlator_t *this, void *data)
         if (!frame || !this || !data)
                 goto out;
         req.name = data;
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
+        ret = cli_cmd_submit (NULL, &req, frame, cli_rpc_prog,
                               GLUSTER_CLI_FSM_LOG, NULL,
                               this, gf_cli_fsm_log_cbk,
                               (xdrproc_t) xdr_gf1_cli_fsm_log_req);
@@ -3701,85 +3919,22 @@ gf_cli_gsync_config_command (dict_t *dict)
         return runner_run (&runner);
 }
 
-int
-gf_cli_fetch_gsyncd_status_values (char *status,
-                                   gf_cli_gsync_status_t *sts_val)
-{
-        int32_t   ret      = -1;
-        char     *tmp      = NULL;
-        char     *save_ptr = NULL;
-        char     *key      = NULL;
-        char     *value    = NULL;
-
-        if (!status || !sts_val) {
-                gf_log ("", GF_LOG_ERROR, "status or sts_val is null");
-                goto out;
-        }
-
-        tmp = strtok_r (status, "\n", &save_ptr);
-
-        if (tmp)
-                sts_val->health = gf_strdup (tmp);
-
-        while (tmp) {
-                key = strtok_r (tmp, "=", &value);
-
-                if ((key) && (!strcmp(key, "Uptime")))
-                        sts_val->uptime = gf_strdup (value);
-
-                if ((key) && (!strcmp(key, "FilesSyncd")))
-                        sts_val->files_syncd = gf_strdup (value);
-
-                if ((key) && (!strcmp(key, "FilesPending")))
-                        sts_val->files_pending = gf_strdup (value);
-
-                if ((key) && (!strcmp(key, "BytesPending"))) {
-                        value = gf_uint64_2human_readable(atol(value));
-                        sts_val->bytes_pending = gf_strdup (value);
-                }
-
-                if ((key) && (!strcmp(key, "DeletesPending")))
-                        sts_val->deletes_pending = gf_strdup (value);
-
-                tmp = strtok_r (NULL, ";", &save_ptr);
-        }
-
-        if (sts_val->health)
-                ret = 0;
-
-        if (!sts_val->uptime)
-                sts_val->uptime = gf_strdup ("N/A");
-
-        if (!sts_val->files_syncd)
-                sts_val->files_syncd = gf_strdup ("N/A");
-
-        if (!sts_val->files_pending)
-                sts_val->files_pending = gf_strdup ("N/A");
-
-        if (!sts_val->bytes_pending)
-                sts_val->bytes_pending = gf_strdup ("N/A");
-
-        if (!sts_val->deletes_pending)
-                sts_val->deletes_pending = gf_strdup ("N/A");
-
-out:
-        gf_log ("", GF_LOG_DEBUG, "Returning %d.", ret);
-        return ret;
-}
-
 char*
-get_struct_variable (int mem_num, gf_cli_gsync_status_t *sts_val)
+get_struct_variable (int mem_num, gf_gsync_status_t *sts_val)
 {
         switch (mem_num) {
-        case 0: return (sts_val->node);
-        case 1: return (sts_val->master);
-        case 2: return (sts_val->slave);
-        case 3: return (sts_val->health);
-        case 4: return (sts_val->uptime);
-        case 5: return (sts_val->files_syncd);
-        case 6: return (sts_val->files_pending);
-        case 7: return (sts_val->bytes_pending);
-        case 8: return (sts_val->deletes_pending);
+        case 0:  return (sts_val->node);
+        case 1:  return (sts_val->master);
+        case 2:  return (sts_val->brick);
+        case 3:  return (sts_val->slave_node);
+        case 4:  return (sts_val->worker_status);
+        case 5:  return (sts_val->checkpoint_status);
+        case 6:  return (sts_val->crawl_status);
+        case 7:  return (sts_val->files_syncd);
+        case 8:  return (sts_val->files_remaining);
+        case 9:  return (sts_val->bytes_remaining);
+        case 10: return (sts_val->purges_remaining);
+        case 11: return (sts_val->total_files_skipped);
         default:
                  goto out;
         }
@@ -3790,28 +3945,23 @@ out:
 
 int
 gf_cli_print_status (char **title_values,
-                     gf_cli_gsync_status_t **sts_vals,
+                     gf_gsync_status_t **sts_vals,
                      int *spacing, int gsync_count,
                      int number_of_fields, int is_detail)
 {
-        int     indents                  = 0;
         int     i                        = 0;
         int     j                        = 0;
         int     ret                      = 0;
+        int     status_fields            = 6; /* Indexed at 0 */
         int     total_spacing            = 0;
         char  **output_values            = NULL;
         char   *tmp                      = NULL;
         char   *hyphens                  = NULL;
-        char    heading[PATH_MAX]        = {0, };
-        char    indent_spaces[PATH_MAX]  = {0, };
 
         /* calculating spacing for hyphens */
         for (i = 0; i < number_of_fields; i++) {
-                /* Suppressing master and slave output for status detail */
-                if ((is_detail) && ((i == 1) || (i == 2))) {
-                        total_spacing++;
-                        continue;
-                } else if ((!is_detail) && (i > 4)) {
+                /* Suppressing detail output for status */
+                if ((!is_detail) && (i > status_fields)) {
                        /* Suppressing detailed output for
                         * status */
                         continue;
@@ -3845,64 +3995,29 @@ gf_cli_print_status (char **title_values,
                 goto out;
         }
 
-        ret = snprintf(heading, sizeof(heading), "MASTER: %s  SLAVE: %s",
-                       sts_vals[0]->master, sts_vals[0]->slave);
-        if (ret) {
-                if (ret < sizeof(heading))
-                        heading[ret] = '\0';
-                else
-                        heading[sizeof(heading) - 1] = '\0';
-                ret = 0;
-        } else {
-                ret = -1;
-                goto out;
-        }
-
-        if (is_detail) {
-                cli_out (" ");
-                if (strlen(heading) > total_spacing)
-                        cli_out ("%s", heading);
-                else {
-                        /* Printing the heading with centre justification */
-                        indents = (total_spacing - strlen(heading)) / 2;
-                        memset (indent_spaces, ' ', indents);
-                        indent_spaces[indents] = '\0';
-                        ret = snprintf (hyphens, total_spacing, "%s%s",
-                                        indent_spaces, heading);
-                        if (ret) {
-                                hyphens[ret] = '\0';
-                                cli_out ("%s", hyphens);
-                                ret = 0;
-                        } else {
-                                ret = -1;
-                                goto out;
-                        }
-                }
-                cli_out (" ");
-        }
+        cli_out (" ");
 
         /* setting the title "NODE", "MASTER", etc. from title_values[]
            and printing the same */
         for (j = 0; j < number_of_fields; j++) {
-                /* Suppressing master and slave output for status detail */
-                if ((is_detail) && ((j == 1) || (j == 2))) {
-                        output_values[j][0] = '\0';
-                        continue;
-                } else if ((!is_detail) && (j > 4)) {
+                if ((!is_detail) && (j > status_fields)) {
                        /* Suppressing detailed output for
                         * status */
                        output_values[j][0] = '\0';
-                        continue;
+                       continue;
                 }
                 memset (output_values[j], ' ', spacing[j]);
                 memcpy (output_values[j], title_values[j],
                         strlen(title_values[j]));
                 output_values[j][spacing[j]] = '\0';
         }
-        cli_out ("%s %s %s %s %s %s %s %s %s", output_values[0],
-                 output_values[1], output_values[2], output_values[3],
-                 output_values[4], output_values[5], output_values[6],
-                 output_values[7], output_values[8]);
+        cli_out ("%s %s %s %s %s %s %s %s %s %s %s %s",
+                 output_values[0], output_values[1],
+                 output_values[2], output_values[3],
+                 output_values[4], output_values[5],
+                 output_values[6], output_values[7],
+                 output_values[8], output_values[9],
+                 output_values[10], output_values[11]);
 
         /* setting and printing the hyphens */
         memset (hyphens, '-', total_spacing);
@@ -3911,12 +4026,7 @@ gf_cli_print_status (char **title_values,
 
         for (i = 0; i < gsync_count; i++) {
                 for (j = 0; j < number_of_fields; j++) {
-                        /* Suppressing master and slave output for
-                         * status detail */
-                        if ((is_detail) && ((j == 1) || (j == 2))) {
-                                output_values[j][0] = '\0';
-                                continue;
-                        }  else if ((!is_detail) && (j > 4)) {
+                        if ((!is_detail) && (j > status_fields)) {
                                 /* Suppressing detailed output for
                                  * status */
                                 output_values[j][0] = '\0';
@@ -3934,10 +4044,13 @@ gf_cli_print_status (char **title_values,
                         output_values[j][spacing[j]] = '\0';
                 }
 
-                cli_out ("%s %s %s %s %s %s %s %s %s", output_values[0],
-                         output_values[1], output_values[2], output_values[3],
-                         output_values[4], output_values[5], output_values[6],
-                         output_values[7], output_values[8]);
+                cli_out ("%s %s %s %s %s %s %s %s %s %s %s %s",
+                         output_values[0], output_values[1],
+                         output_values[2], output_values[3],
+                         output_values[4], output_values[5],
+                         output_values[6], output_values[7],
+                         output_values[8], output_values[9],
+                         output_values[10], output_values[11]);
         }
 
 out:
@@ -3957,47 +4070,23 @@ out:
 
 int
 gf_cli_read_status_data (dict_t *dict,
-                         gf_cli_gsync_status_t **sts_vals,
+                         gf_gsync_status_t **sts_vals,
                          int *spacing, int gsync_count,
                          int number_of_fields)
 {
-        int     ret            = 0;
-        int     i              = 0;
-        int     j              = 0;
-        char    mst[PATH_MAX]  = {0, };
-        char    slv[PATH_MAX]  = {0, };
-        char    sts[PATH_MAX]  = {0, };
-        char    nds[PATH_MAX]  = {0, };
-        char   *status         = NULL;
-        char   *tmp            = NULL;
+        char   *tmp                    = NULL;
+        char    sts_val_name[PATH_MAX] = "";
+        int     ret                    = 0;
+        int     i                      = 0;
+        int     j                      = 0;
 
         /* Storing per node status info in each object */
         for (i = 0; i < gsync_count; i++) {
-                snprintf (nds, sizeof(nds), "node%d", i + 1);
-                snprintf (mst, sizeof(mst), "master%d", i + 1);
-                snprintf (slv, sizeof(slv), "slave%d", i + 1);
-                snprintf (sts, sizeof(sts), "status%d", i + 1);
+                snprintf (sts_val_name, sizeof(sts_val_name), "status_value%d", i);
 
                 /* Fetching the values from dict, and calculating
                    the max length for each field */
-                ret = dict_get_str (dict, nds, &(sts_vals[i]->node));
-                if (ret)
-                        goto out;
-
-                ret = dict_get_str (dict, mst, &(sts_vals[i]->master));
-                if (ret)
-                        goto out;
-
-                ret = dict_get_str (dict, slv, &(sts_vals[i]->slave));
-                if (ret)
-                        goto out;
-
-                ret = dict_get_str (dict, sts, &status);
-                if (ret)
-                        goto out;
-
-                /* Fetching health and uptime from sts_val */
-                ret = gf_cli_fetch_gsyncd_status_values (status, sts_vals[i]);
+                ret = dict_get_bin (dict, sts_val_name, (void **)&(sts_vals[i]));
                 if (ret)
                         goto out;
 
@@ -4019,25 +4108,23 @@ out:
 }
 
 int
-gf_cli_gsync_status_output (dict_t *dict, int status_detail)
+gf_cli_gsync_status_output (dict_t *dict, gf_boolean_t is_detail)
 {
         int                     gsync_count    = 0;
         int                     i              = 0;
-        int                     j              = 0;
         int                     ret            = 0;
-        int                     spacing[10]    = {0};
-        int                     num_of_fields  = 9;
+        int                     spacing[13]    = {0};
+        int                     num_of_fields  = 12;
         char                    errmsg[1024]   = "";
         char                   *master         = NULL;
         char                   *slave          = NULL;
-        char                   *tmp            = NULL;
-        char                   *title_values[] = {"NODE", "MASTER", "SLAVE",
-                                                  "HEALTH", "UPTIME",
-                                                  "FILES SYNCD",
-                                                  "FILES PENDING",
-                                                  "BYTES PENDING",
-                                                  "DELETES PENDING"};
-        gf_cli_gsync_status_t **sts_vals = NULL;
+        char                   *title_values[] = {"MASTER NODE", "MASTER VOL",
+                                                  "MASTER BRICK", "SLAVE",
+                                                  "STATUS", "CHECKPOINT STATUS",
+                                                  "CRAWL STATUS", "FILES SYNCD",
+                                                  "FILES PENDING", "BYTES PENDING",
+                                                  "DELETES PENDING", "FILES SKIPPED"};
+        gf_gsync_status_t     **sts_vals       = NULL;
 
         /* Checks if any session is active or not */
         ret = dict_get_int32 (dict, "gsync-count", &gsync_count);
@@ -4071,14 +4158,14 @@ gf_cli_gsync_status_output (dict_t *dict, int status_detail)
         /* gsync_count = number of nodes reporting output.
            each sts_val object will store output of each
            node */
-        sts_vals = GF_CALLOC (gsync_count, sizeof (gf_cli_gsync_status_t *),
+        sts_vals = GF_CALLOC (gsync_count, sizeof (gf_gsync_status_t *),
                               gf_common_mt_char);
         if (!sts_vals) {
                 ret = -1;
                 goto out;
         }
         for (i = 0; i < gsync_count; i++) {
-                sts_vals[i] = GF_CALLOC (1, sizeof (gf_cli_gsync_status_t),
+                sts_vals[i] = GF_CALLOC (1, sizeof (gf_gsync_status_t),
                                          gf_common_mt_char);
                 if (!sts_vals[i]) {
                         ret = -1;
@@ -4094,23 +4181,15 @@ gf_cli_gsync_status_output (dict_t *dict, int status_detail)
         }
 
         ret = gf_cli_print_status (title_values, sts_vals, spacing, gsync_count,
-                                   num_of_fields, status_detail);
+                                   num_of_fields, is_detail);
         if (ret) {
                 gf_log ("", GF_LOG_ERROR, "Unable to print status output");
                 goto out;
         }
 
 out:
-        if (sts_vals) {
-                for (i = 0; i < gsync_count; i++) {
-                        for (j = 3; j < num_of_fields; j++) {
-                                tmp = get_struct_variable(j, sts_vals[i]);
-                                if (tmp)
-                                        GF_FREE (tmp);
-                        }
-                }
+        if (sts_vals)
                 GF_FREE (sts_vals);
-        }
 
         return ret;
 }
@@ -4122,7 +4201,7 @@ write_contents_to_common_pem_file (dict_t *dict, int output_count)
         char             common_pem_file[PATH_MAX] = "";
         char            *output                    = NULL;
         char             output_name[PATH_MAX]     = "";
-        int              bytes_writen              = 0;
+        int              bytes_written             = 0;
         int              fd                        = -1;
         int              ret                       = -1;
         int              i                         = -1;
@@ -4160,16 +4239,16 @@ write_contents_to_common_pem_file (dict_t *dict, int output_count)
                         cli_out ("Unable to fetch output.");
                 }
                 if (output) {
-                        bytes_writen = write (fd, output, strlen(output));
-                        if (bytes_writen != strlen(output)) {
+                        bytes_written = write (fd, output, strlen(output));
+                        if (bytes_written != strlen(output)) {
                                 gf_log ("", GF_LOG_ERROR, "Failed to write "
                                         "to %s", common_pem_file);
                                 ret = -1;
                                 goto out;
                         }
                         /* Adding the new line character */
-                        bytes_writen = write (fd, "\n", strlen("\n"));
-                        if (bytes_writen != strlen("\n")) {
+                        bytes_written = write (fd, "\n", strlen("\n"));
+                        if (bytes_written != strlen("\n")) {
                                 gf_log ("", GF_LOG_ERROR,
                                         "Failed to add new line char");
                                 ret = -1;
@@ -4429,7 +4508,10 @@ gf_cli_gsync_set_cbk (struct rpc_req *req, struct iovec *iov,
                         status_detail = dict_get_str_boolean (dict,
                                                               "status-detail",
                                                               _gf_false);
-                        ret = gf_cli_gsync_status_output (dict, status_detail);
+                        if (status_detail)
+                                ret = gf_cli_gsync_status_output (dict, status_detail);
+                        else
+                                ret = gf_cli_gsync_status_output (dict, status_detail);
                 break;
 
                 case GF_GSYNC_OPTION_TYPE_DELETE:
@@ -4738,6 +4820,8 @@ gf_cli_profile_volume_cbk (struct rpc_req *req, struct iovec *iov,
         char                              *volname = NULL;
         char                              *brick = NULL;
         char                              str[1024] = {0,};
+        int                               stats_cleared = 0;
+        gf1_cli_info_op                   info_op = GF_CLI_INFO_NONE;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -4817,10 +4901,14 @@ gf_cli_profile_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
         }
 
-        if (op != GF_CLI_STATS_INFO) {
+        if (GF_CLI_STATS_INFO != op) {
                 ret = 0;
                 goto out;
         }
+
+        ret = dict_get_int32 (dict, "info-op", (int32_t*)&info_op);
+        if (ret)
+                goto out;
 
         ret = dict_get_int32 (dict, "count", &brick_count);
         if (ret)
@@ -4841,6 +4929,7 @@ gf_cli_profile_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 }
 
                 ret = dict_get_str_boolean (dict, "nfs", _gf_false);
+
                 if (ret)
                         snprintf (str, sizeof (str), "NFS Server : %s", brick);
                 else
@@ -4849,15 +4938,25 @@ gf_cli_profile_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 memset (str, '-', strlen (str));
                 cli_out ("%s", str);
 
-                snprintf (key, sizeof (key), "%d-cumulative", i);
-                ret = dict_get_int32 (dict, key, &interval);
-                if (ret == 0) {
-                        cmd_profile_volume_brick_out (dict, i, interval);
-                }
-                snprintf (key, sizeof (key), "%d-interval", i);
-                ret = dict_get_int32 (dict, key, &interval);
-                if (ret == 0) {
-                        cmd_profile_volume_brick_out (dict, i, interval);
+                if (GF_CLI_INFO_CLEAR == info_op) {
+                        snprintf (key, sizeof (key), "%d-stats-cleared", i);
+                        ret = dict_get_int32 (dict, key, &stats_cleared);
+                        if (ret)
+                                goto out;
+                        cli_out (stats_cleared ? "Cleared stats." :
+                                                 "Failed to clear stats.");
+                } else {
+                        snprintf (key, sizeof (key), "%d-cumulative", i);
+                        ret = dict_get_int32 (dict, key, &interval);
+                        if (ret == 0)
+                                cmd_profile_volume_brick_out (dict, i,
+                                                              interval);
+
+                        snprintf (key, sizeof (key), "%d-interval", i);
+                        ret = dict_get_int32 (dict, key, &interval);
+                        if (ret == 0)
+                                cmd_profile_volume_brick_out (dict, i,
+                                                              interval);
                 }
                 i++;
         }
@@ -5207,7 +5306,7 @@ gf_cli_getwd (call_frame_t *frame, xlator_t *this, void *data)
         if (!frame || !this)
                 goto out;
 
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
+        ret = cli_cmd_submit (NULL, &req, frame, cli_rpc_prog,
                               GLUSTER_CLI_GETWD, NULL,
                               this, gf_cli_getwd_cbk,
                               (xdrproc_t) xdr_gf1_cli_getwd_req);
@@ -6411,7 +6510,8 @@ gf_cli_status_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
         }
 
-        if ((cmd & GF_CLI_STATUS_NFS) || (cmd & GF_CLI_STATUS_SHD))
+        if ((cmd & GF_CLI_STATUS_NFS) || (cmd & GF_CLI_STATUS_SHD) ||
+            (cmd & GF_CLI_STATUS_QUOTAD))
                 notbrick = _gf_true;
 
         if (global_state->mode & GLUSTER_MODE_XML) {
@@ -6521,12 +6621,13 @@ gf_cli_status_cbk (struct rpc_req *req, struct iovec *iov,
                 if (ret)
                         continue;
 
-                /* Brick/not-brick is handled seperately here as all
+                /* Brick/not-brick is handled separately here as all
                  * types of nodes are contained in the default output
                  */
                 memset (status.brick, 0, PATH_MAX + 255);
                 if (!strcmp (hostname, "NFS Server") ||
-                    !strcmp (hostname, "Self-heal Daemon"))
+                    !strcmp (hostname, "Self-heal Daemon") ||
+                    !strcmp (hostname, "Quota Daemon"))
                         snprintf (status.brick, PATH_MAX + 255, "%s on %s",
                                   hostname, path);
                 else
@@ -6776,7 +6877,7 @@ gf_cli_mount (call_frame_t *frame, xlator_t *this, void *data)
                 goto out;
         }
 
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
+        ret = cli_cmd_submit (NULL, &req, frame, cli_rpc_prog,
                               GLUSTER_CLI_MOUNT, NULL,
                               this, gf_cli_mount_cbk,
                               (xdrproc_t)xdr_gf1_cli_mount_req);
@@ -6839,7 +6940,7 @@ gf_cli_umount (call_frame_t *frame, xlator_t *this, void *data)
                 goto out;
         }
 
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
+        ret = cli_cmd_submit (NULL, &req, frame, cli_rpc_prog,
                               GLUSTER_CLI_UMOUNT, NULL,
                               this, gf_cli_umount_cbk,
                               (xdrproc_t)xdr_gf1_cli_umount_req);
@@ -7408,7 +7509,7 @@ gf_cli_list_volume (call_frame_t *frame, xlator_t *this, void *data)
         if (!frame || !this)
                 goto out;
 
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
+        ret = cli_cmd_submit (NULL, &req, frame, cli_rpc_prog,
                               GLUSTER_CLI_LIST_VOLUME, NULL,
                               this, gf_cli_list_volume_cbk,
                               (xdrproc_t)xdr_gf_cli_req);
@@ -7581,7 +7682,7 @@ cli_to_glusterd (gf_cli_req *req, call_frame_t *frame,
                 goto out;
         }
 
-        ret = cli_cmd_submit (req, frame, prog, procnum, iobref, this,
+        ret = cli_cmd_submit (NULL, req, frame, prog, procnum, iobref, this,
                               cbkfn, (xdrproc_t) xdrproc);
 
 out:
@@ -7637,4 +7738,18 @@ struct rpc_clnt_program cli_prog = {
         .progver   = GLUSTER_CLI_VERSION,
         .numproc   = GLUSTER_CLI_MAXVALUE,
         .proctable = gluster_cli_actors,
+};
+
+struct rpc_clnt_procedure cli_quotad_procs[GF_AGGREGATOR_MAXVALUE] = {
+        [GF_AGGREGATOR_NULL]     = {"NULL", NULL},
+        [GF_AGGREGATOR_LOOKUP]   = {"LOOKUP", NULL},
+        [GF_AGGREGATOR_GETLIMIT]   = {"GETLIMIT", cli_quotad_getlimit},
+};
+
+struct rpc_clnt_program cli_quotad_clnt = {
+        .progname  = "CLI Quotad client",
+        .prognum   = GLUSTER_AGGREGATOR_PROGRAM,
+        .progver   = GLUSTER_AGGREGATOR_VERSION,
+        .numproc   = GF_AGGREGATOR_MAXVALUE,
+        .proctable = cli_quotad_procs,
 };

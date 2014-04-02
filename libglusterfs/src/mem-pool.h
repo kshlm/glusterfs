@@ -20,6 +20,19 @@
 #include <string.h>
 #include <stdarg.h>
 
+/*
+ * Need this for unit tests since inline functions
+ * access memory allocation and need to use the
+ * unit test versions
+ */
+#ifdef UNIT_TESTING
+#include <cmockery/cmockery_override.h>
+#endif
+
+#define GF_MEM_HEADER_SIZE  (4 + sizeof (size_t) + sizeof (xlator_t *) + 4 + 8)
+#define GF_MEM_TRAILER_SIZE 8
+#define GF_MEM_HEADER_MAGIC  0xCAFEBABE
+#define GF_MEM_TRAILER_MAGIC 0xBAADF00D
 
 struct mem_acct {
         uint32_t            num_types;
@@ -62,7 +75,7 @@ void* __gf_default_malloc (size_t size)
 
         ptr = malloc (size);
         if (!ptr)
-                gf_log_nomem ("", GF_LOG_ALERT, size);
+                gf_msg_nomem ("", GF_LOG_ALERT, size);
 
         return ptr;
 }
@@ -74,7 +87,7 @@ void* __gf_default_calloc (int cnt, size_t size)
 
         ptr = calloc (cnt, size);
         if (!ptr)
-                gf_log_nomem ("", GF_LOG_ALERT, (cnt * size));
+                gf_msg_nomem ("", GF_LOG_ALERT, (cnt * size));
 
         return ptr;
 }
@@ -86,7 +99,7 @@ void* __gf_default_realloc (void *oldptr, size_t size)
 
         ptr = realloc (oldptr, size);
         if (!ptr)
-                gf_log_nomem ("", GF_LOG_ALERT, size);
+                gf_msg_nomem ("", GF_LOG_ALERT, size);
 
         return ptr;
 }

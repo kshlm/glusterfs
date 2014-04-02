@@ -45,6 +45,18 @@ enum argp_option_keys {
 #define GLUSTER_MODE_SCRIPT    (1 << 0)
 #define GLUSTER_MODE_ERR_FATAL (1 << 1)
 #define GLUSTER_MODE_XML       (1 << 2)
+#define GLUSTER_MODE_WIGNORE   (1 << 3)
+
+
+#define GLUSTERD_GET_QUOTA_AUX_MOUNT_PATH(abspath, volname, path)      \
+        snprintf (abspath, sizeof (abspath)-1,                          \
+                  DEFAULT_VAR_RUN_DIRECTORY"/%s%s", volname, path);
+
+#define GLUSTERFS_GET_AUX_MOUNT_PIDFILE(pidfile,volname) {               \
+                snprintf (pidfile, PATH_MAX-1,                             \
+                          DEFAULT_VAR_RUN_DIRECTORY"/%s.pid", volname);  \
+        }
+
 struct cli_state;
 struct cli_cmd_word;
 struct cli_cmd_tree;
@@ -136,18 +148,6 @@ struct cli_local {
 #endif
 };
 
-struct gf_cli_gsync_detailed_status_ {
-        char *node;
-        char *master;
-        char *slave;
-        char *health;
-        char *uptime;
-        char *files_syncd;
-        char *files_pending;
-        char *bytes_pending;
-        char *deletes_pending;
-};
-
 struct cli_volume_status {
         int            port;
         int            online;
@@ -165,8 +165,6 @@ struct cli_volume_status {
         char          *inode_size;
 #endif
 };
-
-typedef struct gf_cli_gsync_detailed_status_ gf_cli_gsync_status_t;
 
 typedef struct cli_volume_status cli_volume_status_t;
 
@@ -212,7 +210,7 @@ int _cli_err (const char *fmt, ...);
         } while (0)
 
 int
-cli_submit_request (void *req, call_frame_t *frame,
+cli_submit_request (struct rpc_clnt *rpc, void *req, call_frame_t *frame,
                     rpc_clnt_prog_t *prog,
                     int procnum, struct iobref *iobref,
                     xlator_t *this, fop_cbk_fn_t cbkfn, xdrproc_t xdrproc);

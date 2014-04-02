@@ -327,7 +327,7 @@ __socket_ssl_readv (rpc_transport_t *this, struct iovec *opvector, int opcount)
 	if (priv->use_ssl) {
 		ret = ssl_read_one (this, opvector->iov_base, opvector->iov_len);
 	} else {
-		ret = readv (sock, opvector, opcount);
+		ret = readv (sock, opvector, IOV_MIN(opcount));
 	}
 
 	return ret;
@@ -477,7 +477,7 @@ __socket_rwv (rpc_transport_t *this, struct iovec *vector, int count,
 					opvector->iov_base, opvector->iov_len);
 			}
 			else {
-				ret = writev (sock, opvector, opcount);
+				ret = writev (sock, opvector, IOV_MIN(opcount));
 			}
 
                         if (ret == 0 || (ret == -1 && errno == EAGAIN)) {
@@ -1098,7 +1098,8 @@ socket_event_poll_out (rpc_transport_t *this)
         }
         pthread_mutex_unlock (&priv->lock);
 
-        ret = rpc_transport_notify (this, RPC_TRANSPORT_MSG_SENT, NULL);
+        if (ret == 0)
+                ret = rpc_transport_notify (this, RPC_TRANSPORT_MSG_SENT, NULL);
 
 out:
         return ret;
@@ -2195,7 +2196,7 @@ unlock:
                 rpc_transport_notify (this, event, this);
         }
 out:
-        return 0;
+        return ret;
 }
 
 
@@ -2491,8 +2492,10 @@ socket_server_event_handler (int fd, int idx, void *data,
 
                         new_trans = GF_CALLOC (1, sizeof (*new_trans),
                                                gf_common_mt_rpc_trans_t);
-                        if (!new_trans)
+                        if (!new_trans) {
+                                close (new_sock);
                                 goto unlock;
+                        }
 
                         ret = pthread_mutex_init(&new_trans->lock, NULL);
                         if (ret == -1) {
@@ -2500,6 +2503,7 @@ socket_server_event_handler (int fd, int idx, void *data,
                                         "pthread_mutex_init() failed: %s",
                                         strerror (errno));
                                 close (new_sock);
+                                GF_FREE (new_trans);
                                 goto unlock;
                         }
 
@@ -2520,6 +2524,8 @@ socket_server_event_handler (int fd, int idx, void *data,
                                         "getsockname on %d failed (%s)",
                                         new_sock, strerror (errno));
                                 close (new_sock);
+                                GF_FREE (new_trans->name);
+                                GF_FREE (new_trans);
                                 goto unlock;
                         }
 
@@ -2527,6 +2533,8 @@ socket_server_event_handler (int fd, int idx, void *data,
                         ret = socket_init(new_trans);
                         if (ret != 0) {
                                 close(new_sock);
+                                GF_FREE (new_trans->name);
+                                GF_FREE (new_trans);
                                 goto unlock;
                         }
                         new_trans->ops = this->ops;
@@ -2549,6 +2557,8 @@ socket_server_event_handler (int fd, int idx, void *data,
 					gf_log(this->name,GF_LOG_ERROR,
 					       "server setup failed");
 					close(new_sock);
+                                        GF_FREE (new_trans->name);
+                                        GF_FREE (new_trans);
 					goto unlock;
 				}
 			}
@@ -2562,6 +2572,8 @@ socket_server_event_handler (int fd, int idx, void *data,
                                                 new_sock, strerror (errno));
 
                                         close (new_sock);
+                                        GF_FREE (new_trans->name);
+                                        GF_FREE (new_trans);
                                         goto unlock;
                                 }
                         }
@@ -2600,6 +2612,8 @@ socket_server_event_handler (int fd, int idx, void *data,
                         if (ret == -1) {
                                 gf_log (this->name, GF_LOG_WARNING,
                                         "failed to register the socket with event");
+                                close (new_sock);
+                                rpc_transport_unref (new_trans);
                                 goto unlock;
                         }
 
@@ -3341,6 +3355,34 @@ reconfigure (rpc_transport_t *this, dict_t *options)
 
         priv->windowsize = (int)windowsize;
 
+        if (dict_get (this->options, "non-blocking-io")) {
+                optstr = data_to_str (dict_get (this->options,
+                                                "non-blocking-io"));
+
+                if (gf_string2boolean (optstr, &tmp_bool) == -1) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "'non-blocking-io' takes only boolean options,"
+                                " not taking any action");
+                        tmp_bool = 1;
+                }
+
+                if (!tmp_bool) {
+                        priv->bio = 1;
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "disabling non-blocking IO");
+                }
+        }
+
+        if (!priv->bio) {
+                ret = __socket_nonblock (priv->sock);
+                if (ret == -1) {
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "NBIO on %d failed (%s)",
+                                priv->sock, strerror (errno));
+                        goto out;
+                }
+        }
+
         ret = 0;
 out:
         return ret;
@@ -3529,7 +3571,8 @@ socket_init (rpc_transport_t *this)
 	}
         priv->ssl_ca_list = gf_strdup(priv->ssl_ca_list);
 
-        gf_log(this->name,GF_LOG_INFO,"SSL support is %s",
+        gf_log(this->name, priv->ssl_enabled ? GF_LOG_INFO: GF_LOG_DEBUG,
+               "SSL support is %s",
                priv->ssl_enabled ? "ENABLED" : "NOT enabled");
         /*
          * This might get overridden temporarily in socket_connect (q.v.)
@@ -3544,7 +3587,8 @@ socket_init (rpc_transport_t *this)
 				"invalid value given for own-thread boolean");
 		}
 	}
-	gf_log(this->name,GF_LOG_INFO,"using %s polling thread",
+	gf_log(this->name, priv->own_thread ? GF_LOG_INFO: GF_LOG_DEBUG,
+               "using %s polling thread",
 	       priv->own_thread ? "private" : "system");
 
 	if (priv->use_ssl) {

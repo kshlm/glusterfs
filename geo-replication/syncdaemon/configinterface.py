@@ -5,6 +5,12 @@ except ImportError:
     import configparser as ConfigParser
 import re
 from string import Template
+import os
+import errno
+import sys
+from stat import ST_DEV, ST_INO, ST_MTIME
+import tempfile
+import shutil
 
 from syncdutils import escape, unescape, norm, update_file, GsyncdError
 
@@ -13,6 +19,56 @@ SECT_META = '__meta__'
 config_version = 2.0
 
 re_type = type(re.compile(''))
+
+
+
+# (SECTION, OPTION, OLD VALUE, NEW VALUE)
+CONFIGS = (
+    ("peersrx . .", "georep_session_working_dir", "", "/var/lib/glusterd/geo-replication/${mastervol}_${remotehost}_${slavevol}/"),
+    ("peersrx .", "gluster_params", "aux-gfid-mount xlator-option=\*-dht.assert-no-child-down=true", "aux-gfid-mount"),
+    ("peersrx . .", "ssh_command_tar", "", "ssh -oPasswordAuthentication=no -oStrictHostKeyChecking=no -i /var/lib/glusterd/geo-replication/tar_ssh.pem"),
+)
+
+def upgrade_config_file(path):
+    config_change = False
+    config = ConfigParser.RawConfigParser()
+    config.read(path)
+
+    for sec, opt, oldval, newval in CONFIGS:
+        try:
+            val = config.get(sec, opt)
+        except ConfigParser.NoOptionError:
+            # if new config opt not exists
+            config_change = True
+            config.set(sec, opt, newval)
+            continue
+        except ConfigParser.Error:
+            """
+            When gsyncd invoked at the time of create, config file
+            will not be their. Ignore any ConfigParser errors
+            """
+            continue
+
+        if val == newval:
+            # value is same as new val
+            continue
+
+        if val == oldval:
+            # config value needs update
+            config_change = True
+            config.set(sec, opt, newval)
+
+    if config_change:
+        tempConfigFile = tempfile.NamedTemporaryFile(mode="wb", delete=False)
+        with open(tempConfigFile.name, 'wb') as configFile:
+            config.write(configFile)
+
+        # If src and dst are two different file system, then os.rename
+        # fails, In this case if temp file created in /tmp and if /tmp is
+        # seperate fs then os.rename gives following error, so use shutil
+        # OSError: [Errno 18] Invalid cross-device link
+        # mail.python.org/pipermail/python-list/2005-February/342893.html
+        shutil.move(tempConfigFile.name, path)
 
 
 class MultiDict(object):
@@ -65,7 +121,38 @@ class GConffile(object):
         self.auxdicts = dd
         self.config = ConfigParser.RawConfigParser()
         self.config.read(path)
+        self.dev, self.ino, self.mtime = -1, -1, -1
         self._normconfig()
+
+    def _load(self):
+        try:
+            sres = os.stat(self.path)
+            self.dev = sres[ST_DEV]
+            self.ino = sres[ST_INO]
+            self.mtime = sres[ST_MTIME]
+        except (OSError, IOError):
+            if sys.exc_info()[1].errno == errno.ENOENT:
+                sres = None
+
+        self.config = ConfigParser.RawConfigParser()
+        self.config.read(self.path)
+        self._normconfig()
+
+    def get_realtime(self, opt):
+        try:
+            sres = os.stat(self.path)
+        except (OSError, IOError):
+            if sys.exc_info()[1].errno == errno.ENOENT:
+                sres = None
+            else:
+                raise
+
+        # compare file system stat with that of our stream file handle
+        if not sres or sres[ST_DEV] != self.dev or \
+           sres[ST_INO] != self.ino or self.mtime != sres[ST_MTIME]:
+            self._load()
+
+        return self.get(opt, printValue=False)
 
     def section(self, rx=False):
         """get the section name of the section representing .peers in .config"""
@@ -162,7 +249,7 @@ class GConffile(object):
         if self.config.has_section(self.section()):
             update_from_sect(self.section(), MultiDict(dct, *self.auxdicts))
 
-    def get(self, opt=None):
+    def get(self, opt=None, printValue=True):
         """print the matching key/value pairs from .config,
            or if @opt given, the value for @opt (according to the
            logic described in .update_to)
@@ -173,7 +260,10 @@ class GConffile(object):
             opt = norm(opt)
             v = d.get(opt)
             if v:
-                print(v)
+                if printValue:
+                    print(v)
+                else:
+                    return v
         else:
             for k, v in d.iteritems():
                 if k == '__name__':

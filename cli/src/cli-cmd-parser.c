@@ -485,8 +485,12 @@ cli_cmd_quota_parse (const char **words, int wordcount, dict_t **options)
         uint64_t         value   = 0;
         gf_quota_type    type    = GF_QUOTA_OPTION_TYPE_NONE;
         char           *opwords[] = { "enable", "disable", "limit-usage",
-                                      "remove", "list", "version", NULL };
+                                      "remove", "list", "alert-time",
+                                      "soft-timeout", "hard-timeout",
+                                      "default-soft-limit", NULL};
         char            *w       = NULL;
+        uint32_t         time    = 0;
+        double           percent = 0;
 
         GF_ASSERT (words);
         GF_ASSERT (options);
@@ -531,6 +535,7 @@ cli_cmd_quota_parse (const char **words, int wordcount, dict_t **options)
 
         w = str_getunamb (words[3], opwords);
         if (!w) {
+                cli_out ("Invalid quota option : %s", words[3]);
                 ret = - 1;
                 goto out;
         }
@@ -558,7 +563,8 @@ cli_cmd_quota_parse (const char **words, int wordcount, dict_t **options)
         }
 
         if (strcmp (w, "limit-usage") == 0) {
-                if (wordcount != 6) {
+
+                if (wordcount < 6 || wordcount > 7) {
                         ret = -1;
                         goto out;
                 }
@@ -567,8 +573,8 @@ cli_cmd_quota_parse (const char **words, int wordcount, dict_t **options)
 
                 if (words[4][0] != '/') {
                         cli_err ("Please enter absolute path");
-
-                        return -2;
+                        ret = -1;
+                        goto out;
                 }
                 ret = dict_set_str (dict, "path", (char *) words[4]);
                 if (ret)
@@ -576,19 +582,36 @@ cli_cmd_quota_parse (const char **words, int wordcount, dict_t **options)
 
                 if (!words[5]) {
                         cli_err ("Please enter the limit value to be set");
-
-                        return -2;
+                        ret = -1;
+                        goto out;
                 }
 
                 ret = gf_string2bytesize (words[5], &value);
                 if (ret != 0) {
-                        cli_err ("Please enter a correct value");
-                        return -1;
+                        if (errno == ERANGE)
+                                cli_err ("Value too large: %s", words[5]);
+                        else
+                                cli_err ("Please enter a correct value");
+                        goto out;
                 }
 
-                ret = dict_set_str (dict, "limit", (char *) words[5]);
+                ret  = dict_set_str (dict, "hard-limit", (char *) words[5]);
                 if (ret < 0)
                         goto out;
+
+                if (wordcount == 7) {
+
+                        ret = gf_string2percent (words[6], &percent);
+                        if (ret != 0) {
+                                cli_err ("Please enter a correct value");
+                                goto out;
+                        }
+
+                        ret = dict_set_str (dict, "soft-limit",
+                                            (char *) words[6]);
+                        if (ret < 0)
+                                goto out;
+                }
 
                 goto set_type;
         }
@@ -602,8 +625,8 @@ cli_cmd_quota_parse (const char **words, int wordcount, dict_t **options)
 
                 if (words[4][0] != '/') {
                         cli_err ("Please enter absolute path");
-
-                        return -2;
+                        ret = -1;
+                        goto out;
                 }
 
                 ret = dict_set_str (dict, "path", (char *) words[4]);
@@ -636,8 +659,75 @@ cli_cmd_quota_parse (const char **words, int wordcount, dict_t **options)
                 goto set_type;
         }
 
-        if (strcmp (w, "version") == 0) {
-                type = GF_QUOTA_OPTION_TYPE_VERSION;
+
+        if (strcmp (w, "alert-time") == 0) {
+                if (wordcount != 5) {
+                        ret = -1;
+                        goto out;
+                }
+                type = GF_QUOTA_OPTION_TYPE_ALERT_TIME;
+
+                ret = gf_string2time (words[4], &time);
+                if (ret) {
+                        cli_err ("Invalid argument %s. Please enter a valid "
+                                 "string", words[4]);
+                        goto out;
+                }
+
+                ret = dict_set_str (dict, "value", (char *)words[4]);
+                if (ret < 0)
+                        goto out;
+                goto set_type;
+        }
+        if (strcmp (w, "soft-timeout") == 0) {
+                if (wordcount != 5) {
+                        ret = -1;
+                        goto out;
+                }
+                type = GF_QUOTA_OPTION_TYPE_SOFT_TIMEOUT;
+
+                ret = gf_string2time (words[4], &time);
+                if (ret) {
+                        cli_err ("Invalid argument %s. Please enter a valid "
+                                 "string", words[4]);
+                        goto out;
+                }
+
+                ret = dict_set_str (dict, "value", (char *)words[4]);
+                if (ret < 0)
+                        goto out;
+                goto set_type;
+        }
+        if (strcmp (w, "hard-timeout") == 0) {
+                if(wordcount != 5) {
+                        ret = -1;
+                        goto out;
+                }
+                type = GF_QUOTA_OPTION_TYPE_HARD_TIMEOUT;
+
+                ret = gf_string2time (words[4], &time);
+                if (ret) {
+                        cli_err ("Invalid argument %s. Please enter a valid "
+                                 "string", words[4]);
+                        goto out;
+                }
+
+                ret = dict_set_str (dict, "value", (char *)words[4]);
+                if (ret < 0)
+                        goto out;
+                goto set_type;
+        }
+        if (strcmp (w, "default-soft-limit") == 0) {
+                if(wordcount != 5) {
+                        ret = -1;
+                        goto out;
+                }
+                type = GF_QUOTA_OPTION_TYPE_DEFAULT_SOFT_LIMIT;
+
+                ret = dict_set_str (dict, "value", (char *)words[4]);
+                if (ret < 0)
+                        goto out;
+                goto set_type;
         } else {
                 GF_ASSERT (!"opword mismatch");
         }
@@ -1515,7 +1605,10 @@ cli_cmd_log_rotate_parse (const char **words, int wordcount, dict_t **options)
         if (!dict)
                 goto out;
 
-        volname = (char *)words[3];
+        if (strcmp ("rotate", words[3]) == 0)
+                volname = (char *)words[2];
+        else if (strcmp ("rotate", words[2]) == 0)
+                volname = (char *)words[3];
         GF_ASSERT (volname);
 
         ret = dict_set_str (dict, "volname", volname);
@@ -1616,13 +1709,13 @@ config_parse (const char **words, int wordcount, dict_t *dict,
                 }
                 append_str[append_len - 2] = '\0';
                 /* "checkpoint now" is special: we resolve that "now" */
-                if (strcmp (words[cmdi + 1], "checkpoint") == 0 &&
-                    strcmp (append_str, "now") == 0) {
+                if ((strcmp (words[cmdi + 1], "checkpoint") == 0) &&
+                    (strcmp (append_str, "now") == 0)) {
                         struct timeval tv = {0,};
 
                         ret = gettimeofday (&tv, NULL);
                         if (ret == -1)
-                                goto out; /* FIXME: free append_str? */
+                                goto out;
 
                         GF_FREE (append_str);
                         append_str = GF_CALLOC (1, 300, cli_mt_append_str);
@@ -1630,10 +1723,8 @@ config_parse (const char **words, int wordcount, dict_t *dict,
                                 ret = -1;
                                 goto out;
                         }
-                        strcpy (append_str, "as of ");
-                        gf_time_fmt (append_str + strlen ("as of "),
-                                     300 - strlen ("as of "),
-                                     tv.tv_sec, gf_timefmt_FT);
+                        snprintf (append_str, 300, "now:%ld.%06ld",
+                                  tv.tv_sec, tv.tv_usec);
                 }
 
                 ret = dict_set_dynstr (dict, "op_value", append_str);
@@ -1884,10 +1975,13 @@ int32_t
 cli_cmd_volume_profile_parse (const char **words, int wordcount,
                               dict_t **options)
 {
-        dict_t    *dict       = NULL;
-        char      *volname    = NULL;
-        int       ret         = -1;
-        gf1_cli_stats_op op = GF_CLI_STATS_NONE;
+        dict_t              *dict       = NULL;
+        char                *volname    = NULL;
+        int                 ret         = -1;
+        gf1_cli_stats_op    op          = GF_CLI_STATS_NONE;
+        gf1_cli_info_op     info_op     = GF_CLI_INFO_NONE;
+        gf_boolean_t        is_peek     = _gf_false;
+
         char      *opwords[] = { "start", "stop", "info", NULL };
         char      *w = NULL;
 
@@ -1898,7 +1992,7 @@ cli_cmd_volume_profile_parse (const char **words, int wordcount,
         if (!dict)
                 goto out;
 
-        if (wordcount < 4 || wordcount >5)
+        if (wordcount < 4)
                 goto out;
 
         volname = (char *)words[2];
@@ -1912,12 +2006,36 @@ cli_cmd_volume_profile_parse (const char **words, int wordcount,
                 ret = -1;
                 goto out;
         }
+
+        if ((strcmp (w, "start") == 0 || strcmp (w, "stop") == 0) &&
+            wordcount > 5)
+                goto out;
+
+        if (strcmp (w, "info") == 0 && wordcount > 7)
+                goto out;
+
         if (strcmp (w, "start") == 0) {
                 op = GF_CLI_STATS_START;
         } else if (strcmp (w, "stop") == 0) {
                 op = GF_CLI_STATS_STOP;
         } else if (strcmp (w, "info") == 0) {
                 op = GF_CLI_STATS_INFO;
+                info_op = GF_CLI_INFO_ALL;
+                if (wordcount > 4) {
+                        if (strcmp (words[4], "incremental") == 0) {
+                                info_op = GF_CLI_INFO_INCREMENTAL;
+                                if (wordcount > 5 &&
+                                    strcmp (words[5], "peek") == 0) {
+                                        is_peek = _gf_true;
+                                }
+                        } else if (strcmp (words[4], "cumulative") == 0) {
+                                info_op = GF_CLI_INFO_CUMULATIVE;
+                        } else if (strcmp (words[4], "clear") == 0) {
+                                info_op = GF_CLI_INFO_CLEAR;
+                        } else if (strcmp (words[4], "peek") == 0) {
+                                is_peek = _gf_true;
+                        }
+                }
         } else
                 GF_ASSERT (!"opword mismatch");
 
@@ -1925,12 +2043,18 @@ cli_cmd_volume_profile_parse (const char **words, int wordcount,
         if (ret)
                 goto out;
 
-        if (wordcount == 5) {
-                if (!strcmp (words[4], "nfs")) {
-                        ret = dict_set_int32 (dict, "nfs", _gf_true);
-                        if (ret)
-                                goto out;
-                }
+        ret = dict_set_int32 (dict, "info-op", (int32_t)info_op);
+        if (ret)
+                goto out;
+
+        ret = dict_set_int32 (dict, "peek", is_peek);
+        if (ret)
+                goto out;
+
+        if (!strcmp (words[wordcount - 1], "nfs")) {
+                ret = dict_set_int32 (dict, "nfs", _gf_true);
+                if (ret)
+                        goto out;
         }
 
         *options = dict;
@@ -2225,6 +2349,8 @@ cli_cmd_volume_status_parse (const char **words, int wordcount,
                                         cmd |= GF_CLI_STATUS_NFS;
                                 } else if (!strcmp (words[3], "shd")) {
                                         cmd |= GF_CLI_STATUS_SHD;
+                                } else if (!strcmp (words[3], "quotad")) {
+                                        cmd |= GF_CLI_STATUS_QUOTAD;
                                 } else {
                                         cmd = GF_CLI_STATUS_BRICK;
                                         ret = dict_set_str (dict, "brick",
@@ -2280,6 +2406,17 @@ cli_cmd_volume_status_parse (const char **words, int wordcount,
                                 goto out;
                         }
                         cmd |= GF_CLI_STATUS_SHD;
+                } else if (!strcmp (words[3], "quotad")) {
+                        if (cmd == GF_CLI_STATUS_FD ||
+                            cmd == GF_CLI_STATUS_CLIENTS ||
+                            cmd == GF_CLI_STATUS_DETAIL ||
+                            cmd == GF_CLI_STATUS_INODE) {
+                                cli_err ("Detail/FD/Clients/Inode status not "
+                                         "available for Quota Daemon");
+                                ret = -1;
+                                goto out;
+                        }
+                        cmd |= GF_CLI_STATUS_QUOTAD;
                 } else {
                         if (cmd == GF_CLI_STATUS_TASKS) {
                                 cli_err ("Tasks status not available for "
@@ -2317,7 +2454,7 @@ cli_cmd_validate_dumpoption (const char *arg, char **option)
 {
         char    *opwords[] = {"all", "nfs", "mem", "iobuf", "callpool", "priv",
                               "fd", "inode", "history", "inodectx", "fdctx",
-                              NULL};
+                              "quotad", NULL};
         char    *w = NULL;
 
         w = str_getunamb (arg, opwords);
@@ -2348,6 +2485,10 @@ cli_cmd_volume_statedump_options_parse (const char **words, int wordcount,
                 }
                 strncat (option_str, option, strlen (option));
                 strncat (option_str, " ", 1);
+        }
+        if((strstr (option_str, "nfs")) && strstr (option_str, "quotad")) {
+                ret = -1;
+                goto out;
         }
 
         dict = dict_new ();

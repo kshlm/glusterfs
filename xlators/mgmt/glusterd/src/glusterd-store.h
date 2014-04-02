@@ -65,6 +65,7 @@ typedef enum glusterd_store_ver_ac_{
 #define GLUSTERD_STORE_KEY_BRICK_RDMA_PORT "rdma.listen-port"
 #define GLUSTERD_STORE_KEY_BRICK_DECOMMISSIONED "decommissioned"
 #define GLUSTERD_STORE_KEY_BRICK_VGNAME "vg"
+#define GLUSTERD_STORE_KEY_BRICK_ID "brick-id"
 
 #define GLUSTERD_STORE_KEY_PEER_UUID      "uuid"
 #define GLUSTERD_STORE_KEY_PEER_HOSTNAME  "hostname"
@@ -128,4 +129,14 @@ glusterd_store_retrieve_options (xlator_t *this);
 
 int32_t
 glusterd_store_options (xlator_t *this, dict_t *opts);
+
+int32_t
+glusterd_store_create_quota_conf_sh_on_absence (glusterd_volinfo_t *volinfo);
+
+int
+glusterd_store_retrieve_quota_version (glusterd_volinfo_t *volinfo);
+
+int
+glusterd_store_save_quota_version_and_cksum (glusterd_volinfo_t *volinfo);
+
 #endif

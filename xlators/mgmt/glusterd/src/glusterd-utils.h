@@ -29,6 +29,10 @@
 #include "protocol-common.h"
 
 #define GLUSTERD_SOCK_DIR "/var/run"
+#define GLUSTERD_ASSIGN_BRICKID_TO_BRICKINFO(brickinfo, volinfo, brickid) do {\
+        sprintf (brickinfo->brick_id, "%s-client-%d",\
+                 volinfo->volname, brickid);\
+} while (0)
 
 struct glusterd_lock_ {
         uuid_t  owner;
@@ -124,6 +128,9 @@ int32_t
 glusterd_service_stop(const char *service, char *pidfile, int sig,
                       gf_boolean_t force_kill);
 
+int
+glusterd_get_next_available_brickid (glusterd_volinfo_t *volinfo);
+
 int32_t
 glusterd_resolve_brick (glusterd_brickinfo_t *brickinfo);
 
@@ -136,6 +143,12 @@ int32_t
 glusterd_volume_stop_glusterfs (glusterd_volinfo_t  *volinfo,
                                 glusterd_brickinfo_t   *brickinfo,
                                 gf_boolean_t del_brick);
+
+glusterd_volinfo_t *
+glusterd_volinfo_ref (glusterd_volinfo_t *volinfo);
+
+glusterd_volinfo_t *
+glusterd_volinfo_unref (glusterd_volinfo_t *volinfo);
 
 int32_t
 glusterd_volinfo_delete (glusterd_volinfo_t *volinfo);
@@ -158,14 +171,12 @@ int32_t
 glusterd_compare_friend_data (dict_t  *vols, int32_t *status, char *hostname);
 
 int
-glusterd_volume_compute_cksum (glusterd_volinfo_t  *volinfo);
+glusterd_compute_cksum (glusterd_volinfo_t  *volinfo,
+                        gf_boolean_t is_quota_conf);
 
 void
 glusterd_get_nodesvc_volfile (char *server, char *workdir,
                                     char *volfile, size_t len);
-
-gf_boolean_t
-glusterd_is_service_running (char *pidfile, int *pid);
 
 gf_boolean_t
 glusterd_is_nodesvc_running ();
@@ -187,6 +198,12 @@ glusterd_shd_start ();
 
 int32_t
 glusterd_shd_stop ();
+
+int32_t
+glusterd_quotad_start ();
+
+int32_t
+glusterd_quotad_stop ();
 
 void
 glusterd_set_socket_filepath (char *sock_filepath, char *sockpath, size_t len);
@@ -226,6 +243,9 @@ glusterd_check_generate_start_nfs (void);
 
 int
 glusterd_check_generate_start_shd (void);
+
+int
+glusterd_check_generate_start_quotad (void);
 
 int
 glusterd_nodesvcs_handle_graph_change (glusterd_volinfo_t *volinfo);
@@ -401,8 +421,13 @@ glusterd_brick_statedump (glusterd_volinfo_t *volinfo,
                           char *options, int option_cnt, char **op_errstr);
 int
 glusterd_nfs_statedump (char *options, int option_cnt, char **op_errstr);
+
+int
+glusterd_quotad_statedump (char *options, int option_cnt, char **op_errstr);
+
 gf_boolean_t
 glusterd_is_volume_replicate (glusterd_volinfo_t *volinfo);
+
 gf_boolean_t
 glusterd_is_brick_decommissioned (glusterd_volinfo_t *volinfo, char *hostname,
                                   char *path);
@@ -493,6 +518,11 @@ int
 glusterd_volume_rebalance_use_rsp_dict (dict_t *aggr, dict_t *rsp_dict);
 int
 glusterd_volume_heal_use_rsp_dict (dict_t *aggr, dict_t *rsp_dict);
+
+int32_t
+glusterd_check_if_quota_trans_enabled (glusterd_volinfo_t *volinfo);
+int
+glusterd_volume_quota_copy_to_op_ctx_dict (dict_t *aggr, dict_t *rsp);
 int
 _profile_volume_add_brick_rsp (dict_t *this, char *key, data_t *value,
                              void *data);
@@ -506,11 +536,14 @@ glusterd_are_vol_all_peers_up (glusterd_volinfo_t *volinfo,
                                struct list_head *peers,
                                char **down_peerstr);
 
+int32_t
+glusterd_set_originator_uuid (dict_t *dict);
+
 /* Should be used only when an operation is in progress, as that is the only
  * time a lock_owner is set
  */
 gf_boolean_t
-is_origin_glusterd ();
+is_origin_glusterd (dict_t *dict);
 
 gf_boolean_t
 glusterd_is_quorum_changed (dict_t *options, char *option, char *value);
@@ -537,6 +570,10 @@ int
 glusterd_generate_and_set_task_id (dict_t *dict, char *key);
 
 int
+glusterd_validate_and_set_gfid (dict_t *op_ctx, dict_t *req_dict,
+                                char **op_errstr);
+
+int
 glusterd_copy_uuid_to_dict (uuid_t uuid, dict_t *dict, char *key);
 
 gf_boolean_t
@@ -544,6 +581,9 @@ glusterd_is_same_address (char *name1, char *name2);
 
 void
 gd_update_volume_op_versions (glusterd_volinfo_t *volinfo);
+
+int
+op_version_check (xlator_t *this, int min_op_version, char *msg, int msglen);
 
 char*
 gd_peer_uuid_str (glusterd_peerinfo_t *peerinfo);
@@ -562,6 +602,17 @@ glusterd_get_slave_details_confpath (glusterd_volinfo_t *volinfo, dict_t *dict,
                                      char **conf_path, char **op_errstr);
 
 int
+glusterd_get_slave_info (char *slave, char **slave_ip,
+                         char **slave_vol, char **op_errstr);
+
+int
+glusterd_get_statefile_name (glusterd_volinfo_t *volinfo, char *slave,
+                             char *conf_path, char **statefile);
+
+int
+glusterd_gsync_read_frm_status (char *path, char *buf, size_t blen);
+
+int
 glusterd_check_restart_gsync_session (glusterd_volinfo_t *volinfo, char *slave,
                                       dict_t *resp_dict, char *path_list,
                                       char *conf_path, gf_boolean_t is_force);
@@ -573,4 +624,40 @@ glusterd_check_gsync_running_local (char *master, char *slave,
 
 gf_boolean_t
 glusterd_is_status_tasks_op (glusterd_op_t op, dict_t *dict);
+
+gf_boolean_t
+gd_should_i_start_rebalance  (glusterd_volinfo_t *volinfo);
+
+int
+glusterd_is_volume_quota_enabled (glusterd_volinfo_t *volinfo);
+
+gf_boolean_t
+glusterd_all_volumes_with_quota_stopped ();
+
+int
+glusterd_reconfigure_quotad ();
+
+void
+glusterd_clean_up_quota_store (glusterd_volinfo_t *volinfo);
+
+int
+glusterd_store_quota_conf_skip_header (xlator_t *this, int fd);
+
+int
+glusterd_store_quota_conf_stamp_header (xlator_t *this, int fd);
+
+int
+glusterd_remove_auxiliary_mount (char *volname);
+
+gf_boolean_t
+glusterd_status_has_tasks (int cmd);
+
+int
+gd_stop_rebalance_process (glusterd_volinfo_t *volinfo);
+
+rpc_clnt_t *
+glusterd_rpc_clnt_unref (glusterd_conf_t *conf, rpc_clnt_t *rpc);
+
+int32_t
+glusterd_compare_volume_name(struct list_head *, struct list_head *);
 #endif

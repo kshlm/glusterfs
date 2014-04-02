@@ -36,6 +36,7 @@
 #include "glusterd-store.h"
 #include "glusterd-hooks.h"
 #include "glusterd-utils.h"
+#include "glusterd-locks.h"
 #include "common-utils.h"
 #include "run.h"
 
@@ -48,6 +49,7 @@ extern struct rpcsvc_program gluster_cli_getspec_prog;
 extern struct rpcsvc_program gluster_pmap_prog;
 extern glusterd_op_info_t opinfo;
 extern struct rpcsvc_program gd_svc_mgmt_prog;
+extern struct rpcsvc_program gd_svc_mgmt_v3_prog;
 extern struct rpcsvc_program gd_svc_peer_prog;
 extern struct rpcsvc_program gd_svc_cli_prog;
 extern struct rpcsvc_program gd_svc_cli_prog_ro;
@@ -64,6 +66,7 @@ struct rpcsvc_program *gd_inet_programs[] = {
         &gd_svc_peer_prog,
         &gd_svc_cli_prog_ro,
         &gd_svc_mgmt_prog,
+        &gd_svc_mgmt_v3_prog,
         &gluster_pmap_prog,
         &gluster_handshake_prog,
         &glusterd_mgmt_hndsk_prog,
@@ -594,7 +597,7 @@ configure_syncdaemon (glusterd_conf_t *conf)
         /* gluster-params */
         runinit_gsyncd_setrx (&runner, conf);
         runner_add_args (&runner, "gluster-params",
-                         "aux-gfid-mount xlator-option=*-dht.assert-no-child-down=true",
+                         "aux-gfid-mount",
                          ".", ".", NULL);
         RUN_GSYNCD_CMD;
 
@@ -608,10 +611,27 @@ configure_syncdaemon (glusterd_conf_t *conf)
         runner_add_args (&runner, ".", ".", NULL);
         RUN_GSYNCD_CMD;
 
+        /* ssh-command tar */
+        runinit_gsyncd_setrx (&runner, conf);
+        runner_add_arg (&runner, "ssh-command-tar");
+        runner_argprintf (&runner,
+                          "ssh -oPasswordAuthentication=no "
+                           "-oStrictHostKeyChecking=no "
+                           "-i %s/tar_ssh.pem", georepdir);
+        runner_add_args (&runner, ".", ".", NULL);
+        RUN_GSYNCD_CMD;
+
         /* pid-file */
         runinit_gsyncd_setrx (&runner, conf);
         runner_add_arg (&runner, "pid-file");
         runner_argprintf (&runner, "%s/${mastervol}_${remotehost}_${slavevol}/${eSlave}.pid", georepdir);
+        runner_add_args (&runner, ".", ".", NULL);
+        RUN_GSYNCD_CMD;
+
+        /* geo-rep working dir */
+        runinit_gsyncd_setrx (&runner, conf);
+        runner_add_arg (&runner, "georep-session-working-dir");
+        runner_argprintf (&runner, "%s/${mastervol}_${remotehost}_${slavevol}/", georepdir);
         runner_add_args (&runner, ".", ".", NULL);
         RUN_GSYNCD_CMD;
 
@@ -701,7 +721,7 @@ configure_syncdaemon (glusterd_conf_t *conf)
         /* gluster-params */
         runinit_gsyncd_setrx (&runner, conf);
         runner_add_args (&runner, "gluster-params",
-                         "aux-gfid-mount xlator-option=*-dht.assert-no-child-down=true",
+                         "aux-gfid-mount",
                          ".", NULL);
         RUN_GSYNCD_CMD;
 
@@ -916,6 +936,14 @@ _install_mount_spec (dict_t *opts, char *key, data_t *value, void *data)
         gf_log ("", GF_LOG_ERROR,
                 "adding %smount spec failed: label: %s desc: %s",
                 georep ? GEOREP" " : "", label, pdesc);
+
+        if (mspec) {
+                if (mspec->patterns) {
+                        GF_FREE (mspec->patterns->components);
+                        GF_FREE (mspec->patterns);
+                }
+                GF_FREE (mspec);
+        }
 
         return -1;
 }
@@ -1189,6 +1217,15 @@ init (xlator_t *this)
                 exit (1);
         }
 
+        snprintf (storedir, PATH_MAX, "%s/quotad", workdir);
+        ret = mkdir (storedir, 0777);
+        if ((-1 == ret) && (errno != EEXIST)) {
+                gf_log (this->name, GF_LOG_CRITICAL,
+                        "Unable to create quotad directory %s"
+                        " ,errno = %d", storedir, errno);
+                exit (1);
+        }
+
         snprintf (storedir, PATH_MAX, "%s/groups", workdir);
         ret = mkdir (storedir, 0777);
         if ((-1 == ret) && (errno != EEXIST)) {
@@ -1253,12 +1290,14 @@ init (xlator_t *this)
         conf = GF_CALLOC (1, sizeof (glusterd_conf_t),
                           gf_gld_mt_glusterd_conf_t);
         GF_VALIDATE_OR_GOTO(this->name, conf, out);
-        conf->shd = GF_CALLOC (1, sizeof (nodesrv_t),
-                               gf_gld_mt_nodesrv_t);
+
+        conf->shd = GF_CALLOC (1, sizeof (nodesrv_t), gf_gld_mt_nodesrv_t);
         GF_VALIDATE_OR_GOTO(this->name, conf->shd, out);
-        conf->nfs = GF_CALLOC (1, sizeof (nodesrv_t),
-                               gf_gld_mt_nodesrv_t);
+        conf->nfs = GF_CALLOC (1, sizeof (nodesrv_t), gf_gld_mt_nodesrv_t);
         GF_VALIDATE_OR_GOTO(this->name, conf->nfs, out);
+        conf->quotad = GF_CALLOC (1, sizeof (nodesrv_t),
+                               gf_gld_mt_nodesrv_t);
+        GF_VALIDATE_OR_GOTO(this->name, conf->quotad, out);
 
         INIT_LIST_HEAD (&conf->peers);
         INIT_LIST_HEAD (&conf->volumes);
@@ -1303,6 +1342,8 @@ init (xlator_t *this)
         }
 
         this->private = conf;
+        glusterd_vol_lock_init ();
+        glusterd_txn_opinfo_dict_init ();
         (void) glusterd_nodesvc_set_online_status ("glustershd", _gf_false);
 
         GLUSTERD_GET_HOOKS_DIR (hooks_dir, GLUSTERD_HOOK_VER, conf);
@@ -1394,6 +1435,8 @@ fini (xlator_t *this)
         if (conf->handle)
                 gf_store_handle_destroy (conf->handle);
         glusterd_sm_tr_log_delete (&conf->op_sm_log);
+        glusterd_vol_lock_fini ();
+        glusterd_txn_opinfo_dict_fini ();
         GF_FREE (conf);
 
         this->private = NULL;
@@ -1488,8 +1531,13 @@ struct volume_options options[] = {
         { .key = {"server-quorum-type"},
           .type = GF_OPTION_TYPE_STR,
           .value = { "none", "server"},
-          .description = "If set to server, enables the specified "
-          "volume to participate in quorum."
+          .description = "This feature is on the server-side i.e. in glusterd."
+                         " Whenever the glusterd on a machine observes that "
+                         "the quorum is not met, it brings down the bricks to "
+                         "prevent data split-brains. When the network "
+                         "connections are brought back up and the quorum is "
+                         "restored the bricks in the volume are brought back "
+                         "up."
         },
         { .key = {"server-quorum-ratio"},
           .type = GF_OPTION_TYPE_PERCENT,

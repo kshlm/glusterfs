@@ -136,6 +136,7 @@ int64_t
 ioc_page_destroy (ioc_page_t *page)
 {
         int64_t ret = 0;
+        struct ioc_inode *inode = NULL;
 
         if (page == NULL) {
                 goto out;
@@ -143,9 +144,10 @@ ioc_page_destroy (ioc_page_t *page)
 
         ioc_inode_lock (page->inode);
         {
+                inode = page->inode;
                 ret = __ioc_page_destroy (page);
         }
-        ioc_inode_unlock (page->inode);
+        ioc_inode_unlock (inode);
 
 out:
         return ret;
@@ -315,6 +317,7 @@ __ioc_wait_on_page (ioc_page_t *page, call_frame_t *frame, off_t offset,
                 local->op_errno = ENOMEM;
                 gf_log (frame->this->name, GF_LOG_WARNING,
                         "asked to wait on a NULL page");
+                goto out;
         }
 
         waitq = GF_CALLOC (1, sizeof (*waitq), gf_ioc_mt_ioc_waitq_t);
@@ -476,6 +479,7 @@ ioc_fault_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                         iobref_unref (page->iobref);
                                         GF_FREE (page->vector);
                                         page->vector = NULL;
+                                        page->iobref = NULL;
                                 }
 
                                 /* keep a copy of the page for our cache */
@@ -855,7 +859,10 @@ ioc_frame_unwind (call_frame_t *frame)
 
                         copied += (fill->count * sizeof (*vector));
 
-                        iobref_merge (iobref, fill->iobref);
+                        if (iobref_merge (iobref, fill->iobref)) {
+				op_ret = -1;
+				op_errno = ENOMEM;
+			}
                 }
 
                 list_del (&fill->list);
@@ -987,7 +994,7 @@ __ioc_page_error (ioc_page_t *page, int32_t op_ret, int32_t op_errno)
         waitq = page->waitq;
         page->waitq = NULL;
 
-        gf_log (page->inode->table->xl->name, GF_LOG_WARNING,
+        gf_log (page->inode->table->xl->name, GF_LOG_DEBUG,
                 "page error for page = %p & waitq = %p", page, waitq);
 
         for (trav = waitq; trav; trav = trav->next) {
@@ -1027,6 +1034,7 @@ ioc_waitq_t *
 ioc_page_error (ioc_page_t *page, int32_t op_ret, int32_t op_errno)
 {
         ioc_waitq_t  *waitq = NULL;
+        struct ioc_inode *inode = NULL;
 
         if (page == NULL) {
                 goto out;
@@ -1034,9 +1042,10 @@ ioc_page_error (ioc_page_t *page, int32_t op_ret, int32_t op_errno)
 
         ioc_inode_lock (page->inode);
         {
+                inode = page->inode;
                 waitq = __ioc_page_error (page, op_ret, op_errno);
         }
-        ioc_inode_unlock (page->inode);
+        ioc_inode_unlock (inode);
 
 out:
         return waitq;

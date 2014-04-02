@@ -25,13 +25,11 @@
 
 #define layout_size(cnt) (layout_base_size + (cnt * layout_entry_size))
 
-
 dht_layout_t *
 dht_layout_new (xlator_t *this, int cnt)
 {
         dht_layout_t *layout = NULL;
         dht_conf_t   *conf = NULL;
-
 
         conf = this->private;
 
@@ -50,6 +48,7 @@ dht_layout_new (xlator_t *this, int cnt)
         }
 
         layout->ref = 1;
+
 out:
         return layout;
 }
@@ -443,8 +442,13 @@ dht_is_subvol_in_layout (dht_layout_t *layout, xlator_t *xlator)
         int i = 0;
 
         for (i = 0; i < layout->cnt; i++) {
-                if (!strcmp (layout->list[i].xlator->name, xlator->name))
-                        return _gf_true;
+                /* Check if xlator is already part of layout, and layout is
+                 * non-zero. */
+                if (!strcmp (layout->list[i].xlator->name, xlator->name)) {
+                        if (layout->list[i].start != layout->list[i].stop)
+                                return _gf_true;
+                        break;
+                }
         }
         return _gf_false;
 }
@@ -460,11 +464,8 @@ dht_layout_entry_cmp (dht_layout_t *layout, int i, int j)
                        - (int64_t) layout->list[j].stop;
                        goto out;
         }
-        if (layout->list[i].err || layout->list[j].err)
-                diff = layout->list[i].err - layout->list[j].err;
-        else
-                diff = (int64_t) layout->list[i].start
-                        - (int64_t) layout->list[j].start;
+        diff = (int64_t) layout->list[i].start
+                - (int64_t) layout->list[j].start;
 
 out:
         return diff;
@@ -531,8 +532,20 @@ dht_layout_anomalies (xlator_t *this, loc_t *loc, dht_layout_t *layout,
         char        is_virgin = 1;
         uint32_t    no_space  = 0;
 
-        /* TODO: explain what is happening */
+        /* This funtion scans through the layout spread of a directory to
+           check if there are any anomalies. Prior to calling this function
+           the layout entries should be sorted in the ascending order.
 
+           If the layout entry has err != 0
+                then increment the corresponding anomaly.
+           else
+                if (start of the current layout entry > stop + 1 of previous
+                   non erroneous layout entry)
+                        then it indicates a hole in the layout
+                if (start of the current layout entry < stop + 1 of previous
+                    non erroneous layout entry)
+                         then it indicates an overlap in the layout
+        */
         last_stop = layout->list[0].start - 1;
         prev_stop = last_stop;
 
@@ -540,6 +553,7 @@ dht_layout_anomalies (xlator_t *this, loc_t *loc, dht_layout_t *layout,
                 switch (layout->list[i].err) {
                 case -1:
                 case ENOENT:
+                case ESTALE:
                         missing++;
                         continue;
                 case ENOTCONN:
@@ -721,7 +735,7 @@ dht_layout_dir_mismatch (xlator_t *this, dht_layout_t *layout, xlator_t *subvol,
                                  &disk_layout_raw);
 
         if (dict_ret < 0) {
-                if (err == 0) {
+                if (err == 0 && layout->list[pos].stop) {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%s - disk layout missing", loc->path);
                         ret = -1;

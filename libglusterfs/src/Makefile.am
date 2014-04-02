@@ -7,6 +7,7 @@ libglusterfs_la_CPPFLAGS = $(GF_CPPFLAGS) -D__USE_FILE_OFFSET64 \
 	-I$(top_srcdir)/rpc/rpc-lib/src/ -I$(CONTRIBDIR)/rbtree
 
 libglusterfs_la_LIBADD = @LEXLIB@
+libglusterfs_la_LDFLAGS = -version-info $(LIBGLUSTERFS_LT_VERSION)
 
 lib_LTLIBRARIES = libglusterfs.la
 
@@ -41,7 +42,8 @@ noinst_HEADERS = common-utils.h defaults.h dict.h glusterfs.h hashfn.h timespec.
 	$(CONTRIBDIR)/uuid/uuid.h $(CONTRIBDIR)/uuid/uuidP.h \
 	$(CONTRIB_BUILDDIR)/uuid/uuid_types.h syncop.h graph-utils.h trie.h \
 	run.h options.h lkowner.h fd-lk.h circ-buff.h event-history.h \
-	gidcache.h client_t.h glusterfs-acl.h
+	gidcache.h client_t.h glusterfs-acl.h glfs-message-id.h \
+	template-component-messages.h
 
 EXTRA_DIST = graph.l graph.y
 

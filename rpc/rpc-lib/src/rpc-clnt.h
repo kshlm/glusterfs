@@ -19,7 +19,8 @@
 typedef enum {
         RPC_CLNT_CONNECT,
         RPC_CLNT_DISCONNECT,
-        RPC_CLNT_MSG
+        RPC_CLNT_MSG,
+        RPC_CLNT_DESTROY
 } rpc_clnt_event_t;
 
 
@@ -143,6 +144,7 @@ struct rpc_clnt_connection {
 	struct timeval           last_sent;
 	struct timeval           last_received;
 	int32_t                  ping_started;
+        char                    *name;
 };
 typedef struct rpc_clnt_connection rpc_clnt_connection_t;
 

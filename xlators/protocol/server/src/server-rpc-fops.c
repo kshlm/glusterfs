@@ -810,7 +810,9 @@ server_fgetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         if (op_ret == -1) {
                 state = CALL_STATE (frame);
-                gf_log (this->name, ((op_errno == ENOTSUP) ?
+                gf_log (this->name, (((op_errno == ENOTSUP) ||
+                                      (op_errno == ENODATA) ||
+                                      (op_errno == ENOENT)) ?
                                      GF_LOG_DEBUG : GF_LOG_INFO),
                         "%"PRId64": FGETXATTR %"PRId64" (%s) (%s) ==> (%s)",
                         frame->root->unique, state->resolve.fd_no,
@@ -2265,7 +2267,7 @@ server_finodelk_resume (call_frame_t *frame, xlator_t *bound_xl)
         GF_UNUSED int   ret   = -1;
         server_state_t *state = NULL;
 
-        gf_log (bound_xl->name, GF_LOG_WARNING, "frame %p, xlator %p",
+        gf_log (bound_xl->name, GF_LOG_DEBUG, "frame %p, xlator %p",
                 frame, bound_xl);
 
         state = CALL_STATE (frame);
@@ -2298,7 +2300,7 @@ server_inodelk_resume (call_frame_t *frame, xlator_t *bound_xl)
         GF_UNUSED int   ret   = -1;
         server_state_t *state = NULL;
 
-        gf_log (bound_xl->name, GF_LOG_WARNING, "frame %p, xlator %p",
+        gf_log (bound_xl->name, GF_LOG_DEBUG, "frame %p, xlator %p",
                 frame, bound_xl);
 
         state = CALL_STATE (frame);
@@ -3735,6 +3737,7 @@ server3_3_writev (rpcsvc_request_t *req)
         state->resolve.type  = RESOLVE_MUST;
         state->resolve.fd_no = args.fd;
         state->offset        = args.offset;
+        state->size          = args.size;
         state->flags         = args.flag;
         state->iobref        = iobref_ref (req->iobref);
         memcpy (state->resolve.gfid, args.gfid, 16);

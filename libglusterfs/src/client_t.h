@@ -44,6 +44,8 @@ typedef struct _client_t {
                 int                  flavour;
                 size_t               len;
                 char                *data;
+                char                *username;
+                char                *passwd;
         }            auth;
 } client_t;
 
@@ -60,6 +62,7 @@ struct clienttable {
         gf_lock_t            lock;
         cliententry_t       *cliententries;
         int                  first_free;
+	client_t            *local;
 };
 typedef struct clienttable clienttable_t;
 

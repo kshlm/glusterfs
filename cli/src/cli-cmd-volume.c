@@ -28,11 +28,14 @@
 #include "cli-mem-types.h"
 #include "cli1-xdr.h"
 #include "run.h"
+#include "syscall.h"
 #include "cli-sync-cmd.h"
 
 extern struct rpc_clnt *global_rpc;
+extern struct rpc_clnt *global_quotad_rpc;
 
 extern rpc_clnt_prog_t *cli_rpc_prog;
+extern rpc_clnt_prog_t cli_quotad_clnt;
 
 int
 cli_cmd_volume_help_cbk (struct cli_state *state, struct cli_cmd_word *in_word,
@@ -347,6 +350,11 @@ cli_cmd_volume_create_cbk (struct cli_state *state, struct cli_cmd_word *word,
         int32_t                 sub_count = 0;
         int32_t                 type = GF_CLUSTER_TYPE_NONE;
         cli_local_t             *local = NULL;
+        char                    *trans_type = NULL;
+        char                    *question = "RDMA transport is"
+                                 " recommended only for testing purposes"
+                                 " in this release. Do you want to continue?";
+        gf_answer_t             answer = GF_ANSWER_NO;
 
         proc = &cli_rpc_prog->proctable[GLUSTER_CLI_CREATE_VOLUME];
 
@@ -393,7 +401,23 @@ cli_cmd_volume_create_cbk (struct cli_state *state, struct cli_cmd_word *word,
                 }
         }
 
-        if (state->mode & GLUSTER_MODE_SCRIPT) {
+
+        ret = dict_get_str (options, "transport", &trans_type);
+        if (ret) {
+                gf_log("cli", GF_LOG_ERROR, "Unable to get transport type");
+                goto out;
+        }
+
+        if (strcasestr (trans_type, "rdma")) {
+                answer =
+                   cli_cmd_get_confirmation (state, question);
+                if (GF_ANSWER_NO == answer) {
+                        ret = 0;
+                        goto out;
+                }
+        }
+
+        if (state->mode & GLUSTER_MODE_WIGNORE) {
                 ret = dict_set_int32 (options, "force", _gf_true);
                 if (ret) {
                         gf_log ("cli", GF_LOG_ERROR, "Failed to set force "
@@ -968,7 +992,7 @@ cli_cmd_volume_add_brick_cbk (struct cli_state *state,
         }
 
         /* TODO: there are challenges in supporting changing of
-           stripe-count, untill it is properly supported give warning to user */
+           stripe-count, until it is properly supported give warning to user */
         if (dict_get (options, "stripe-count")) {
                 answer = cli_cmd_get_confirmation (state, question);
 
@@ -978,7 +1002,7 @@ cli_cmd_volume_add_brick_cbk (struct cli_state *state,
                 }
         }
 
-        if (state->mode & GLUSTER_MODE_SCRIPT) {
+        if (state->mode & GLUSTER_MODE_WIGNORE) {
                 ret = dict_set_int32 (options, "force", _gf_true);
                 if (ret) {
                         gf_log ("cli", GF_LOG_ERROR, "Failed to set force "
@@ -1007,6 +1031,371 @@ out:
         return ret;
 }
 
+static int
+gf_cli_create_auxiliary_mount (char *volname)
+{
+        int      ret                     = -1;
+        char     mountdir[PATH_MAX]      = {0,};
+        char     pidfile_path[PATH_MAX]  = {0,};
+        char     logfile[PATH_MAX]       = {0,};
+
+        GLUSTERFS_GET_AUX_MOUNT_PIDFILE (pidfile_path, volname);
+
+        if (gf_is_service_running (pidfile_path, NULL)) {
+                gf_log ("cli", GF_LOG_DEBUG, "Aux mount of volume %s is running"
+                        " already", volname);
+                ret = 0;
+                goto out;
+        }
+
+        GLUSTERD_GET_QUOTA_AUX_MOUNT_PATH (mountdir, volname, "/");
+        ret = mkdir (mountdir, 0777);
+        if (ret && errno != EEXIST) {
+                gf_log ("cli", GF_LOG_ERROR, "Failed to create auxiliary mount "
+                        "directory %s. Reason : %s", mountdir,
+                        strerror (errno));
+                goto out;
+        }
+
+        snprintf (logfile, PATH_MAX-1, "%s/quota-mount-%s.log",
+                  DEFAULT_LOG_FILE_DIRECTORY, volname);
+
+        ret = runcmd (SBIN_DIR"/glusterfs",
+                      "-s", "localhost",
+                      "--volfile-id", volname,
+                      "-l", logfile,
+                      "-p", pidfile_path,
+                      mountdir,
+                      "--client-pid", "-42", NULL);
+
+        if (ret) {
+                gf_log ("cli", GF_LOG_WARNING, "failed to mount glusterfs "
+                        "client. Please check the log file %s for more details",
+                        logfile);
+                ret = -1;
+                goto out;
+        }
+
+        ret = 0;
+
+out:
+        return ret;
+}
+
+static int
+cli_stage_quota_op (char *volname, int op_code)
+{
+        int ret = -1;
+
+        switch (op_code) {
+                case GF_QUOTA_OPTION_TYPE_ENABLE:
+                case GF_QUOTA_OPTION_TYPE_LIMIT_USAGE:
+                case GF_QUOTA_OPTION_TYPE_REMOVE:
+                case GF_QUOTA_OPTION_TYPE_LIST:
+                        ret = gf_cli_create_auxiliary_mount (volname);
+                        if (ret) {
+                                cli_err ("quota: Could not start quota "
+                                         "auxiliary mount");
+                                goto out;
+                        }
+                        ret = 0;
+                        break;
+
+                default:
+                        ret = 0;
+                        break;
+        }
+
+out:
+        return ret;
+}
+
+static void
+print_quota_list_header (void)
+{
+        //Header
+        cli_out ("                  Path                   Hard-limit "
+                 "Soft-limit   Used  Available  Soft-limit exceeded?"
+                 " Hard-limit exceeded?");
+        cli_out ("-----------------------------------------------------"
+                 "-----------------------------------------------------"
+                 "-----------------");
+}
+
+int
+cli_get_soft_limit (dict_t *options, const char **words, dict_t *xdata)
+{
+        call_frame_t            *frame          = NULL;
+        cli_local_t             *local          = NULL;
+        rpc_clnt_procedure_t    *proc           = NULL;
+        char                    *default_sl     = NULL;
+        char                    *default_sl_dup = NULL;
+        int                      ret  = -1;
+
+        frame = create_frame (THIS, THIS->ctx->pool);
+        if (!frame) {
+                ret = -1;
+                goto out;
+        }
+
+        //We need a ref on @options to prevent CLI_STACK_DESTROY
+        //from destroying it prematurely.
+        dict_ref (options);
+        CLI_LOCAL_INIT (local, words, frame, options);
+        proc = &cli_rpc_prog->proctable[GLUSTER_CLI_QUOTA];
+        ret = proc->fn (frame, THIS, options);
+
+        ret = dict_get_str (options, "default-soft-limit", &default_sl);
+        if (ret) {
+                gf_log ("cli", GF_LOG_ERROR, "Failed to get default soft limit");
+                goto out;
+        }
+
+        default_sl_dup = gf_strdup (default_sl);
+        if (!default_sl_dup) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = dict_set_dynstr (xdata, "default-soft-limit", default_sl_dup);
+        if (ret) {
+                gf_log ("cli", GF_LOG_ERROR, "Failed to set default soft limit");
+                GF_FREE (default_sl_dup);
+                goto out;
+        }
+
+out:
+        CLI_STACK_DESTROY (frame);
+        return ret;
+}
+
+#define QUOTA_CONF_HEADER                                                \
+        "GlusterFS Quota conf | version: v%d.%d\n"
+int
+cli_cmd_quota_conf_skip_header (int fd)
+{
+        char buf[PATH_MAX] = {0,};
+
+        snprintf (buf, sizeof(buf)-1, QUOTA_CONF_HEADER, 1, 1);
+        return gf_skip_header_section (fd, strlen (buf));
+}
+
+/* Checks if at least one limit has been set on the volume
+ *
+ * Returns true if at least one limit is set. Returns false otherwise.
+ */
+gf_boolean_t
+_limits_set_on_volume (char *volname) {
+        gf_boolean_t    limits_set = _gf_false;
+        int             ret = -1;
+        char            quota_conf_file[PATH_MAX] = {0,};
+        int             fd = -1;
+        char            buf[16] = {0,};
+
+        /* TODO: fix hardcoding; Need to perform an RPC call to glusterd
+         * to fetch working directory
+         */
+        sprintf (quota_conf_file, "/var/lib/glusterd/vols/%s/quota.conf",
+                 volname);
+        fd = open (quota_conf_file, O_RDONLY);
+        if (fd == -1)
+                goto out;
+
+        ret = cli_cmd_quota_conf_skip_header (fd);
+        if (ret)
+                goto out;
+
+        /* Try to read atleast one gfid */
+        ret = read (fd, (void *)buf, 16);
+        if (ret == 16)
+                limits_set = _gf_true;
+out:
+        if (fd != -1)
+                close (fd);
+        return limits_set;
+}
+
+/* Checks if the mount is connected to the bricks
+ *
+ * Returns true if connected and false if not
+ */
+gf_boolean_t
+_quota_aux_mount_online (char *volname)
+{
+        int         ret = 0;
+        char        mount_path[PATH_MAX + 1] = {0,};
+        struct stat buf = {0,};
+
+        GF_ASSERT (volname);
+
+        /* Try to create the aux mount before checking if bricks are online */
+        ret = gf_cli_create_auxiliary_mount (volname);
+        if (ret) {
+                cli_err ("quota: Could not start quota auxiliary mount");
+                return _gf_false;
+        }
+
+        GLUSTERD_GET_QUOTA_AUX_MOUNT_PATH (mount_path, volname, "/");
+
+        ret = sys_stat (mount_path, &buf);
+        if (ret) {
+                if (ENOTCONN == errno) {
+                        cli_err ("quota: Cannot connect to bricks. Check if "
+                                 "bricks are online.");
+                } else {
+                        cli_err ("quota: Error on quota auxiliary mount (%s).",
+                                 strerror (errno));
+                }
+                return _gf_false;
+        }
+        return _gf_true;
+}
+
+int
+cli_cmd_quota_handle_list_all (const char **words, dict_t *options)
+{
+        int                      all_failed = 1;
+        int                      count      = 0;
+        int                      ret        = -1;
+        rpc_clnt_procedure_t    *proc       = NULL;
+        cli_local_t             *local      = NULL;
+        call_frame_t            *frame      = NULL;
+        dict_t                  *xdata      = NULL;
+        char                    *gfid_str   = NULL;
+        char                    *volname    = NULL;
+        char                    *volname_dup = NULL;
+        unsigned char            buf[16]   = {0};
+        int                      fd        = -1;
+        char                     quota_conf_file[PATH_MAX] = {0};
+
+        xdata = dict_new ();
+        if (!xdata) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = dict_get_str (options, "volname", &volname);
+        if (ret) {
+                gf_log ("cli", GF_LOG_ERROR, "Failed to get volume name");
+                goto out;
+        }
+
+        ret = cli_get_soft_limit (options, words, xdata);
+        if (ret) {
+                gf_log ("cli", GF_LOG_ERROR, "Failed to fetch default "
+                        "soft-limit");
+                goto out;
+        }
+
+        /* Check if at least one limit is set on volume. No need to check for
+         * quota enabled as cli_get_soft_limit() handles that
+         */
+        if (!_limits_set_on_volume (volname)) {
+                cli_out ("quota: No quota configured on volume %s", volname);
+                ret = 0;
+                goto out;
+        }
+
+        /* Check if the mount is online before doing any listing */
+        if (!_quota_aux_mount_online (volname)) {
+                ret = -1;
+                goto out;
+        }
+
+        frame = create_frame (THIS, THIS->ctx->pool);
+        if (!frame) {
+                ret = -1;
+                goto out;
+        }
+
+        volname_dup = gf_strdup (volname);
+        if (!volname_dup) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = dict_set_dynstr (xdata, "volume-uuid", volname_dup);
+        if (ret) {
+                gf_log ("cli", GF_LOG_ERROR, "Failed to set volume-uuid");
+                GF_FREE (volname_dup);
+                goto out;
+        }
+
+        //TODO: fix hardcoding; Need to perform an RPC call to glusterd
+        //to fetch working directory
+        sprintf (quota_conf_file, "/var/lib/glusterd/vols/%s/quota.conf",
+                 volname);
+        fd = open (quota_conf_file, O_RDONLY);
+        if (fd == -1) {
+                //This may because no limits were yet set on the volume
+                gf_log ("cli", GF_LOG_TRACE, "Unable to open "
+                        "quota.conf");
+                ret = 0;
+                goto out;
+         }
+
+        ret = cli_cmd_quota_conf_skip_header (fd);
+        if (ret) {
+                goto out;
+        }
+        CLI_LOCAL_INIT (local, words, frame, xdata);
+        proc = &cli_quotad_clnt.proctable[GF_AGGREGATOR_GETLIMIT];
+
+        print_quota_list_header ();
+        gfid_str = GF_CALLOC (1, gf_common_mt_char, 64);
+        if (!gfid_str) {
+                ret = -1;
+                goto out;
+        }
+        for (count = 0;; count++) {
+                ret = read (fd, (void*) buf, 16);
+                if (ret <= 0) {
+                        //Finished reading all entries in the conf file
+                        break;
+                }
+                if (ret < 16) {
+                        //This should never happen. We must have a multiple of
+                        //entry_sz bytes in our configuration file.
+                        gf_log (THIS->name, GF_LOG_CRITICAL, "Quota "
+                                "configuration store may be corrupt.");
+                        goto out;
+                }
+                uuid_utoa_r (buf, gfid_str);
+                ret = dict_set_str (xdata, "gfid", gfid_str);
+                if (ret) {
+                        gf_log ("cli", GF_LOG_ERROR, "Failed to set gfid");
+                        goto out;
+                }
+
+                ret = proc->fn (frame, THIS, xdata);
+                if (ret) {
+                        gf_log ("cli", GF_LOG_ERROR, "Failed to get quota "
+                                "limits for %s", uuid_utoa ((unsigned char*)buf));
+                }
+
+                dict_del (xdata, "gfid");
+                all_failed = all_failed && ret;
+        }
+
+        if (count > 0) {
+                ret = all_failed? -1: 0;
+        } else {
+                ret = 0;
+        }
+out:
+        if (fd != -1) {
+                close (fd);
+        }
+
+        GF_FREE (gfid_str);
+        if (ret) {
+                gf_log ("cli", GF_LOG_ERROR, "Could not fetch and display quota"
+                        " limits");
+        }
+        CLI_STACK_DESTROY (frame);
+        return ret;
+}
+
 int
 cli_cmd_quota_cbk (struct cli_state *state, struct cli_cmd_word *word,
                    const char **words, int wordcount)
@@ -1020,14 +1409,51 @@ cli_cmd_quota_cbk (struct cli_state *state, struct cli_cmd_word *word,
         dict_t                  *options   = NULL;
         gf_answer_t              answer    = GF_ANSWER_NO;
         cli_local_t             *local     = NULL;
+        int                      sent      = 0;
+        char                    *volname   = NULL;
         const char *question = "Disabling quota will delete all the quota "
                                "configuration. Do you want to continue?";
 
-        proc = &cli_rpc_prog->proctable[GLUSTER_CLI_QUOTA];
-        if (proc == NULL) {
-                ret = -1;
+        //parse **words into options dictionary
+        ret = cli_cmd_quota_parse (words, wordcount, &options);
+        if (ret < 0) {
+                cli_usage_out (word->pattern);
+                parse_err = 1;
                 goto out;
         }
+
+        ret = dict_get_int32 (options, "type", &type);
+        if (ret) {
+                gf_log ("cli", GF_LOG_ERROR, "Failed to get opcode");
+                goto out;
+        }
+
+        //handle quota-disable and quota-list-all different from others
+        switch (type) {
+        case GF_QUOTA_OPTION_TYPE_DISABLE:
+                answer = cli_cmd_get_confirmation (state, question);
+                if (answer == GF_ANSWER_NO)
+                        goto out;
+                break;
+        case GF_QUOTA_OPTION_TYPE_LIST:
+                if (wordcount != 4)
+                        break;
+                ret = cli_cmd_quota_handle_list_all (words, options);
+                goto out;
+        default:
+                break;
+        }
+
+        ret = dict_get_str (options, "volname", &volname);
+        if (ret) {
+                gf_log ("cli", GF_LOG_ERROR, "Failed to get volume name");
+                goto out;
+        }
+
+        //create auxiliary mount need for quota commands that operate on path
+        ret = cli_stage_quota_op (volname, type);
+        if (ret)
+                goto out;
 
         frame = create_frame (THIS, THIS->ctx->pool);
         if (!frame) {
@@ -1035,32 +1461,26 @@ cli_cmd_quota_cbk (struct cli_state *state, struct cli_cmd_word *word,
                 goto out;
         }
 
-        ret = cli_cmd_quota_parse (words, wordcount, &options);
-
-        if (ret < 0) {
-                cli_usage_out (word->pattern);
-                parse_err = 1;
-                goto out;
-        } else if (dict_get_int32 (options, "type", &type) == 0 &&
-                   type == GF_QUOTA_OPTION_TYPE_DISABLE) {
-                answer = cli_cmd_get_confirmation (state, question);
-                if (answer == GF_ANSWER_NO)
-                        goto out;
-        }
-
         CLI_LOCAL_INIT (local, words, frame, options);
+        proc = &cli_rpc_prog->proctable[GLUSTER_CLI_QUOTA];
+        if (proc == NULL) {
+                ret = -1;
+                goto out;
+        }
 
         if (proc->fn)
                 ret = proc->fn (frame, THIS, options);
 
 out:
-        if (ret && parse_err == 0)
-                cli_out ("Quota command failed");
+        if (ret) {
+                cli_cmd_sent_status_get (&sent);
+                if (sent == 0 && parse_err == 0)
+                        cli_out ("Quota command failed. Please check the cli "
+                                 "logs for more details");
+        }
 
         CLI_STACK_DESTROY (frame);
-
         return ret;
-
 }
 
 int
@@ -1136,6 +1556,11 @@ cli_cmd_volume_replace_brick_cbk (struct cli_state *state,
         int                     sent = 0;
         int                     parse_error = 0;
         cli_local_t             *local = NULL;
+        int                     replace_op = 0;
+        char                    *q = "All replace-brick commands except "
+                                     "commit force are deprecated. "
+                                     "Do you want to continue?";
+        gf_answer_t             answer = GF_ANSWER_NO;
 
 #ifdef GF_SOLARIS_HOST_OS
         cli_out ("Command not supported on Solaris");
@@ -1155,7 +1580,16 @@ cli_cmd_volume_replace_brick_cbk (struct cli_state *state,
                 goto out;
         }
 
-        if (state->mode & GLUSTER_MODE_SCRIPT) {
+        ret = dict_get_int32 (options, "operation", &replace_op);
+        if (replace_op != GF_REPLACE_OP_COMMIT_FORCE) {
+                answer = cli_cmd_get_confirmation (state, q);
+                if (GF_ANSWER_NO == answer) {
+                        ret = 0;
+                        goto out;
+                }
+        }
+
+        if (state->mode & GLUSTER_MODE_WIGNORE) {
                 ret = dict_set_int32 (options, "force", _gf_true);
                 if (ret) {
                         gf_log ("cli", GF_LOG_ERROR, "Failed to set force"
@@ -1252,6 +1686,13 @@ cli_cmd_log_rotate_cbk (struct cli_state *state, struct cli_cmd_word *word,
         cli_local_t             *local = NULL;
 
         if (!((wordcount == 4) || (wordcount == 5))) {
+                cli_usage_out (word->pattern);
+                parse_error = 1;
+                goto out;
+        }
+
+        if (!((strcmp ("rotate", words[2]) == 0) ||
+              (strcmp ("rotate", words[3]) == 0))) {
                 cli_usage_out (word->pattern);
                 parse_error = 1;
                 goto out;
@@ -1862,7 +2303,7 @@ struct cli_cmd volume_cmds[] = {
           cli_cmd_volume_remove_brick_cbk,
           "remove brick from volume <VOLNAME>"},
 
-        { "volume rebalance <VOLNAME> [fix-layout] {start|stop|status} [force]",
+        { "volume rebalance <VOLNAME> {{fix-layout start} | {start [force]|stop|status}}",
           cli_cmd_volume_defrag_cbk,
           "rebalance operations"},
 
@@ -1882,9 +2323,14 @@ struct cli_cmd volume_cmds[] = {
           cli_cmd_volume_help_cbk,
           "display help for the volume command"},
 
-        { "volume log rotate <VOLNAME> [BRICK]",
+        { "volume log <VOLNAME> rotate [BRICK]",
           cli_cmd_log_rotate_cbk,
          "rotate the log file for corresponding volume/brick"},
+
+        { "volume log rotate <VOLNAME> [BRICK]",
+          cli_cmd_log_rotate_cbk,
+         "rotate the log file for corresponding volume/brick"
+         " NOTE: This is an old syntax, will be deprecated from next release."},
 
         { "volume sync <HOSTNAME> [all|<VOLNAME>]",
           cli_cmd_sync_volume_cbk,
@@ -1902,11 +2348,13 @@ struct cli_cmd volume_cmds[] = {
          cli_cmd_check_gsync_exists_cbk},
 #endif
 
-         { "volume profile <VOLNAME> {start|stop|info [nfs]}",
+         { "volume profile <VOLNAME> {start|info [peek|incremental [peek]|cumulative|clear]|stop} [nfs]",
            cli_cmd_volume_profile_cbk,
            "volume profile operations"},
 
-        { "volume quota <VOLNAME> <enable|disable|limit-usage|list|remove> [path] [value]",
+        { "volume quota <VOLNAME> {enable|disable|list [<path> ...]|remove <path>| default-soft-limit <percent>} |\n"
+          "volume quota <VOLNAME> {limit-usage <path> <size> [<percent>]} |\n"
+          "volume quota <VOLNAME> {alert-time|soft-timeout|hard-timeout} {<time>}",
           cli_cmd_quota_cbk,
           "quota translator specific operations"},
 
@@ -1915,7 +2363,7 @@ struct cli_cmd volume_cmds[] = {
            cli_cmd_volume_top_cbk,
            "volume top operations"},
 
-        { "volume status [all | <VOLNAME> [nfs|shd|<BRICK>]]"
+        { "volume status [all | <VOLNAME> [nfs|shd|<BRICK>|quotad]]"
           " [detail|clients|mem|inode|fd|callpool|tasks]",
           cli_cmd_volume_status_cbk,
           "display status of all or specified volume(s)/brick"},
@@ -1924,7 +2372,7 @@ struct cli_cmd volume_cmds[] = {
           cli_cmd_volume_heal_cbk,
           "self-heal commands on volume specified by <VOLNAME>"},
 
-        {"volume statedump <VOLNAME> [nfs] [all|mem|iobuf|callpool|priv|fd|"
+        {"volume statedump <VOLNAME> [nfs|quotad] [all|mem|iobuf|callpool|priv|fd|"
          "inode|history]...",
          cli_cmd_volume_statedump_cbk,
          "perform statedump on bricks"},

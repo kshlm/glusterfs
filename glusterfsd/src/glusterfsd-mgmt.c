@@ -365,7 +365,7 @@ glusterfs_volume_top_write_perf (uint32_t blk_size, uint32_t blk_count,
 {
         int32_t                 fd = -1;
         int32_t                 input_fd = -1;
-        char                    export_path[PATH_MAX];
+        char                    export_path[PATH_MAX] = {0,};
         char                    *buf = NULL;
         int32_t                 iter = 0;
         int32_t                 ret = -1;
@@ -448,7 +448,7 @@ glusterfs_volume_top_read_perf (uint32_t blk_size, uint32_t blk_count,
         int32_t                 fd = -1;
         int32_t                 input_fd = -1;
         int32_t                 output_fd = -1;
-        char                    export_path[PATH_MAX];
+        char                    export_path[PATH_MAX] = {0,};
         char                    *buf = NULL;
         int32_t                 iter = 0;
         int32_t                 ret = -1;
@@ -912,6 +912,9 @@ glusterfs_handle_node_status (rpcsvc_request_t *req)
                 ret = gf_asprintf (&node_name, "%s", "nfs-server");
         else if ((cmd & GF_CLI_STATUS_SHD) != 0)
                 ret = gf_asprintf (&node_name, "%s", "glustershd");
+        else if ((cmd & GF_CLI_STATUS_QUOTAD) != 0)
+                ret = gf_asprintf (&node_name, "%s", "quotad");
+
         else {
                 ret = -1;
                 goto out;
@@ -934,6 +937,8 @@ glusterfs_handle_node_status (rpcsvc_request_t *req)
                 ret = gf_asprintf (&subvol_name, "%s", volname);
         else if ((cmd & GF_CLI_STATUS_SHD) != 0)
                 ret = gf_asprintf (&subvol_name, "%s-replicate-0", volname);
+        else if ((cmd & GF_CLI_STATUS_QUOTAD) != 0)
+                ret = gf_asprintf (&subvol_name, "%s", volname);
         else {
                 ret = -1;
                 goto out;
@@ -1375,7 +1380,8 @@ out:
 
         free (rsp.spec);
 
-        emancipate (ctx, ret);
+        if (ctx)
+                emancipate (ctx, ret);
 
         // Stop if server is running at an unsupported op-version
         if (ENOTSUP == ret) {
@@ -1451,7 +1457,12 @@ glusterfs_volfile_fetch (glusterfs_ctx_t *ctx)
         ret = mgmt_submit_request (&req, frame, ctx, &clnt_handshake_prog,
                                    GF_HNDSK_GETSPEC, mgmt_getspec_cbk,
                                    (xdrproc_t)xdr_gf_getspec_req);
+
 out:
+        GF_FREE (req.xdata.xdata_val);
+        if (dict)
+                dict_unref (dict);
+
         return ret;
 }
 
@@ -1562,7 +1573,9 @@ glusterfs_rebalance_event_notify (dict_t *dict)
 
         GF_FREE (req.dict.dict_val);
 
-        STACK_DESTROY (frame->root);
+        if (frame) {
+              STACK_DESTROY (frame->root);
+        }
         return ret;
 }
 

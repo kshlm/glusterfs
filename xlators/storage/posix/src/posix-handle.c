@@ -26,13 +26,167 @@
 #include "xlator.h"
 #include "syscall.h"
 
+inode_t *
+posix_resolve (xlator_t *this, inode_table_t *itable, inode_t *parent,
+               char *bname, struct iatt *iabuf)
+{
+        inode_t     *inode = NULL, *linked_inode = NULL;
+        int          ret   = -1;
 
-#define HANDLE_PFX ".glusterfs"
-#define TRASH_DIR "landfill"
+        ret = posix_istat (this, parent->gfid, bname, iabuf);
+        if (ret < 0)
+                goto out;
 
-#define UUID0_STR "00000000-0000-0000-0000-000000000000"
-#define SLEN(str) (sizeof(str) - 1)
+        inode = inode_find (itable, iabuf->ia_gfid);
+        if (inode == NULL) {
+                inode = inode_new (itable);
+        }
 
+        linked_inode = inode_link (inode, parent, bname, iabuf);
+
+        inode_unref (inode);
+
+out:
+        return linked_inode;
+}
+
+int
+posix_make_ancestral_node (const char *priv_base_path, char *path, int pathsize,
+                           gf_dirent_t *head,
+                           char *dir_name, struct iatt *iabuf, inode_t *inode,
+                           int type, dict_t *xdata)
+{
+        gf_dirent_t *entry           = NULL;
+        char real_path[PATH_MAX + 1] = {0, }, len = 0;
+        loc_t        loc             = {0, };
+        int          ret             = -1;
+
+        len = strlen (path) + strlen (dir_name) + 1;
+        if (len > pathsize) {
+                goto out;
+        }
+
+        strcat (path, dir_name);
+
+        if (type & POSIX_ANCESTRY_DENTRY) {
+                entry = gf_dirent_for_name (dir_name);
+                if (!entry) {
+                        gf_log (THIS->name, GF_LOG_ERROR,
+                                "could not create gf_dirent for entry %s: (%s)",
+                                dir_name, strerror (errno));
+                        goto out;
+                }
+
+                entry->d_stat = *iabuf;
+                entry->inode = inode_ref (inode);
+
+                list_add_tail (&entry->list, &head->list);
+                strcpy (real_path, priv_base_path);
+                strcat (real_path, "/");
+                strcat (real_path, path);
+                loc.inode = inode_ref (inode);
+                uuid_copy (loc.gfid, inode->gfid);
+
+                entry->dict = posix_lookup_xattr_fill (THIS, real_path, &loc,
+                                                       xdata, iabuf);
+                loc_wipe (&loc);
+        }
+
+        ret = 0;
+
+out:
+        return ret;
+}
+
+int
+posix_make_ancestryfromgfid (xlator_t *this, char *path, int pathsize,
+                             gf_dirent_t *head, int type, uuid_t gfid,
+                             const size_t handle_size,
+                             const char *priv_base_path, inode_table_t *itable,
+                             inode_t **parent, dict_t *xdata)
+{
+        char        *linkname   = NULL; /* "../../<gfid[0]>/<gfid[1]/"
+                                         "<gfidstr>/<NAME_MAX>" */
+        char        *dir_handle = NULL;
+        char        *dir_name   = NULL;
+        char        *pgfidstr   = NULL;
+        char        *saveptr    = NULL;
+        ssize_t       len        = 0;
+        inode_t     *inode      = NULL;
+        struct iatt  iabuf      = {0, };
+        int          ret        = -1;
+        uuid_t       tmp_gfid   = {0, };
+
+        if (!path || !parent || !priv_base_path || uuid_is_null (gfid)) {
+                goto out;
+        }
+
+        if (__is_root_gfid (gfid)) {
+                if (parent) {
+                        if (*parent) {
+                                inode_unref (*parent);
+                        }
+
+                        *parent = inode_ref (itable->root);
+                }
+
+                inode = itable->root;
+
+                memset (&iabuf, 0, sizeof (iabuf));
+                uuid_copy (iabuf.ia_gfid, inode->gfid);
+                iabuf.ia_type = inode->ia_type;
+
+                ret = posix_make_ancestral_node (priv_base_path, path, pathsize,
+                                                 head, "/", &iabuf, inode, type,
+                                                 xdata);
+                return ret;
+        }
+
+        dir_handle = alloca (handle_size);
+        linkname   = alloca (PATH_MAX);
+        snprintf (dir_handle, handle_size, "%s/%s/%02x/%02x/%s",
+                  priv_base_path, GF_HIDDEN_PATH, gfid[0], gfid[1],
+                  uuid_utoa (gfid));
+
+        len = readlink (dir_handle, linkname, PATH_MAX);
+        if (len < 0) {
+                gf_log (this->name, GF_LOG_ERROR, "could not read the link "
+                        "from the gfid handle %s (%s)", dir_handle,
+                        strerror (errno));
+                goto out;
+        }
+
+        linkname[len] = '\0';
+
+        pgfidstr = strtok_r (linkname + SLEN("../../00/00/"), "/", &saveptr);
+        dir_name = strtok_r (NULL, "/", &saveptr);
+        strcat (dir_name, "/");
+
+        uuid_parse (pgfidstr, tmp_gfid);
+
+        ret = posix_make_ancestryfromgfid (this, path, pathsize, head, type,
+                                           tmp_gfid, handle_size,
+                                           priv_base_path, itable, parent,
+                                           xdata);
+        if (ret < 0) {
+                goto out;
+        }
+
+        memset (&iabuf, 0, sizeof (iabuf));
+
+        inode = posix_resolve (this, itable, *parent, dir_name, &iabuf);
+
+        ret = posix_make_ancestral_node (priv_base_path, path, pathsize, head,
+                                         dir_name, &iabuf, inode, type, xdata);
+        if (*parent != NULL) {
+                inode_unref (*parent);
+        }
+
+        *parent = inode;
+
+out:
+        return ret;
+}
 
 int
 posix_handle_relpath (xlator_t *this, uuid_t gfid, const char *basename,
@@ -189,13 +343,13 @@ posix_handle_path (xlator_t *this, uuid_t gfid, const char *basename,
                 buf = alloca (maxlen);
         }
 
-        base_len = (priv->base_path_length + SLEN(HANDLE_PFX) + 45);
+        base_len = (priv->base_path_length + SLEN(GF_HIDDEN_PATH) + 45);
         base_str = alloca (base_len + 1);
         base_len = snprintf (base_str, base_len + 1, "%s/%s/%02x/%02x/%s",
-                             priv->base_path, HANDLE_PFX, gfid[0], gfid[1],
+                             priv->base_path, GF_HIDDEN_PATH, gfid[0], gfid[1],
                              uuid_str);
 
-        pfx_len = priv->base_path_length + 1 + SLEN(HANDLE_PFX) + 1;
+        pfx_len = priv->base_path_length + 1 + SLEN(GF_HIDDEN_PATH) + 1;
 
         if (basename) {
                 len = snprintf (buf, maxlen, "%s/%s", base_str, basename);
@@ -237,7 +391,7 @@ posix_handle_gfid_path (xlator_t *this, uuid_t gfid, const char *basename,
 
         len = priv->base_path_length  /* option directory "/export" */
                 + SLEN("/")
-                + SLEN(HANDLE_PFX)
+                + SLEN(GF_HIDDEN_PATH)
                 + SLEN("/")
                 + SLEN("00/")
                 + SLEN("00/")
@@ -268,10 +422,10 @@ posix_handle_gfid_path (xlator_t *this, uuid_t gfid, const char *basename,
 
         if (basename) {
                 len = snprintf (buf, buflen, "%s/%s/%02x/%02x/%s/%s", priv->base_path,
-                                HANDLE_PFX, gfid[0], gfid[1], uuid_str, basename);
+                                GF_HIDDEN_PATH, gfid[0], gfid[1], uuid_str, basename);
         } else {
                 len = snprintf (buf, buflen, "%s/%s/%02x/%02x/%s", priv->base_path,
-                                HANDLE_PFX, gfid[0], gfid[1], uuid_str);
+                                GF_HIDDEN_PATH, gfid[0], gfid[1], uuid_str);
         }
 out:
         return len;
@@ -300,10 +454,10 @@ posix_handle_init (xlator_t *this)
                 return -1;
         }
 
-        handle_pfx = alloca (priv->base_path_length + 1 + strlen (HANDLE_PFX)
+        handle_pfx = alloca (priv->base_path_length + 1 + strlen (GF_HIDDEN_PATH)
                              + 1);
 
-        sprintf (handle_pfx, "%s/%s", priv->base_path, HANDLE_PFX);
+        sprintf (handle_pfx, "%s/%s", priv->base_path, GF_HIDDEN_PATH);
 
         ret = stat (handle_pfx, &stbuf);
         switch (ret) {
@@ -467,7 +621,7 @@ posix_handle_trash_init (xlator_t *this)
         priv = this->private;
 
         priv->trash_path = GF_CALLOC (1, priv->base_path_length + strlen ("/")
-                                      + strlen (HANDLE_PFX) + strlen ("/")
+                                      + strlen (GF_HIDDEN_PATH) + strlen ("/")
                                       + strlen (TRASH_DIR) + 1,
                                       gf_posix_mt_trash_path);
 
@@ -475,7 +629,7 @@ posix_handle_trash_init (xlator_t *this)
                 goto out;
 
         strncpy (priv->trash_path, priv->base_path, priv->base_path_length);
-        strcat (priv->trash_path, "/" HANDLE_PFX "/" TRASH_DIR);
+        strcat (priv->trash_path, "/" GF_HIDDEN_PATH "/" TRASH_DIR);
         ret = posix_handle_new_trash_init (this, priv->trash_path);
         if (ret)
                 goto out;
@@ -547,16 +701,8 @@ posix_handle_hard (xlator_t *this, const char *oldpath, uuid_t gfid, struct stat
                         return -1;
                 }
 
-#ifdef HAVE_LINKAT
-                /*
-                 * Use linkat if the target may be a symlink to a directory
-                 * or without an existing target. See comment about linkat()
-                 * usage in posix_link() in posix.c for details
-                 */
-                ret = linkat (AT_FDCWD, oldpath, AT_FDCWD, newpath, 0);
-#else
-                ret = link (oldpath, newpath);
-#endif
+                ret = sys_link (oldpath, newpath);
+
                 if (ret) {
                         gf_log (this->name, GF_LOG_WARNING,
                                 "link %s -> %s failed (%s)",
@@ -728,16 +874,7 @@ posix_create_link_if_gfid_exists (xlator_t *this, uuid_t gfid,
         MAKE_HANDLE_PATH (newpath, this, gfid, NULL);
         ret = lstat (newpath, &stbuf);
         if (!ret) {
-#ifdef HAVE_LINKAT
-                /*
-                 * Use linkat if the target may be a symlink to a directory
-                 * or without an existing target. See comment about linkat()
-                 * usage in posix_link() in posix.c for details
-                 */
-                ret = linkat (AT_FDCWD, newpath, AT_FDCWD, real_path, 0);
-#else
-                ret = link (newpath, real_path);
-#endif
+                ret = sys_link (newpath, real_path);
         }
 
         return ret;

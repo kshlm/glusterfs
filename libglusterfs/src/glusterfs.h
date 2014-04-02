@@ -84,14 +84,19 @@
 #define GF_XATTR_NODE_UUID_KEY  "trusted.glusterfs.node-uuid"
 #define GF_XATTR_VOL_ID_KEY   "trusted.glusterfs.volume-id"
 #define GF_XATTR_LOCKINFO_KEY   "trusted.glusterfs.lockinfo"
-#define GF_XATTR_GET_REAL_FILENAME_KEY "user.glusterfs.get_real_filename:"
+#define GF_XATTR_GET_REAL_FILENAME_KEY "glusterfs.get_real_filename:"
+#define GF_XATTR_USER_PATHINFO_KEY   "glusterfs.pathinfo"
+#define QUOTA_LIMIT_KEY "trusted.glusterfs.quota.limit-set"
+#define VIRTUAL_QUOTA_XATTR_CLEANUP_KEY "glusterfs.quota-xattr-cleanup"
 
 #define GF_READDIR_SKIP_DIRS       "readdir-filter-directories"
 
 #define BD_XATTR_KEY             "user.glusterfs"
 
-#define XATTR_IS_PATHINFO(x)  (strncmp (x, GF_XATTR_PATHINFO_KEY,       \
-                                        strlen (GF_XATTR_PATHINFO_KEY)) == 0)
+#define XATTR_IS_PATHINFO(x)  ((strncmp (x, GF_XATTR_PATHINFO_KEY,       \
+                                        strlen (x)) == 0) ||             \
+                              (strncmp (x, GF_XATTR_USER_PATHINFO_KEY,   \
+                                         strlen (x)) == 0))
 #define XATTR_IS_NODE_UUID(x) (strncmp (x, GF_XATTR_NODE_UUID_KEY,      \
                                         strlen (GF_XATTR_NODE_UUID_KEY)) == 0)
 #define XATTR_IS_LOCKINFO(x) (strncmp (x, GF_XATTR_LOCKINFO_KEY,        \
@@ -101,9 +106,13 @@
 
 #define GF_XATTR_LINKINFO_KEY   "trusted.distribute.linkinfo"
 #define GFID_XATTR_KEY          "trusted.gfid"
+#define PGFID_XATTR_KEY_PREFIX  "trusted.pgfid."
 #define VIRTUAL_GFID_XATTR_KEY_STR  "glusterfs.gfid.string"
 #define VIRTUAL_GFID_XATTR_KEY      "glusterfs.gfid"
 #define UUID_CANONICAL_FORM_LEN 36
+
+#define GET_ANCESTRY_PATH_KEY "glusterfs.ancestry.path"
+#define GET_ANCESTRY_DENTRY_KEY "glusterfs.ancestry.dentry"
 
 #define GLUSTERFS_INTERNAL_FOP_KEY  "glusterfs-internal-fop"
 
@@ -123,7 +132,7 @@
 
 /* Index xlator related */
 #define GF_XATTROP_INDEX_GFID "glusterfs.xattrop_index_gfid"
-#define GF_BASE_INDICES_HOLDER_GFID "glusterfs.base_indicies_holder_gfid"
+#define GF_XATTROP_INDEX_COUNT "glusterfs.xattrop_index_count"
 
 #define GF_GFIDLESS_LOOKUP "gfidless-lookup"
 /* replace-brick and pump related internal xattrs */
@@ -133,6 +142,7 @@
 #define RB_PUMP_CMD_ABORT       "glusterfs.pump.abort"
 #define RB_PUMP_CMD_STATUS      "glusterfs.pump.status"
 
+#define GLUSTERFS_MARKER_DONT_ACCOUNT_KEY "glusters.marker.dont-account"
 #define GLUSTERFS_RDMA_INLINE_THRESHOLD       (2048)
 #define GLUSTERFS_RDMA_MAX_HEADER_SIZE        (228) /* (sizeof (rdma_header_t)                 \
                                                        + RDMA_MAX_SEGMENTS \
@@ -165,6 +175,16 @@
  * cli
  */
 #define DEFAULT_GLUSTERD_SOCKFILE             DATADIR "/run/glusterd.socket"
+
+/* features/marker-quota also needs to have knowledge of link-files so as to
+ * exclude them from accounting.
+ */
+#define DHT_LINKFILE_MODE        (S_ISVTX)
+
+#define IS_DHT_LINKFILE_MODE(iabuf) ((st_mode_from_ia ((iabuf)->ia_prot, \
+                                                       (iabuf)->ia_type) & ~S_IFMT)\
+                                     == DHT_LINKFILE_MODE)
+#define DHT_LINKFILE_STR "linkto"
 
 /* NOTE: add members ONLY at the end (just before _MAXVALUE) */
 typedef enum {
@@ -322,6 +342,7 @@ struct _cmd_args {
         char             *log_server;
         gf_loglevel_t    log_level;
         char            *log_file;
+        char            *log_ident;
         int32_t          max_connect_attempts;
         /* advanced options */
         uint32_t         volfile_server_port;
@@ -340,12 +361,14 @@ struct _cmd_args {
         int              mac_compat;
         int              fopen_keep_cache;
         int              gid_timeout;
+        char             gid_timeout_set;
         int              aux_gfid_mount;
         struct list_head xlator_options;  /* list of xlator_option_t */
 
-        /* fuse options */
-        int              fuse_direct_io_mode;
-        char             *use_readdirp;
+	/* fuse options */
+	int              fuse_direct_io_mode;
+	char             *use_readdirp;
+        int              no_root_squash;
         int              volfile_check;
         double           fuse_entry_timeout;
         double           fuse_negative_timeout;
@@ -435,7 +458,6 @@ struct _glusterfs_ctx {
 
         int                 daemon_pipe[2];
 
-        struct client_disconnect *client_disconnect;
         struct clienttable *clienttable;
 };
 typedef struct _glusterfs_ctx glusterfs_ctx_t;

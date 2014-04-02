@@ -27,6 +27,7 @@
 #ifndef GF_BSD_HOST_OS
 #include <alloca.h>
 #endif
+#include <limits.h>
 
 void trap (void);
 
@@ -81,6 +82,11 @@ void trap (void);
 #define GF_NFS3_PORT    2049
 #define GF_CLIENT_PORT_CEILING 1024
 
+#define GF_MINUTE_IN_SECONDS 60
+#define GF_HOUR_IN_SECONDS (60*60)
+#define GF_DAY_IN_SECONDS (24*60*60)
+#define GF_WEEK_IN_SECONDS (7*24*60*60)
+
 enum _gf_boolean
 {
 	_gf_false = 0,
@@ -100,6 +106,7 @@ enum _gf_client_pid
         GF_CLIENT_PID_GSYNCD = -1,
         GF_CLIENT_PID_HADOOP = -2,
         GF_CLIENT_PID_DEFRAG = -3,
+        GF_CLIENT_PID_NO_ROOT_SQUASH = -4,
 };
 
 typedef enum _gf_boolean gf_boolean_t;
@@ -108,11 +115,13 @@ typedef int (*gf_cmp) (void *, void *);
 
 void gf_global_variable_init(void);
 
-in_addr_t gf_resolve_ip (const char *hostname, void **dnscache);
+int32_t gf_resolve_ip6 (const char *hostname, uint16_t port, int family,
+                        void **dnscache, struct addrinfo **addr_info);
 
 void gf_log_dump_graph (FILE *specfp, glusterfs_graph_t *graph);
 void gf_print_trace (int32_t signal, glusterfs_ctx_t *ctx);
 int  gf_set_log_file_path (cmd_args_t *cmd_args);
+int  gf_set_log_ident (cmd_args_t *cmd_args);
 
 #define VECTORSIZE(count) (count * (sizeof (struct iovec)))
 
@@ -174,6 +183,18 @@ int  gf_set_log_file_path (cmd_args_t *cmd_args);
                         if (string[i-1] == '/')                         \
                                 string[i-1] = '-';                      \
                 }                                                       \
+        } while (0)
+
+#define GF_REMOVE_INTERNAL_XATTR(pattern, dict)                         \
+        do {                                                            \
+                if (!dict) {                                            \
+                        gf_log (this->name, GF_LOG_ERROR,               \
+                                "dict is null");                        \
+                        break;                                          \
+                }                                                       \
+                dict_foreach_fnmatch (dict, pattern,                    \
+                                      dict_remove_foreach_fn,           \
+                                      NULL);                            \
         } while (0)
 
 #define GF_IF_INTERNAL_XATTR_GOTO(pattern, dict, op_errno, label)       \
@@ -240,6 +261,8 @@ union gf_sock_union {
 };
 
 #define GF_HIDDEN_PATH ".glusterfs"
+
+#define IOV_MIN(n) min(IOV_MAX,n)
 
 static inline void
 iov_free (struct iovec *vector, int count)
@@ -594,5 +617,16 @@ int gf_thread_create (pthread_t *thread, const pthread_attr_t *attr,
 size_t backtrace(void **, size_t);
 char **backtrace_symbols(void *const *, size_t);
 #endif
+
+gf_boolean_t
+gf_is_service_running (char *pidfile, int *pid);
+int
+gf_skip_header_section (int fd, int header_len);
+
+struct iatt;
+struct _dict;
+
+inline gf_boolean_t
+dht_is_linkfile (struct iatt *buf, struct _dict *dict);
 
 #endif /* _COMMON_UTILS_H */

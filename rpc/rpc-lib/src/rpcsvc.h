@@ -38,7 +38,8 @@
 #define MAX_IOVEC 16
 #endif
 
-#define RPCSVC_DEFAULT_OUTSTANDING_RPC_LIMIT 64
+#define RPCSVC_DEFAULT_OUTSTANDING_RPC_LIMIT 64 /* Default for protocol/server */
+#define RPCSVC_DEF_NFS_OUTSTANDING_RPC_LIMIT 16 /* Default for nfs/server */
 #define RPCSVC_MAX_OUTSTANDING_RPC_LIMIT 65536
 #define RPCSVC_MIN_OUTSTANDING_RPC_LIMIT 0 /* No limit i.e. Unlimited */
 
@@ -282,14 +283,15 @@ struct rpcsvc_request {
                 int gidcount = 0;                                       \
                 if (req->svc->root_squash) {                            \
                         if (req->uid == RPC_ROOT_UID)                   \
-                                req->uid = RPC_NOBODY_UID;              \
+                                req->uid = req->svc->anonuid;           \
                         if (req->gid == RPC_ROOT_GID)                   \
-                                req->gid = RPC_NOBODY_GID;              \
+                                req->gid = req->svc->anongid;           \
+                                                                        \
                         for (gidcount = 0; gidcount < req->auxgidcount; \
                              ++gidcount) {                              \
                                 if (!req->auxgids[gidcount])            \
                                         req->auxgids[gidcount] =        \
-                                                RPC_NOBODY_GID;         \
+                                                req->svc->anongid;      \
                         }                                               \
                 }                                                       \
         } while (0);
@@ -553,7 +555,7 @@ struct rpcsvc_auth_list {
 };
 
 extern int
-rpcsvc_auth_request_init (rpcsvc_request_t *req);
+rpcsvc_auth_request_init (rpcsvc_request_t *req, struct rpc_msg *callmsg);
 
 extern int
 rpcsvc_auth_init (rpcsvc_t *svc, dict_t *options);
@@ -597,7 +599,7 @@ rpcsvc_set_addr_namelookup (rpcsvc_t *svc, dict_t *options);
 int
 rpcsvc_set_root_squash (rpcsvc_t *svc, dict_t *options);
 int
-rpcsvc_set_outstanding_rpc_limit (rpcsvc_t *svc, dict_t *options);
+rpcsvc_set_outstanding_rpc_limit (rpcsvc_t *svc, dict_t *options, int defvalue);
 int
 rpcsvc_auth_array (rpcsvc_t *svc, char *volname, int *autharr, int arrlen);
 rpcsvc_vector_sizer

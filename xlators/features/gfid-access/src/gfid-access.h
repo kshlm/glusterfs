@@ -44,8 +44,7 @@
                         if (ret)                                        \
                                 goto lbl;                               \
                         tmp_inode = (inode_t *)value;                   \
-                        unref = inode_ref (tmp_inode);                  \
-                        l->parent = tmp_inode;                          \
+                        l->parent = inode_ref (tmp_inode);                          \
                         /* if parent is virtual, no need to handle */   \
                         /* loc->inode */                                \
                         break;                                          \
@@ -59,8 +58,7 @@
                         if (ret)                                        \
                                 goto lbl;                               \
                         tmp_inode = (inode_t *)value;                   \
-                        unref = inode_ref (tmp_inode);                  \
-                        l->inode = tmp_inode;                           \
+                        l->inode = inode_ref (tmp_inode);                           \
                 }                                                       \
                                                                         \
         } while (0)
@@ -124,5 +122,13 @@ struct ga_private {
         struct mem_pool *heal_args_pool;
 };
 typedef struct ga_private ga_private_t;
+
+struct __ga_local {
+        call_frame_t *orig_frame;
+        unsigned int uid;
+        unsigned int gid;
+        loc_t loc;
+};
+typedef struct __ga_local ga_local_t;
 
 #endif /* __GFID_ACCESS_H__ */

@@ -1421,8 +1421,11 @@ static int32_t prune_write(call_frame_t *frame,
 					gf_crypt_mt_data);
 
 	if (local->vec.iov_base == NULL) {
+	        gf_log(this->name, GF_LOG_WARNING,
+                       "Failed to calloc head block for prune");
 		local->op_ret = -1;
 		local->op_errno = ENOMEM;
+	        goto put_one_call;
 	}
 	for (i = 0; i < count; i++) {
 		to_copy = vec[i].iov_len;
@@ -3274,15 +3277,15 @@ static int32_t linkop_grab_local(call_frame_t *frame,
 	if (newloc) {
 		local->newloc = GF_CALLOC(1, sizeof(*newloc), gf_crypt_mt_loc);
 		if (!local->newloc) {
-			GF_FREE(local->loc);
 			loc_wipe(local->loc);
+			GF_FREE(local->loc);
 			goto error;
 		}
 		memset(local->newloc, 0, sizeof(*local->newloc));
 		ret = loc_copy(local->newloc, newloc);
 		if (ret) {
-			GF_FREE(local->loc);
 			loc_wipe(local->loc);
+			GF_FREE(local->loc);
 			GF_FREE(local->newloc);
 			goto error;
 		}
@@ -3294,19 +3297,21 @@ static int32_t linkop_grab_local(call_frame_t *frame,
 		goto error;
 	}
 	return 0;
- error:
-	if (local->xdata)
-		dict_unref(local->xdata);
-	if (local->fd)
-		fd_unref(local->fd);
-	local->fd = 0;
-	local->loc = NULL;
-	local->newloc = NULL;
 
-	local->op_ret = -1;
-	local->op_errno = ret;
+error:
+        if (local) {
+                if (local->xdata)
+                        dict_unref(local->xdata);
+                if (local->fd)
+                        fd_unref(local->fd);
+                local->fd = 0;
+                local->loc = NULL;
+                local->newloc = NULL;
+                local->op_ret = -1;
+                local->op_errno = ret;
+        }
 
-	return ret;
+        return ret;
 }
 
 /*
@@ -4373,6 +4378,25 @@ static void crypt_free_private(xlator_t *this)
 		memset(priv, 0, sizeof(*priv));
 		GF_FREE(priv);
 	}
+}
+
+int32_t
+mem_acct_init (xlator_t *this)
+{
+        int     ret = -1;
+
+        if (!this)
+                return ret;
+
+        ret = xlator_mem_acct_init (this, gf_crypt_mt_end);
+
+        if (ret != 0) {
+                gf_log(this->name, GF_LOG_ERROR, "Memory accounting init"
+                       "failed");
+                return ret;
+        }
+
+        return ret;
 }
 
 int32_t reconfigure (xlator_t *this, dict_t *options)

@@ -2317,6 +2317,16 @@ fuse_flush (xlator_t *this, fuse_in_header_t *finh, void *msg)
         return;
 }
 
+int
+fuse_internal_release (xlator_t *this, fd_t *fd)
+{
+        //This is a place holder function to prevent "xlator does not implement
+        //release_cbk" Warning log.
+        //Actual release happens as part of fuse_release which gets executed
+        //when kernel fuse sends it.
+        return 0;
+}
+
 static void
 fuse_release (xlator_t *this, fuse_in_header_t *finh, void *msg)
 {
@@ -3048,7 +3058,7 @@ fuse_setxattr (xlator_t *this, fuse_in_header_t *finh, void *msg)
                 return;
         }
 
-        if (!strcmp (GFID_XATTR_KEY, name)) {
+        if (!strcmp (GFID_XATTR_KEY, name) || !strcmp (GF_XATTR_VOL_ID_KEY, name)) {
                 send_fuse_err (this, finh, EPERM);
                 GF_FREE (finh);
                 return;
@@ -3364,8 +3374,6 @@ fuse_getxattr (xlator_t *this, fuse_in_header_t *finh, void *msg)
                 }
         }
 
-        GET_STATE (this, finh, state);
-
         fuse_resolve_inode_init (state, &state->resolve, finh->nodeid);
 
         rv = fuse_flip_xattr_ns (priv, name, &newkey);
@@ -3488,7 +3496,7 @@ fuse_removexattr (xlator_t *this, fuse_in_header_t *finh, void *msg)
         int32_t       ret = -1;
         char *newkey = NULL;
 
-        if (!strcmp (GFID_XATTR_KEY, name)) {
+        if (!strcmp (GFID_XATTR_KEY, name) || !strcmp (GF_XATTR_VOL_ID_KEY, name)) {
                 send_fuse_err (this, finh, EPERM);
                 GF_FREE (finh);
                 return;
@@ -4018,12 +4026,14 @@ fuse_nameless_lookup (xlator_t *xl, uuid_t gfid, loc_t *loc)
         inode_t     *linked_inode = NULL;
 
         if ((loc == NULL) || (xl == NULL)) {
+                ret = -EINVAL;
                 goto out;
         }
 
         if (loc->inode == NULL) {
                 loc->inode = inode_new (xl->itable);
                 if (loc->inode == NULL) {
+                        ret = -ENOMEM;
                         goto out;
                 }
         }
@@ -4032,13 +4042,13 @@ fuse_nameless_lookup (xlator_t *xl, uuid_t gfid, loc_t *loc)
 
         xattr_req = dict_new ();
         if (xattr_req == NULL) {
+                ret = -ENOMEM;
                 goto out;
         }
 
         ret = syncop_lookup (xl, loc, xattr_req, &iatt, NULL, NULL);
-        if (ret < 0) {
+        if (ret < 0)
                 goto out;
-        }
 
         linked_inode = inode_link (loc->inode, NULL, NULL, &iatt);
         inode_unref (loc->inode);
@@ -4087,9 +4097,10 @@ fuse_migrate_fd_open (xlator_t *this, fd_t *basefd, fd_t *oldfd,
                                 "name-less lookup of gfid (%s) failed (%s)"
                                 "(old-subvolume:%s-%d new-subvolume:%s-%d)",
                                 uuid_utoa (basefd->inode->gfid),
-                                strerror (errno),
+                                strerror (-ret),
                                 old_subvol->name, old_subvol->graph->id,
                                 new_subvol->name, new_subvol->graph->id);
+                        ret = -1;
                         goto out;
                 }
 
@@ -4107,6 +4118,7 @@ fuse_migrate_fd_open (xlator_t *this, fd_t *basefd, fd_t *oldfd,
                         uuid_utoa (loc.inode->gfid),
                         old_subvol->name, old_subvol->graph->id,
                         new_subvol->name, new_subvol->graph->id);
+                ret = -1;
                 goto out;
         }
 
@@ -4130,9 +4142,10 @@ fuse_migrate_fd_open (xlator_t *this, fd_t *basefd, fd_t *oldfd,
                 gf_log ("glusterfs-fuse", GF_LOG_WARNING,
                         "open on basefd (ptr:%p inode-gfid:%s) failed (%s)"
                         "(old-subvolume:%s-%d new-subvolume:%s-%d)", basefd,
-                        uuid_utoa (basefd->inode->gfid), strerror (errno),
+                        uuid_utoa (basefd->inode->gfid), strerror (-ret),
                         old_subvol->name, old_subvol->graph->id,
                         new_subvol->name, new_subvol->graph->id);
+                ret = -1;
                 goto out;
         }
 
@@ -4200,6 +4213,7 @@ fuse_migrate_locks (xlator_t *this, fd_t *basefd, fd_t *oldfd,
 			oldfd, newfd, uuid_utoa (newfd->inode->gfid),
 			old_subvol->name, old_subvol->graph->id,
 			new_subvol->name, new_subvol->graph->id);
+                ret = -1;
                 goto out;
         }
 
@@ -4225,6 +4239,7 @@ fuse_migrate_locks (xlator_t *this, fd_t *basefd, fd_t *oldfd,
 			oldfd, newfd, uuid_utoa (newfd->inode->gfid),
 			old_subvol->name, old_subvol->graph->id,
 			new_subvol->name, new_subvol->graph->id);
+                ret = -1;
                 goto out;
         }
 
@@ -4292,10 +4307,11 @@ fuse_migrate_fd (xlator_t *this, fd_t *basefd, xlator_t *old_subvol,
                                 "syncop_fsync failed (%s) on fd (%p)"
                                 "(basefd:%p basefd-inode.gfid:%s) "
                                 "(old-subvolume:%s-%d new-subvolume:%s-%d)",
-                                strerror (errno), oldfd, basefd,
+                                strerror (-ret), oldfd, basefd,
                                 uuid_utoa (basefd->inode->gfid),
                                 old_subvol->name, old_subvol->graph->id,
                                 new_subvol->name, new_subvol->graph->id);
+                        ret = -1;
                 }
         } else {
                 gf_log ("glusterfs-fuse", GF_LOG_WARNING,
@@ -4896,9 +4912,10 @@ dump_history_fuse (circular_buffer_t *cb, void *data)
 int
 fuse_graph_setup (xlator_t *this, glusterfs_graph_t *graph)
 {
-        inode_table_t  *itable = NULL;
-        int             ret = 0;
-        fuse_private_t *priv = NULL;
+        inode_table_t     *itable     = NULL;
+        int                ret        = 0, winds = 0;
+        fuse_private_t    *priv       = NULL;
+        glusterfs_graph_t *prev_graph = NULL;
 
         priv = this->private;
 
@@ -4919,12 +4936,29 @@ fuse_graph_setup (xlator_t *this, glusterfs_graph_t *graph)
 
         pthread_mutex_lock (&priv->sync_mutex);
         {
-                priv->next_graph = graph;
-                priv->event_recvd = 0;
+                prev_graph = priv->next_graph;
 
-                pthread_cond_signal (&priv->sync_cond);
+                if ((prev_graph != NULL) && (prev_graph->id > graph->id)) {
+                        /* there was a race and an old graph was initialised
+                         * before new one.
+                         */
+                        prev_graph = graph;
+                } else {
+                        priv->next_graph = graph;
+                        priv->event_recvd = 0;
+
+                        pthread_cond_signal (&priv->sync_cond);
+                }
+
+                if (prev_graph != NULL)
+                        winds = ((xlator_t *)prev_graph->top)->winds;
         }
         pthread_mutex_unlock (&priv->sync_mutex);
+
+        if ((prev_graph != NULL) && (winds == 0)) {
+                xlator_notify (prev_graph->top, GF_EVENT_PARENT_DOWN,
+                               prev_graph->top, NULL);
+        }
 
         gf_log ("fuse", GF_LOG_INFO, "switched to graph %d",
                 ((graph) ? graph->id : 0));
@@ -5289,6 +5323,18 @@ init (xlator_t *this_xl)
         GF_OPTION_INIT ("congestion-threshold", priv->congestion_threshold,
                         int32, cleanup_exit);
 
+        GF_OPTION_INIT("no-root-squash", priv->no_root_squash, bool,
+                       cleanup_exit);
+        /* change the client_pid to no-root-squash pid only if the
+           client is none of defrag process, hadoop access and gsyncd process.
+        */
+        if (!priv->client_pid_set) {
+                if (priv->no_root_squash == _gf_true) {
+                        priv->client_pid_set = _gf_true;
+                        priv->client_pid = GF_CLIENT_PID_NO_ROOT_SQUASH;
+                }
+        }
+
         /* user has set only background-qlen, not congestion-threshold,
            use the fuse kernel driver formula to set congestion. ie, 75% */
         if (dict_get (this_xl->options, "background-qlen") &&
@@ -5442,6 +5488,7 @@ struct xlator_fops fops;
 struct xlator_cbks cbks = {
         .invalidate = fuse_invalidate,
         .forget     = fuse_forget_cbk,
+        .release    = fuse_internal_release
 };
 
 
@@ -5527,6 +5574,16 @@ struct volume_options options[] = {
         { .key = {"use-readdirp"},
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "yes"
+        },
+        { .key = {"no-root-squash"},
+          .type = GF_OPTION_TYPE_BOOL,
+          .default_value = "false",
+          .description = "This is the mount option for disabling the "
+          "root squash for the client irrespective of whether the root-squash "
+          "option for the volume is set or not. But this option is honoured "
+          "only for the trusted clients. For non trusted clients this value "
+          "does not have any affect and the volume option for root-squash is "
+          "honoured.",
         },
         { .key = {NULL} },
 };

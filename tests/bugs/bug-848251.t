@@ -32,17 +32,17 @@ function quota_list(){
 TEST   name=":d1"
 #file name containing ':' in the start
 TEST   set_quota
-EXPECT "0Bytes" quota_list
+EXPECT "80%" quota_list
 
 TEST   name=":d1/d:1"
 #file name containing ':' in between
 TEST   set_quota
-EXPECT "0Bytes" quota_list
+EXPECT "80%" quota_list
 
 TEST   name=":d1/d:1/d1:"
 #file name containing ':' in the end
 TEST   set_quota
-EXPECT "0Bytes" quota_list
+EXPECT "80%" quota_list
 
 TEST   umount $MOUNTDIR
 TEST   rm -rf $MOUNTDIR

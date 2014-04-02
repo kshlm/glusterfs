@@ -104,7 +104,9 @@ AC_CONFIG_FILES([Makefile
 		xlators/features/changelog/lib/Makefile
 		xlators/features/changelog/lib/src/Makefile
                 xlators/features/glupy/Makefile
+                xlators/features/glupy/examples/Makefile
                 xlators/features/glupy/src/Makefile
+                xlators/features/glupy/src/setup.py
                 xlators/features/locks/Makefile
                 xlators/features/locks/src/Makefile
                 xlators/features/quota/Makefile
@@ -162,6 +164,15 @@ AC_CONFIG_FILES([Makefile
                 extras/ocf/volume
                 extras/LinuxRPM/Makefile
                 extras/geo-rep/Makefile
+                extras/hook-scripts/add-brick/Makefile
+                extras/hook-scripts/add-brick/pre/Makefile
+                extras/hook-scripts/add-brick/post/Makefile
+                extras/hook-scripts/start/Makefile
+                extras/hook-scripts/start/post/Makefile
+                extras/hook-scripts/set/Makefile
+                extras/hook-scripts/set/post/Makefile
+                extras/hook-scripts/stop/Makefile
+                extras/hook-scripts/stop/pre/Makefile
                 contrib/fuse-util/Makefile
                 contrib/uuid/uuid_types.h
                 glusterfs-api.pc
@@ -169,6 +180,7 @@ AC_CONFIG_FILES([Makefile
                 api/Makefile
                 api/src/Makefile
                 api/examples/Makefile
+                api/examples/__init__.py
                 api/examples/setup.py
 		geo-replication/Makefile
 		geo-replication/src/Makefile
@@ -180,6 +192,18 @@ AC_CANONICAL_HOST
 AC_PROG_CC
 AC_DISABLE_STATIC
 AC_PROG_LIBTOOL
+
+# Initialize CFLAGS before usage
+AC_ARG_ENABLE([debug],
+              AC_HELP_STRING([--enable-debug],
+                             [Enable debug build options.]))
+if test "x$enable_debug" = "xyes"; then
+        BUILD_DEBUG=yes
+        CFLAGS="${CFLAGS} -g -O0 -DDEBUG"
+else
+        BUILD_DEBUG=no
+        CFLAGS="${CFLAGS} -g -O2"
+fi
 
 AC_ARG_WITH(pkgconfigdir,
             [  --with-pkgconfigdir=DIR      pkgconfig file in DIR @<:@LIBDIR/pkgconfig@:>@],
@@ -562,10 +586,18 @@ if test "x$enable_xml_output" != "xno"; then
     if test "x${no_xml}" = "x"; then
         AC_DEFINE([HAVE_LIB_XML], [1], [Define to 1 if using libxml2.])
     else
-        AC_MSG_WARN([libxml2 devel libraries not found disabling XML support])
-        BUILD_XML_OUTPUT="no"
+	if test "x$enable_georeplication" != "xno"; then
+           AC_MSG_ERROR([libxml2 devel libraries not found])
+	else
+	   AC_MSG_WARN([libxml2 devel libraries not found disabling XML support])
+           BUILD_XML_OUTPUT="no"
+	fi
+
     fi
 else
+    if test "x$enable_georeplication" != "xno"; then
+       AC_MSG_ERROR([geo-replication requires xml output])
+    fi
     BUILD_XML_OUTPUT="no"
 fi
 # end of xml-output
@@ -595,7 +627,7 @@ dnl FreeBSD, NetBSD
 AC_CHECK_MEMBERS([struct stat.st_atimespec.tv_nsec])
 case $host_os in
         *netbsd*)
-        CFLAGS+=" -D_INCOMPLETE_XOPEN_C063"
+        CFLAGS="${CFLAGS} -D_INCOMPLETE_XOPEN_C063"
         ;;
 esac
 AC_CHECK_FUNC([linkat], [have_linkat=yes])
@@ -693,14 +725,14 @@ fi
 case $host_os in
      linux*)
         GF_HOST_OS="GF_LINUX_HOST_OS"
-        GF_CFLAGS="${ARGP_STANDALONE_CPPFLAGS} -O0"
+        GF_CFLAGS="${ARGP_STANDALONE_CPPFLAGS}"
         GF_GLUSTERFS_CFLAGS="${GF_CFLAGS}"
         GF_LDADD="${ARGP_STANDALONE_LDADD}"
         GF_FUSE_CFLAGS="-DFUSERMOUNT_DIR=\\\"\$(bindir)\\\""
         ;;
      solaris*)
         GF_HOST_OS="GF_SOLARIS_HOST_OS"
-        GF_CFLAGS="${ARGP_STANDALONE_CPPFLAGS} -D_REENTRANT -D_POSIX_PTHREAD_SEMANTICS -O0 -m64"
+        GF_CFLAGS="${ARGP_STANDALONE_CPPFLAGS} -D_REENTRANT -D_POSIX_PTHREAD_SEMANTICS -m64"
         GF_LDFLAGS=""
         GF_GLUSTERFS_CFLAGS="${GF_CFLAGS}"
         GF_LDADD="${ARGP_STANDALONE_LDADD}"
@@ -724,7 +756,7 @@ case $host_os in
         ;;
      *bsd*)
         GF_HOST_OS="GF_BSD_HOST_OS"
-        GF_CFLAGS="${ARGP_STANDALONE_CPPFLAGS} -O0"
+        GF_CFLAGS="${ARGP_STANDALONE_CPPFLAGS}"
         GF_CFLAGS="${GF_CFLAGS} -DTHREAD_UNSAFE_BASENAME"
         GF_CFLAGS="${GF_CFLAGS} -DTHREAD_UNSAFE_DIRNAME"
         GF_GLUSTERFS_CFLAGS="${GF_CFLAGS}"
@@ -737,10 +769,10 @@ case $host_os in
      darwin*)
         GF_HOST_OS="GF_DARWIN_HOST_OS"
         LIBTOOL=glibtool
-        GF_CFLAGS="${ARGP_STANDALONE_CPPFLAGS} -D__DARWIN_64_BIT_INO_T -bundle -undefined suppress -flat_namespace -D_XOPEN_SOURCE -O0"
+        GF_CFLAGS="${ARGP_STANDALONE_CPPFLAGS} -D__DARWIN_64_BIT_INO_T -bundle -undefined suppress -flat_namespace -D_XOPEN_SOURCE"
         GF_CFLAGS="${GF_CFLAGS} -DTHREAD_UNSAFE_BASENAME"
         GF_CFLAGS="${GF_CFLAGS} -DTHREAD_UNSAFE_DIRNAME"
-        GF_GLUSTERFS_CFLAGS="${ARGP_STANDALONE_CPPFLAGS} -D__DARWIN_64_BIT_INO_T -undefined suppress -flat_namespace -O0"
+        GF_GLUSTERFS_CFLAGS="${ARGP_STANDALONE_CPPFLAGS} -D__DARWIN_64_BIT_INO_T -undefined suppress -flat_namespace"
         GF_LDADD="${ARGP_STANDALONE_LDADD}"
         GF_FUSE_CFLAGS="-I\$(CONTRIBDIR)/macfuse"
         ;;
@@ -750,16 +782,6 @@ esac
 AC_ARG_ENABLE([debug],
               AC_HELP_STRING([--enable-debug],
                              [Enable debug build options.]))
-
-BUILD_DEBUG=no
-if test "x$enable_debug" = "xyes"; then
-   BUILD_DEBUG=yes
-   CFLAGS=`echo $CFLAGS | sed -e s/O2/O0/`
-else
-   BUILD_DEBUG=no
-fi
-AC_SUBST(CFLAGS)
-# end enable debug section
 
 # syslog section
 AC_ARG_ENABLE([syslog],
@@ -802,6 +824,8 @@ AM_PATH_PYTHON()
 if echo $PYTHON_VERSION | grep ^2; then
   have_python2=yes
 fi
+
+# Save flags before testing python
 saved_CFLAGS=$CFLAGS
 saved_CPPFLAGS=$CPPFLAGS
 saved_LDFLAGS=$LDFLAGS
@@ -816,9 +840,12 @@ case x$enable_glupy in
    xyes)
       if test "x$have_python2" = "xyes" -a "x$have_Python_h" = "xyes"; then
          BUILD_GLUPY=yes
-         saved_CFLAGS="$saved_CFLAGS $CFLAGS"
-         saved_CPPFLAGS="$saved_CPPFLAGS $CPPFLAGS"
-         saved_LDFLAGS="$saved_LDFLAGS $LDFLAGS"
+        PYTHONDEV_CFLAGS="$CFLAGS"
+        PYTHONDEV_CPPFLAGS="$CPPFLAGS"
+        PYTHONDEV_LDFLAGS="$LDFLAGS"
+        AC_SUBST(PYTHONDEV_CFLAGS)
+        AC_SUBST(PYTHONDEV_CPPFLAGS)
+        AC_SUBST(PYTHONDEV_LDFLAGS)
       else
          AC_MSG_ERROR([glupy requires python-devel/python-dev package and python2.x])
       fi
@@ -828,9 +855,12 @@ case x$enable_glupy in
    *)
       if test "x$have_python2" = "xyes" -a "x$have_Python_h" = "xyes"; then
          BUILD_GLUPY=yes
-         saved_CFLAGS="$saved_CFLAGS $CFLAGS"
-         saved_CPPFLAGS="$saved_CPPFLAGS $CPPFLAGS"
-         saved_LDFLAGS="$saved_LDFLAGS $LDFLAGS"
+        PYTHONDEV_CFLAGS="$CFLAGS"
+        PYTHONDEV_CPPFLAGS="$CPPFLAGS"
+        PYTHONDEV_LDFLAGS="$LDFLAGS"
+        AC_SUBST(PYTHONDEV_CFLAGS)
+        AC_SUBST(PYTHONDEV_CPPFLAGS)
+        AC_SUBST(PYTHONDEV_LDFLAGS)
       else
          AC_MSG_WARN([
         ---------------------------------------------------------------------------------
@@ -839,6 +869,7 @@ case x$enable_glupy in
       fi
       ;;
 esac
+# Restore flags
 CFLAGS=$saved_CFLAGS
 CPPFLAGS=$saved_CPPFLAGS
 LDFLAGS=$saved_LDFLAGS
@@ -858,6 +889,9 @@ if test "x$BUILD_GLUPY" = "xyes"; then
 fi
 # end glupy section
 
+AC_SUBST(CFLAGS)
+# end enable debug section
+
 AC_SUBST(GF_HOST_OS)
 AC_SUBST([GF_GLUSTERFS_LIBS])
 AC_SUBST(GF_GLUSTERFS_CFLAGS)
@@ -875,13 +909,31 @@ CONTRIBDIR='$(top_srcdir)/contrib'
 AC_SUBST(CONTRIBDIR)
 
 GF_CPPDEFINES='-D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -D$(GF_HOST_OS)'
-GF_CPPINCLUDES='-I$(top_srcdir)/libglusterfs/src -I$(CONTRIBDIR)/uuid'
+GF_CPPINCLUDES='-I$(top_srcdir)/libglusterfs/src -I$(CONTRIBDIR)/uuid $(UNITTEST_CPPFLAGS)'
 GF_CPPFLAGS="$GF_CPPDEFINES $GF_CPPINCLUDES"
 AC_SUBST([GF_CPPFLAGS])
 
 AM_CONDITIONAL([GF_DARWIN_HOST_OS], test "${GF_HOST_OS}" = "GF_DARWIN_HOST_OS")
 
 AM_CONDITIONAL([GF_INSTALL_VAR_LIB_GLUSTERD], test ! -d ${localstatedir}/lib/glusterd && test -d ${sysconfdir}/glusterd )
+
+dnl pkg-config versioning
+GFAPI_VERSION="6.0.0"
+LIBGFCHANGELOG_VERSION="0.0.1"
+AC_SUBST(GFAPI_VERSION)
+AC_SUBST(LIBGFCHANGELOG_VERSION)
+
+dnl libtool versioning
+LIBGFXDR_LT_VERSION="0:1:0"
+LIBGFRPC_LT_VERSION="0:1:0"
+LIBGLUSTERFS_LT_VERSION="0:1:0"
+LIBGFCHANGELOG_LT_VERSION="0:1:0"
+GFAPI_LT_VERSION="6:0:0"
+AC_SUBST(LIBGFXDR_LT_VERSION)
+AC_SUBST(LIBGFRPC_LT_VERSION)
+AC_SUBST(LIBGLUSTERFS_LT_VERSION)
+AC_SUBST(LIBGFCHANGELOG_LT_VERSION)
+AC_SUBST(GFAPI_LT_VERSION)
 
 AC_OUTPUT
 

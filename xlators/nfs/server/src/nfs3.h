@@ -143,8 +143,6 @@ typedef struct nfs3_state {
          */
         uint64_t                iobsize;
 
-        unsigned int            memfactor;
-
         struct list_head        fdlru;
         gf_lock_t               fdlrulock;
         int                     fdcount;
@@ -282,4 +280,8 @@ nfs3svc_init (xlator_t *nfsx);
 
 extern int
 nfs3_reconfigure_state (xlator_t *nfsx, dict_t *options);
+
+extern uint64_t
+nfs3_request_xlator_deviceid (rpcsvc_request_t *req);
+
 #endif

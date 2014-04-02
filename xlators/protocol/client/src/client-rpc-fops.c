@@ -2763,7 +2763,8 @@ out:
         rsp.op_errno = op_errno;
         if (rsp.op_ret == -1) {
                 /* any error other than ENOENT */
-                if (rsp.op_errno != ENOENT)
+                if (!(local->loc.name && rsp.op_errno == ENOENT) &&
+		    !(rsp.op_errno == ESTALE))
                         gf_log (this->name, GF_LOG_WARNING,
                                 "remote operation failed: %s. Path: %s (%s)",
                                 strerror (rsp.op_errno), local->loc.path,
@@ -3067,13 +3068,13 @@ client3_3_lookup (call_frame_t *frame, xlator_t *this,
                 op_errno = ENOMEM;
                 goto unwind;
         }
+        frame->local = local;
 
         if (!(args->loc && args->loc->inode))
                 goto unwind;
 
         loc_copy (&local->loc, args->loc);
         loc_path (&local->loc, NULL);
-        frame->local = local;
 
         if (args->loc->parent) {
                 if (!uuid_is_null (args->loc->parent->gfid))
@@ -3791,13 +3792,13 @@ client3_3_mknod (call_frame_t *frame, xlator_t *this,
                 op_errno = ENOMEM;
                 goto unwind;
         }
+        frame->local = local;
 
         if (!(args->loc && args->loc->parent))
                 goto unwind;
 
         loc_copy (&local->loc, args->loc);
         loc_path (&local->loc, NULL);
-        frame->local = local;
 
         if (!uuid_is_null (args->loc->parent->gfid))
                 memcpy (req.pargfid,  args->loc->parent->gfid, 16);
@@ -3859,13 +3860,13 @@ client3_3_mkdir (call_frame_t *frame, xlator_t *this,
                 op_errno = ENOMEM;
                 goto unwind;
         }
+        frame->local = local;
 
         if (!(args->loc && args->loc->parent))
                 goto unwind;
 
         loc_copy (&local->loc, args->loc);
         loc_path (&local->loc, NULL);
-        frame->local = local;
 
         if (!uuid_is_null (args->loc->parent->gfid))
                 memcpy (req.pargfid,  args->loc->parent->gfid, 16);
@@ -3926,6 +3927,8 @@ client3_3_create (call_frame_t *frame, xlator_t *this,
                 op_errno = ENOMEM;
                 goto unwind;
         }
+        frame->local = local;
+
         if (!(args->loc && args->loc->parent))
                 goto unwind;
 
@@ -3934,7 +3937,6 @@ client3_3_create (call_frame_t *frame, xlator_t *this,
 
         loc_copy (&local->loc, args->loc);
         loc_path (&local->loc, NULL);
-        frame->local = local;
 
         if (!uuid_is_null (args->loc->parent->gfid))
                 memcpy (req.pargfid,  args->loc->parent->gfid, 16);
@@ -3997,6 +3999,8 @@ client3_3_open (call_frame_t *frame, xlator_t *this,
                 op_errno = ENOMEM;
                 goto unwind;
         }
+        frame->local = local;
+
         if (!(args->loc && args->loc->inode))
                 goto unwind;
 
@@ -4004,7 +4008,6 @@ client3_3_open (call_frame_t *frame, xlator_t *this,
         local->flags = args->flags;
         loc_copy (&local->loc, args->loc);
         loc_path (&local->loc, NULL);
-        frame->local = local;
 
         if (!uuid_is_null (args->loc->inode->gfid))
                 memcpy (req.gfid,  args->loc->inode->gfid, 16);
@@ -4387,13 +4390,14 @@ client3_3_opendir (call_frame_t *frame, xlator_t *this,
                 op_errno = ENOMEM;
                 goto unwind;
         }
+        frame->local = local;
+
         if (!(args->loc && args->loc->inode))
                 goto unwind;
 
         local->fd = fd_ref (args->fd);
         loc_copy (&local->loc, args->loc);
         loc_path (&local->loc, NULL);
-        frame->local = local;
 
         if (!uuid_is_null (args->loc->inode->gfid))
                 memcpy (req.gfid,  args->loc->inode->gfid, 16);
@@ -5250,6 +5254,7 @@ client3_3_lk (call_frame_t *frame, xlator_t *this,
                 op_errno = ENOMEM;
                 goto unwind;
         }
+        frame->local = local;
 
         CLIENT_GET_REMOTE_FD (this, args->fd, DEFAULT_REMOTE_FD,
                               remote_fd, op_errno, unwind);
@@ -5277,7 +5282,6 @@ client3_3_lk (call_frame_t *frame, xlator_t *this,
         local->owner = frame->root->lk_owner;
         local->cmd   = args->cmd;
         local->fd    = fd_ref (args->fd);
-        frame->local = local;
 
         req.fd    = remote_fd;
         req.cmd   = gf_cmd;

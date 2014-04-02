@@ -30,6 +30,8 @@
 #define glusterd_op_start_volume_args_get(dict, volname, flags) \
         glusterd_op_stop_volume_args_get (dict, volname, flags)
 
+extern int
+_get_slave_status (dict_t *this, char *key, data_t *value, void *data);
 
 int
 __glusterd_handle_create_volume (rpcsvc_request_t *req)
@@ -527,9 +529,12 @@ __glusterd_handle_cli_statedump_volume (rpcsvc_request_t *req)
         glusterd_op_t                   cli_op = GD_OP_STATEDUMP_VOLUME;
         char                            err_str[2048] = {0,};
         xlator_t                        *this = NULL;
+        glusterd_conf_t                 *priv = NULL;
 
         this = THIS;
         GF_ASSERT (this);
+        priv = this->private;
+        GF_ASSERT (priv);
 
         GF_ASSERT (req);
 
@@ -578,6 +583,14 @@ __glusterd_handle_cli_statedump_volume (rpcsvc_request_t *req)
                 goto out;
         }
 
+        if (priv->op_version == GD_OP_VERSION_MIN &&
+            strstr (options, "quotad")) {
+                snprintf (err_str, sizeof (err_str), "The cluster is operating "
+                          "at op-version 1. Taking quotad's statedump is "
+                          "disallowed in this state");
+                ret = -1;
+                goto out;
+        }
 
         gf_log (this->name, GF_LOG_INFO, "Received statedump request for "
                 "volume %s with options %s", volname, options);
@@ -812,11 +825,13 @@ glusterd_op_stage_create_volume (dict_t *dict, char **op_errstr)
                 }
 
                 if (!uuid_compare (brick_info->uuid, MY_UUID)) {
+#ifdef HAVE_BD_XLATOR
                         if (brick_info->vg[0]) {
                                 ret = glusterd_is_valid_vg (brick_info, 1, msg);
                                 if (ret)
                                         goto out;
                         }
+#endif
                         ret = glusterd_validate_and_create_brickpath (brick_info,
                                                           volume_uuid, op_errstr,
                                                           is_force);
@@ -908,7 +923,7 @@ glusterd_op_stage_start_volume (dict_t *dict, char **op_errstr)
         gf_boolean_t                            exists = _gf_false;
         glusterd_volinfo_t                      *volinfo = NULL;
         glusterd_brickinfo_t                    *brickinfo = NULL;
-        char                                    msg[2048];
+        char                                    msg[2048] = {0,};
         glusterd_conf_t                         *priv = NULL;
         xlator_t                                *this = NULL;
         uuid_t                                  volume_id = {0,};
@@ -1046,6 +1061,7 @@ glusterd_op_stage_stop_volume (dict_t *dict, char **op_errstr)
         glusterd_volinfo_t                      *volinfo = NULL;
         char                                    msg[2048] = {0};
         xlator_t                                *this = NULL;
+        gsync_status_param_t                    param = {0,};
 
         this = THIS;
         GF_ASSERT (this);
@@ -1089,7 +1105,22 @@ glusterd_op_stage_stop_volume (dict_t *dict, char **op_errstr)
         if (ret && (is_run == _gf_false))
                 gf_log (this->name, GF_LOG_WARNING, "Unable to get the status"
                         " of active "GEOREP" session");
-        if (is_run) {
+
+        param.volinfo = volinfo;
+        ret = dict_foreach (volinfo->gsync_slaves, _get_slave_status, &param);
+
+        if (ret) {
+                gf_log (this->name, GF_LOG_WARNING, "_get_slave_satus failed");
+                snprintf (msg, sizeof(msg), GEOREP" Unable to get the status "
+                          "of active "GEOREP" session for the volume '%s'.\n"
+                          "Please check the log file for more info. Use "
+                          "'force' option to ignore and stop the volume.",
+                          volname);
+                ret = -1;
+                goto out;
+        }
+
+        if (is_run && param.is_active) {
                 gf_log (this->name, GF_LOG_WARNING, GEOREP" sessions active"
                         "for the volume %s ", volname);
                 snprintf (msg, sizeof(msg), GEOREP" sessions are active "
@@ -1312,6 +1343,13 @@ glusterd_op_stage_statedump_volume (dict_t *dict, char **op_errstr)
         gf_boolean_t            is_running = _gf_false;
         glusterd_volinfo_t      *volinfo = NULL;
         char                    msg[2408] = {0,};
+        xlator_t                *this     = NULL;
+        glusterd_conf_t         *priv     = NULL;
+
+        this = THIS;
+        GF_ASSERT (this);
+        priv = this->private;
+        GF_ASSERT (priv);
 
         ret = glusterd_op_statedump_volume_args_get (dict, &volname, &options,
                                                      &option_cnt);
@@ -1320,10 +1358,7 @@ glusterd_op_stage_statedump_volume (dict_t *dict, char **op_errstr)
 
         ret = glusterd_volinfo_find (volname, &volinfo);
         if (ret) {
-                snprintf (msg, sizeof(msg), "Volume %s does not exist",
-                          volname);
-                gf_log ("", GF_LOG_ERROR, "%s", msg);
-                *op_errstr = gf_strdup (msg);
+                snprintf (msg, sizeof(msg), FMTSTR_CHECK_VOL_EXISTS, volname);
                 goto out;
         }
 
@@ -1333,16 +1368,31 @@ glusterd_op_stage_statedump_volume (dict_t *dict, char **op_errstr)
 
         is_running = glusterd_is_volume_started (volinfo);
         if (!is_running) {
-                snprintf (msg, sizeof(msg), "Volume %s is not in a started"
+                snprintf (msg, sizeof(msg), "Volume %s is not in the started"
                           " state", volname);
-                gf_log ("", GF_LOG_ERROR, "%s", msg);
-                *op_errstr = gf_strdup (msg);
                 ret = -1;
                 goto out;
         }
 
+        if (priv->op_version == GD_OP_VERSION_MIN &&
+            strstr (options, "quotad")) {
+                snprintf (msg, sizeof (msg), "The cluster is operating "
+                          "at op-version 1. Taking quotad's statedump is "
+                          "disallowed in this state");
+                ret = -1;
+                goto out;
+        }
+        if ((strstr (options, "quotad")) &&
+            (!glusterd_is_volume_quota_enabled (volinfo))) {
+                    snprintf (msg, sizeof (msg), "Quota is not enabled on "
+                              "volume %s", volname);
+                    ret = -1;
+                    goto out;
+        }
 out:
-        gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
+        if (ret && msg[0] != '\0')
+                *op_errstr = gf_strdup (msg);
+        gf_log (this->name, GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
 
@@ -1438,6 +1488,7 @@ glusterd_op_create_volume (dict_t *dict, char **op_errstr)
         char                 *username   = NULL;
         char                 *password   = NULL;
         int                   caps       = 0;
+        int                   brickid    = 0;
         char                  msg[1024] __attribute__((unused)) = {0, };
 
         this = THIS;
@@ -1603,10 +1654,16 @@ glusterd_op_create_volume (dict_t *dict, char **op_errstr)
                 brick = strtok_r (brick_list+1, " \n", &saveptr);
         caps = CAPS_BD | CAPS_THIN | CAPS_OFFLOAD_COPY | CAPS_OFFLOAD_SNAPSHOT;
 
+        brickid = glusterd_get_next_available_brickid (volinfo);
+        if (brickid < 0)
+                goto out;
         while ( i <= count) {
                 ret = glusterd_brickinfo_new_from_brick (brick, &brickinfo);
                 if (ret)
                         goto out;
+
+                GLUSTERD_ASSIGN_BRICKID_TO_BRICKINFO (brickinfo, volinfo,
+                                                      brickid++);
 
                 ret = glusterd_resolve_brick (brickinfo);
                 if (ret) {
@@ -1658,13 +1715,14 @@ glusterd_op_create_volume (dict_t *dict, char **op_errstr)
         }
 
         volinfo->rebal.defrag_status = 0;
-        list_add_tail (&volinfo->vol_list, &priv->volumes);
+        list_add_order (&volinfo->vol_list, &priv->volumes,
+                         glusterd_compare_volume_name);
         vol_added = _gf_true;
 
 out:
         GF_FREE(free_ptr);
         if (!vol_added && volinfo)
-                glusterd_volinfo_delete (volinfo);
+                glusterd_volinfo_unref (volinfo);
         return ret;
 }
 
@@ -1724,6 +1782,9 @@ glusterd_op_stop_volume (dict_t *dict)
         glusterd_volinfo_t                      *volinfo = NULL;
         glusterd_brickinfo_t                    *brickinfo = NULL;
         xlator_t                                *this = NULL;
+        char                                    mountdir[PATH_MAX] = {0,};
+        runner_t                                runner = {0,};
+        char                                    pidfile[PATH_MAX] = {0,};
 
         this = THIS;
         GF_ASSERT (this);
@@ -1750,6 +1811,30 @@ glusterd_op_stop_volume (dict_t *dict)
         ret = glusterd_store_volinfo (volinfo, GLUSTERD_VOLINFO_VER_AC_INCREMENT);
         if (ret)
                 goto out;
+
+        /* If quota auxiliary mount is present, unmount it */
+        GLUSTERFS_GET_AUX_MOUNT_PIDFILE (pidfile, volname);
+
+        if (!gf_is_service_running (pidfile, NULL)) {
+                gf_log (this->name, GF_LOG_DEBUG, "Aux mount of volume %s "
+                        "absent", volname);
+        } else {
+                GLUSTERD_GET_QUOTA_AUX_MOUNT_PATH (mountdir, volname, "/");
+
+                runinit (&runner);
+                runner_add_args (&runner, "umount",
+
+                #if GF_LINUX_HOST_OS
+                                "-l",
+                #endif
+                                mountdir, NULL);
+                ret = runner_run_reuse (&runner);
+                if (ret)
+                        gf_log (this->name, GF_LOG_ERROR, "umount on %s failed, "
+                                "reason : %s", mountdir, strerror (errno));
+
+                runner_end (&runner);
+        }
 
         ret = glusterd_nodesvcs_handle_graph_change (volinfo);
 out:
@@ -1782,6 +1867,10 @@ glusterd_op_delete_volume (dict_t *dict)
                         volname);
                 goto out;
         }
+
+        ret = glusterd_remove_auxiliary_mount (volname);
+        if (ret)
+                goto out;
 
         ret = glusterd_delete_volume (volinfo);
 out:
@@ -1819,6 +1908,12 @@ glusterd_op_statedump_volume (dict_t *dict, char **op_errstr)
         gf_log ("", GF_LOG_DEBUG, "Performing statedump on volume %s", volname);
         if (strstr (options, "nfs") != NULL) {
                 ret = glusterd_nfs_statedump (options, option_cnt, op_errstr);
+                if (ret)
+                        goto out;
+
+        } else if (strstr (options, "quotad")) {
+                ret = glusterd_quotad_statedump (options, option_cnt,
+                                                 op_errstr);
                 if (ret)
                         goto out;
         } else {

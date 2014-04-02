@@ -20,7 +20,7 @@ from ipaddr import IPAddress, IPNetwork
 from gconf import gconf
 from syncdutils import FreeObject, norm, grabpidfile, finalize, log_raise_exception
 from syncdutils import GsyncdError, select, set_term_handler, privileged, update_file
-from configinterface import GConffile
+from configinterface import GConffile, upgrade_config_file
 import resource
 from monitor import monitor
 
@@ -191,6 +191,7 @@ def main_i():
     op.add_option('--log-file-mbr',        metavar='LOGF',  type=str, action='callback', callback=store_abs)
     op.add_option('--state-file',          metavar='STATF', type=str, action='callback', callback=store_abs)
     op.add_option('--state-detail-file',   metavar='STATF', type=str, action='callback', callback=store_abs)
+    op.add_option('--georep-session-working-dir', metavar='STATF', type=str, action='callback', callback=store_abs)
     op.add_option('--ignore-deletes',      default=False, action='store_true')
     op.add_option('--isolated-slave',      default=False, action='store_true')
     op.add_option('--use-rsync-xattrs',    default=False, action='store_true')
@@ -202,6 +203,7 @@ def main_i():
     op.add_option('--local-id',            metavar='ID',    help=SUPPRESS_HELP, default='')
     op.add_option('--local-path',          metavar='PATH',  help=SUPPRESS_HELP, default='')
     op.add_option('-s', '--ssh-command',   metavar='CMD',   default='ssh')
+    op.add_option('--ssh-command-tar',     metavar='CMD',   default='ssh')
     op.add_option('--rsync-command',       metavar='CMD',   default='rsync')
     op.add_option('--rsync-options',       metavar='OPTS',  default='')
     op.add_option('--rsync-ssh-options',   metavar='OPTS',  default='--compress')
@@ -228,6 +230,7 @@ def main_i():
     op.add_option('--change-interval', metavar='SEC', type=int, default=3)
     # working directory for changelog based mechanism
     op.add_option('--working-dir', metavar='DIR', type=str, action='callback', callback=store_abs)
+    op.add_option('--use-tarssh', default=False, action='store_true')
 
     op.add_option('-c', '--config-file',   metavar='CONF',  type=str, action='callback', callback=store_local)
     # duh. need to specify dest or value will be mapped to None :S
@@ -368,6 +371,8 @@ def main_i():
                     namedict['remotehost'] = x.remotehost
     if not 'config_file' in rconf:
         rconf['config_file'] = os.path.join(os.path.dirname(sys.argv[0]), "conf/gsyncd_template.conf")
+
+    upgrade_config_file(rconf['config_file'])
     gcnf = GConffile(rconf['config_file'], canon_peers, defaults.__dict__, opts.__dict__, namedict)
 
     checkpoint_change = False
@@ -474,8 +479,15 @@ def main_i():
             GLogger._gsyncd_loginit(log_file=gconf.log_file, label='conf')
             if confdata.op == 'set':
                 logging.info('checkpoint %s set' % confdata.val)
+                gcnf.delete('checkpoint_completed')
+                gcnf.delete('checkpoint_target')
             elif confdata.op == 'del':
                 logging.info('checkpoint info was reset')
+                # if it is removing 'checkpoint' then we need
+                # to remove 'checkpoint_completed' and 'checkpoint_target' too
+                gcnf.delete('checkpoint_completed')
+                gcnf.delete('checkpoint_target')
+
         except IOError:
             if sys.exc_info()[1].errno == ENOENT:
                 # directory of log path is not present,

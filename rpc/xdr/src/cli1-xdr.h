@@ -52,6 +52,7 @@ enum gf_defrag_status_t {
 	GF_DEFRAG_STATUS_LAYOUT_FIX_STOPPED = 6,
 	GF_DEFRAG_STATUS_LAYOUT_FIX_COMPLETE = 7,
 	GF_DEFRAG_STATUS_LAYOUT_FIX_FAILED = 8,
+	GF_DEFRAG_STATUS_MAX = 9,
 };
 typedef enum gf_defrag_status_t gf_defrag_status_t;
 
@@ -92,6 +93,10 @@ enum gf_quota_type {
 	GF_QUOTA_OPTION_TYPE_REMOVE = 0 + 4,
 	GF_QUOTA_OPTION_TYPE_LIST = 0 + 5,
 	GF_QUOTA_OPTION_TYPE_VERSION = 0 + 6,
+	GF_QUOTA_OPTION_TYPE_ALERT_TIME = 0 + 7,
+	GF_QUOTA_OPTION_TYPE_SOFT_TIMEOUT = 0 + 8,
+	GF_QUOTA_OPTION_TYPE_HARD_TIMEOUT = 0 + 9,
+	GF_QUOTA_OPTION_TYPE_DEFAULT_SOFT_LIMIT = 0 + 10,
 };
 typedef enum gf_quota_type gf_quota_type;
 
@@ -139,6 +144,15 @@ enum gf1_cli_stats_op {
 };
 typedef enum gf1_cli_stats_op gf1_cli_stats_op;
 
+enum gf1_cli_info_op {
+	GF_CLI_INFO_NONE = 0,
+	GF_CLI_INFO_ALL = 1,
+	GF_CLI_INFO_INCREMENTAL = 2,
+	GF_CLI_INFO_CUMULATIVE = 3,
+	GF_CLI_INFO_CLEAR = 4,
+};
+typedef enum gf1_cli_info_op gf1_cli_info_op;
+
 enum gf1_cli_top_op {
 	GF_CLI_TOP_NONE = 0,
 	GF_CLI_TOP_OPEN = 0 + 1,
@@ -166,6 +180,7 @@ enum gf_cli_status_type {
 	GF_CLI_STATUS_BRICK = 0x0400,
 	GF_CLI_STATUS_NFS = 0x0800,
 	GF_CLI_STATUS_SHD = 0x1000,
+	GF_CLI_STATUS_QUOTAD = 0x2000,
 };
 typedef enum gf_cli_status_type gf_cli_status_type;
 
@@ -278,6 +293,7 @@ extern  bool_t xdr_gf1_cli_sync_volume (XDR *, gf1_cli_sync_volume*);
 extern  bool_t xdr_gf1_cli_op_flags (XDR *, gf1_cli_op_flags*);
 extern  bool_t xdr_gf1_cli_gsync_set (XDR *, gf1_cli_gsync_set*);
 extern  bool_t xdr_gf1_cli_stats_op (XDR *, gf1_cli_stats_op*);
+extern  bool_t xdr_gf1_cli_info_op (XDR *, gf1_cli_info_op*);
 extern  bool_t xdr_gf1_cli_top_op (XDR *, gf1_cli_top_op*);
 extern  bool_t xdr_gf_cli_status_type (XDR *, gf_cli_status_type*);
 extern  bool_t xdr_gf_cli_req (XDR *, gf_cli_req*);
@@ -306,6 +322,7 @@ extern bool_t xdr_gf1_cli_sync_volume ();
 extern bool_t xdr_gf1_cli_op_flags ();
 extern bool_t xdr_gf1_cli_gsync_set ();
 extern bool_t xdr_gf1_cli_stats_op ();
+extern bool_t xdr_gf1_cli_info_op ();
 extern bool_t xdr_gf1_cli_top_op ();
 extern bool_t xdr_gf_cli_status_type ();
 extern bool_t xdr_gf_cli_req ();

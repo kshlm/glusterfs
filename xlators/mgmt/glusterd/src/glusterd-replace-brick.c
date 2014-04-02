@@ -31,6 +31,7 @@
                   DEFAULT_VAR_RUN_DIRECTORY"/%s-"RB_CLIENT_MOUNTPOINT,      \
                   volinfo->volname);
 
+extern uuid_t global_txn_id;
 
 int
 glusterd_get_replace_op_str (gf1_cli_replace_op op, char *op_str)
@@ -325,7 +326,7 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                         ret = -1;
                         goto out;
                 }
-                if (is_origin_glusterd ()) {
+                if (is_origin_glusterd (dict)) {
                         if (!ctx) {
                                 ret = -1;
                                 gf_log (this->name, GF_LOG_ERROR,
@@ -450,7 +451,7 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                 GLUSTERD_GET_BRICK_PIDFILE (pidfile, volinfo, src_brickinfo,
                                             priv);
                 if ((replace_op != GF_REPLACE_OP_COMMIT_FORCE) &&
-                    !glusterd_is_service_running (pidfile, NULL)) {
+                    !gf_is_service_running (pidfile, NULL)) {
                         snprintf(msg, sizeof(msg), "Source brick %s:%s "
                                  "is not online.", src_brickinfo->hostname,
                                  src_brickinfo->path);
@@ -1515,6 +1516,9 @@ glusterd_op_perform_replace_brick (glusterd_volinfo_t  *volinfo,
         if (ret)
                 goto out;
 
+        strncpy (new_brickinfo->brick_id, old_brickinfo->brick_id,
+                 sizeof (new_brickinfo->brick_id));
+
         list_add_tail (&new_brickinfo->brick_list,
                        &old_brickinfo->brick_list);
 
@@ -1631,7 +1635,7 @@ glusterd_op_replace_brick (dict_t *dict, dict_t *rsp_dict)
                 /* Set task-id, if available, in op_ctx dict for operations
                  * other than start
                  */
-                if  (is_origin_glusterd ()) {
+                if  (is_origin_glusterd (dict)) {
                         ctx = glusterd_op_get_ctx();
                         if (!ctx) {
                                 gf_log (this->name, GF_LOG_ERROR, "Failed to "
@@ -1894,14 +1898,17 @@ glusterd_do_replace_brick (void *data)
         glusterd_brickinfo_t   *src_brickinfo = NULL;
         glusterd_brickinfo_t   *dst_brickinfo = NULL;
 	glusterd_conf_t	       *priv = NULL;
+        uuid_t                 *txn_id = NULL;
 
         int ret = 0;
 
         dict = data;
 
 	GF_ASSERT (THIS);
-
 	priv = THIS->private;
+        GF_ASSERT (priv);
+
+        txn_id = &priv->global_txn_id;
 
 	if (priv->timer) {
 		gf_timer_call_cancel (THIS->ctx, priv->timer);
@@ -1912,6 +1919,10 @@ glusterd_do_replace_brick (void *data)
 
         gf_log ("", GF_LOG_DEBUG,
                 "Replace brick operation detected");
+
+        ret = dict_get_bin (dict, "transaction_id", (void **)&txn_id);
+
+        gf_log ("", GF_LOG_DEBUG, "transaction ID = %s", uuid_utoa (*txn_id));
 
         ret = dict_get_int32 (dict, "operation", &op);
         if (ret) {
@@ -2008,9 +2019,15 @@ glusterd_do_replace_brick (void *data)
 
 out:
         if (ret)
-                ret = glusterd_op_sm_inject_event (GD_OP_EVENT_RCVD_RJT, NULL);
+                ret = glusterd_op_sm_inject_event (GD_OP_EVENT_RCVD_RJT,
+                                                   txn_id, NULL);
         else
-                ret = glusterd_op_sm_inject_event (GD_OP_EVENT_COMMIT_ACC, NULL);
+                ret = glusterd_op_sm_inject_event (GD_OP_EVENT_COMMIT_ACC,
+                                                   txn_id, NULL);
 
-        glusterd_op_sm ();
+        synclock_lock (&priv->big_lock);
+        {
+                glusterd_op_sm ();
+        }
+        synclock_unlock (&priv->big_lock);
 }

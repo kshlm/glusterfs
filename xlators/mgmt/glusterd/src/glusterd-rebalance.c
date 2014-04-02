@@ -126,7 +126,7 @@ __glusterd_defrag_notify (struct rpc_clnt *rpc, void *mydata,
                 UNLOCK (&defrag->lock);
 
                gf_log ("", GF_LOG_DEBUG, "%s got RPC_CLNT_CONNECT",
-                        rpc->conn.trans->name);
+                        rpc->conn.name);
                break;
         }
 
@@ -141,7 +141,7 @@ __glusterd_defrag_notify (struct rpc_clnt *rpc, void *mydata,
                 }
                 UNLOCK (&defrag->lock);
 
-                if (!glusterd_is_service_running (pidfile, NULL)) {
+                if (!gf_is_service_running (pidfile, NULL)) {
                         if (volinfo->rebal.defrag_status ==
                                                 GF_DEFRAG_STATUS_STARTED) {
                                 volinfo->rebal.defrag_status =
@@ -152,7 +152,7 @@ __glusterd_defrag_notify (struct rpc_clnt *rpc, void *mydata,
                 glusterd_store_perform_node_state_store (volinfo);
 
                 if (defrag->rpc) {
-                        rpc_clnt_unref (defrag->rpc);
+                        glusterd_rpc_clnt_unref (priv, defrag->rpc);
                         defrag->rpc = NULL;
                 }
                 if (defrag->cbk_fn)
@@ -161,9 +161,12 @@ __glusterd_defrag_notify (struct rpc_clnt *rpc, void *mydata,
 
                 GF_FREE (defrag);
                 gf_log ("", GF_LOG_DEBUG, "%s got RPC_CLNT_DISCONNECT",
-                        rpc->conn.trans->name);
+                        rpc->conn.name);
                 break;
         }
+        case RPC_CLNT_DESTROY:
+                glusterd_volinfo_unref (volinfo);
+                break;
         default:
                 gf_log ("", GF_LOG_TRACE,
                         "got some other RPC event %d", event);
@@ -195,7 +198,6 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
         char                   sockfile[PATH_MAX] = {0,};
         char                   pidfile[PATH_MAX] = {0,};
         char                   logfile[PATH_MAX] = {0,};
-        dict_t                 *options = NULL;
         char                   valgrind_logfile[PATH_MAX] = {0,};
 
         priv    = THIS->private;
@@ -235,7 +237,7 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
                 goto out;
         }
 
-        GLUSTERD_GET_DEFRAG_SOCK_FILE (sockfile, volinfo, priv);
+        GLUSTERD_GET_DEFRAG_SOCK_FILE (sockfile, volinfo);
         GLUSTERD_GET_DEFRAG_PID_FILE (pidfile, volinfo, priv);
         snprintf (logfile, PATH_MAX, "%s/%s-rebalance.log",
                     DEFAULT_LOG_FILE_DIRECTORY, volinfo->volname);
@@ -286,26 +288,10 @@ glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
 
         sleep (5);
 
-        /* Setting frame-timeout to 10mins (600seconds).
-         * Unix domain sockets ensures that the connection is reliable. The
-         * default timeout of 30mins used for unreliable network connections is
-         * too long for unix domain socket connections.
-         */
-        ret = rpc_transport_unix_options_build (&options, sockfile, 600);
-        if (ret) {
-                gf_log (THIS->name, GF_LOG_ERROR, "Unix options build failed");
-                goto out;
-        }
+        ret = glusterd_rebalance_rpc_create (volinfo, _gf_false);
 
-        synclock_unlock (&priv->big_lock);
-        ret = glusterd_rpc_create (&defrag->rpc, options,
-                                   glusterd_defrag_notify, volinfo);
-        synclock_lock (&priv->big_lock);
-        if (ret) {
-                gf_log (THIS->name, GF_LOG_ERROR, "RPC create failed");
-                goto out;
-        }
-
+        //FIXME: this cbk is passed as NULL in all occurrences. May be
+        //we never needed it.
         if (cbk)
                 defrag->cbk_fn = cbk;
 
@@ -317,28 +303,54 @@ out:
 
 int
 glusterd_rebalance_rpc_create (glusterd_volinfo_t *volinfo,
-                               glusterd_conf_t *priv, int cmd)
+                               gf_boolean_t reconnect)
 {
         dict_t                  *options = NULL;
         char                     sockfile[PATH_MAX] = {0,};
         int                      ret = -1;
-        glusterd_defrag_info_t  *defrag =  NULL;
+        glusterd_defrag_info_t  *defrag = volinfo->rebal.defrag;
+        glusterd_conf_t         *priv = NULL;
+        xlator_t                *this = NULL;
+        struct stat             buf = {0,};
 
-        if (!volinfo->rebal.defrag)
-                volinfo->rebal.defrag =
-                        GF_CALLOC (1, sizeof (*volinfo->rebal.defrag),
-                                   gf_gld_mt_defrag_info);
+        this = THIS;
+        GF_ASSERT (this);
+        priv = this->private;
+        GF_ASSERT (priv);
 
-        if (!volinfo->rebal.defrag)
+        //rebalance process is not started
+        if (!defrag)
                 goto out;
 
-        defrag = volinfo->rebal.defrag;
-
-        defrag->cmd = cmd;
-
-        LOCK_INIT (&defrag->lock);
-
-        GLUSTERD_GET_DEFRAG_SOCK_FILE (sockfile, volinfo, priv);
+        //rpc obj for rebalance process already in place.
+        if (defrag->rpc) {
+                ret = 0;
+                goto out;
+        }
+        GLUSTERD_GET_DEFRAG_SOCK_FILE (sockfile, volinfo);
+        /* If reconnecting check if defrag sockfile exists in the new location
+         * in /var/run/ , if it does not try the old location
+         */
+        if (reconnect) {
+                ret = sys_stat (sockfile, &buf);
+                /* TODO: Remove this once we don't need backward compatability
+                 * with the older path
+                 */
+                if (ret && (errno == ENOENT)) {
+                        gf_log (this->name, GF_LOG_WARNING, "Rebalance sockfile "
+                                "%s does not exist. Trying old path.",
+                                sockfile);
+                        GLUSTERD_GET_DEFRAG_SOCK_FILE_OLD (sockfile, volinfo,
+                                                           priv);
+                        ret =sys_stat (sockfile, &buf);
+                        if (ret && (ENOENT == errno)) {
+                                gf_log (this->name, GF_LOG_ERROR, "Rebalance "
+                                        "sockfile %s does not exist.",
+                                        sockfile);
+                                goto out;
+                        }
+                }
+        }
 
         /* Setting frame-timeout to 10mins (600seconds).
          * Unix domain sockets ensures that the connection is reliable. The
@@ -351,6 +363,7 @@ glusterd_rebalance_rpc_create (glusterd_volinfo_t *volinfo,
                 goto out;
         }
 
+        glusterd_volinfo_ref (volinfo);
         synclock_unlock (&priv->big_lock);
         ret = glusterd_rpc_create (&defrag->rpc, options,
                                    glusterd_defrag_notify, volinfo);
@@ -532,7 +545,7 @@ glusterd_op_stage_rebalance (dict_t *dict, char **op_errstr)
         case GF_DEFRAG_CMD_START:
         case GF_DEFRAG_CMD_START_LAYOUT_FIX:
         case GF_DEFRAG_CMD_START_FORCE:
-                if (is_origin_glusterd ()) {
+                if (is_origin_glusterd (dict)) {
                         op_ctx = glusterd_op_get_ctx ();
                         if (!op_ctx) {
                                 ret = -1;
@@ -656,6 +669,12 @@ glusterd_op_rebalance (dict_t *dict, char **op_errstr, dict_t *rsp_dict)
         case GF_DEFRAG_CMD_START:
         case GF_DEFRAG_CMD_START_LAYOUT_FIX:
         case GF_DEFRAG_CMD_START_FORCE:
+                /* Reset defrag status to 'NOT STARTED' whenever a
+                 * remove-brick/rebalance command is issued to remove
+                 * stale information from previous run.
+                 */
+                volinfo->rebal.defrag_status = GF_DEFRAG_STATUS_NOT_STARTED;
+
                 ret = dict_get_str (dict, GF_REBALANCE_TID_KEY, &task_id_str);
                 if (ret) {
                         gf_log (this->name, GF_LOG_DEBUG, "Missing rebalance "
@@ -665,9 +684,11 @@ glusterd_op_rebalance (dict_t *dict, char **op_errstr, dict_t *rsp_dict)
                         uuid_parse (task_id_str, volinfo->rebal.rebalance_id) ;
                         volinfo->rebal.op = GD_OP_REBALANCE;
                 }
+                if (!gd_should_i_start_rebalance (volinfo))
+                        break;
                 ret = glusterd_handle_defrag_start (volinfo, msg, sizeof (msg),
                                                     cmd, NULL, GD_OP_REBALANCE);
-                 break;
+                break;
         case GF_DEFRAG_CMD_STOP:
                 /* Clear task-id only on explicitly stopping rebalance.
                  * Also clear the stored operation, so it doesn't cause trouble

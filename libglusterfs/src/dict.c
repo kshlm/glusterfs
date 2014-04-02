@@ -801,6 +801,8 @@ data_from_dynstr (char *value)
 
         data_t *data = get_new_data ();
 
+        if (!data)
+                return NULL;
         data->len = strlen (value) + 1;
         data->data = value;
 
@@ -817,6 +819,8 @@ data_from_dynmstr (char *value)
 
         data_t *data = get_new_data ();
 
+        if (!data)
+                return NULL;
         data->len = strlen (value) + 1;
         data->data = value;
         data->is_stdalloc = 1;
@@ -1086,6 +1090,20 @@ dict_null_foreach_fn (dict_t *d, char *k,
 }
 
 int
+dict_remove_foreach_fn (dict_t *d, char *k,
+                        data_t *v, void *_tmp)
+{
+        if (!d || !k) {
+                gf_log ("glusterfs", GF_LOG_WARNING, "%s is NULL",
+                        d?"key":"dictionary");
+                return -1;
+        }
+
+        dict_del (d, k);
+        return 0;
+}
+
+int
 dict_foreach (dict_t *dict,
               int (*fn)(dict_t *this,
                         char *key,
@@ -1107,8 +1125,8 @@ dict_foreach (dict_t *dict,
         while (pairs) {
                 next = pairs->next;
                 ret = fn (dict, pairs->key, pairs->value, data);
-                if (ret == -1)
-                        return -1;
+                if (ret < 0)
+                        return ret;
                 pairs = next;
         }
 

@@ -107,7 +107,8 @@ echo Running ${AUTOMAKE}...
 $AUTOMAKE --add-missing --copy --foreign
 
 # Run autogen in the argp-standalone sub-directory
-cd argp-standalone;./autogen.sh
+echo "Running autogen.sh in argp-standalone ..."
+( cd argp-standalone;./autogen.sh )
 
 # Instruct user on next steps
 echo

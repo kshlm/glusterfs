@@ -52,11 +52,15 @@ char *marker_xattrs[] = {"trusted.glusterfs.quota.*",
                          "trusted.glusterfs.*.xtime",
                          NULL};
 
+char *marker_contri_key = "trusted.*.*.contri";
+
 static char* posix_ignore_xattrs[] = {
         "gfid-req",
         GLUSTERFS_ENTRYLK_COUNT,
         GLUSTERFS_INODELK_COUNT,
         GLUSTERFS_POSIXLK_COUNT,
+        GLUSTERFS_PARENT_ENTRYLK,
+        GF_GFIDLESS_LOOKUP,
         NULL
 };
 
@@ -102,14 +106,142 @@ out:
 }
 
 static int
+_posix_xattr_get_set_from_backend (posix_xattr_filler_t *filler, char *key)
+{
+        ssize_t  xattr_size = -1;
+        int      ret        = 0;
+        char    *value      = NULL;
+
+        xattr_size = sys_lgetxattr (filler->real_path, key, NULL, 0);
+
+        if (xattr_size > 0) {
+                value = GF_CALLOC (1, xattr_size + 1,
+                                   gf_posix_mt_char);
+                if (!value)
+                        goto out;
+
+                xattr_size = sys_lgetxattr (filler->real_path, key, value,
+                                            xattr_size);
+                if (xattr_size <= 0) {
+                        gf_log (filler->this->name, GF_LOG_WARNING,
+                                "getxattr failed. path: %s, key: %s",
+                                filler->real_path, key);
+                        GF_FREE (value);
+                        goto out;
+                }
+
+                value[xattr_size] = '\0';
+                ret = dict_set_bin (filler->xattr, key,
+                                    value, xattr_size);
+                if (ret < 0) {
+                        gf_log (filler->this->name, GF_LOG_DEBUG,
+                                "dict set failed. path: %s, key: %s",
+                                filler->real_path, key);
+                        GF_FREE (value);
+                        goto out;
+                }
+        }
+        ret = 0;
+out:
+        return ret;
+}
+
+static int gf_posix_xattr_enotsup_log;
+
+static int
+_posix_get_marker_all_contributions (posix_xattr_filler_t *filler)
+{
+        ssize_t  size = -1, remaining_size = -1, list_offset = 0;
+        int      ret  = -1;
+        char    *list = NULL, key[4096] = {0, };
+
+        size = sys_llistxattr (filler->real_path, NULL, 0);
+        if (size == -1) {
+                if ((errno == ENOTSUP) || (errno == ENOSYS)) {
+                        GF_LOG_OCCASIONALLY (gf_posix_xattr_enotsup_log,
+                                             THIS->name, GF_LOG_WARNING,
+                                             "Extended attributes not "
+                                             "supported (try remounting brick"
+                                             " with 'user_xattr' flag)");
+
+                } else {
+                        gf_log (THIS->name, GF_LOG_WARNING,
+                                "listxattr failed on %s: %s",
+                                filler->real_path, strerror (errno));
+
+                }
+
+                goto out;
+        }
+
+        if (size == 0) {
+                ret = 0;
+                goto out;
+        }
+
+        list = alloca (size + 1);
+        if (!list) {
+                goto out;
+        }
+
+        size = sys_llistxattr (filler->real_path, list, size);
+        if (size <= 0) {
+                ret = size;
+                goto out;
+        }
+
+        remaining_size = size;
+        list_offset = 0;
+
+        while (remaining_size > 0) {
+                if (*(list + list_offset) == '\0')
+                        break;
+                strcpy (key, list + list_offset);
+                if (fnmatch (marker_contri_key, key, 0) == 0) {
+                        ret = _posix_xattr_get_set_from_backend (filler, key);
+                }
+
+                remaining_size -= strlen (key) + 1;
+                list_offset += strlen (key) + 1;
+        }
+
+        ret = 0;
+
+out:
+        return ret;
+}
+
+static int
+_posix_get_marker_quota_contributions (posix_xattr_filler_t *filler, char *key)
+{
+        char *saveptr = NULL, *token = NULL, *tmp_key = NULL;
+        char *ptr     = NULL;
+        int   i       = 0, ret = 0;
+
+        tmp_key = ptr = gf_strdup (key);
+        for (i = 0; i < 4; i++) {
+                token = strtok_r (tmp_key, ".", &saveptr);
+                tmp_key = NULL;
+        }
+
+        if (strncmp (token, "contri", strlen ("contri")) == 0) {
+                ret = _posix_get_marker_all_contributions (filler);
+        } else {
+                ret = _posix_xattr_get_set_from_backend (filler, key);
+        }
+
+        GF_FREE (ptr);
+
+        return ret;
+}
+
+static int
 _posix_xattr_get_set (dict_t *xattr_req,
                       char *key,
                       data_t *data,
                       void *xattrargs)
 {
         posix_xattr_filler_t *filler = xattrargs;
-        char     *value      = NULL;
-        ssize_t   xattr_size = -1;
         int       ret      = -1;
         char     *databuf  = NULL;
         int       _fd      = -1;
@@ -134,6 +266,16 @@ _posix_xattr_get_set (dict_t *xattr_req,
                                 goto err;
                         }
 
+                        /*
+                         * There could be a situation where the ia_size is
+                         * zero. GF_CALLOC will return a pointer to the
+                         * memory initialized by gf_mem_set_acct_info.
+                         * This function adds a header and a footer to
+                         * the allocated memory.  The returned pointer
+                         * points to the memory just after the header, but
+                         * when size is zero, there is no space for user
+                         * data. The memory can be freed by calling GF_FREE.
+                         */
                         databuf = GF_CALLOC (1, filler->stbuf->ia_size,
                                              gf_posix_mt_char);
                         if (!databuf) {
@@ -183,35 +325,26 @@ _posix_xattr_get_set (dict_t *xattr_req,
                                         "Failed to set dictionary value for %s",
                                         key);
                 }
-        } else {
-                xattr_size = sys_lgetxattr (filler->real_path, key, NULL, 0);
-
-                if (xattr_size > 0) {
-                        value = GF_CALLOC (1, xattr_size + 1,
-                                           gf_posix_mt_char);
-                        if (!value)
-                                return -1;
-
-                        xattr_size = sys_lgetxattr (filler->real_path, key, value,
-                                                    xattr_size);
-                        if (xattr_size <= 0) {
-                                gf_log (filler->this->name, GF_LOG_WARNING,
-                                        "getxattr failed. path: %s, key: %s",
-                                        filler->real_path, key);
-                                GF_FREE (value);
-                                return -1;
-                        }
-
-                        value[xattr_size] = '\0';
-                        ret = dict_set_bin (filler->xattr, key,
-                                            value, xattr_size);
-                        if (ret < 0) {
-                                gf_log (filler->this->name, GF_LOG_DEBUG,
-                                        "dict set failed. path: %s, key: %s",
-                                        filler->real_path, key);
-                                GF_FREE (value);
-                        }
+        } else if (!strcmp (key, GET_ANCESTRY_PATH_KEY)) {
+                char *path = NULL;
+                ret = posix_get_ancestry (filler->this, filler->loc->inode,
+                                          NULL, &path, POSIX_ANCESTRY_PATH,
+                                          &filler->op_errno, xattr_req);
+                if (ret < 0) {
+                        goto out;
                 }
+
+                ret = dict_set_dynstr (filler->xattr, GET_ANCESTRY_PATH_KEY,
+                                       path);
+                if (ret < 0) {
+                        GF_FREE (path);
+                        goto out;
+                }
+
+        } else if (fnmatch (marker_contri_key, key, 0) == 0) {
+                ret = _posix_get_marker_quota_contributions (filler, key);
+        } else {
+                ret = _posix_xattr_get_set_from_backend (filler, key);
         }
 out:
         return 0;
@@ -270,7 +403,7 @@ posix_fill_ino_from_gfid (xlator_t *this, struct iatt *buf)
                 goto out;
         }
         for (i = 15; i > (15 - 8); i--) {
-		temp_ino += (uint64_t)(buf->ia_gfid[i]) << j;
+                temp_ino += (uint64_t)(buf->ia_gfid[i]) << j;
                 j += 8;
         }
         buf->ia_ino = temp_ino;
@@ -660,7 +793,10 @@ posix_handle_pair (xlator_t *this, const char *real_path,
         int sys_ret = -1;
         int ret     = 0;
 
-        if (ZR_FILE_CONTENT_REQUEST(key)) {
+        if (XATTR_IS_PATHINFO (key)) {
+                ret = -EACCES;
+                goto out;
+        } else if (ZR_FILE_CONTENT_REQUEST(key)) {
                 ret = posix_set_file_contents (this, real_path, key, value,
                                                flags);
         } else {
@@ -668,6 +804,7 @@ posix_handle_pair (xlator_t *this, const char *real_path,
                                          value->len, flags);
 
                 if (sys_ret < 0) {
+                        ret = -errno;
                         if (errno == ENOTSUP) {
                                 GF_LOG_OCCASIONALLY(gf_xattr_enotsup_log,
                                                     this->name,GF_LOG_WARNING,
@@ -699,7 +836,6 @@ posix_handle_pair (xlator_t *this, const char *real_path,
 #endif /* DARWIN */
                         }
 
-                        ret = -errno;
                         goto out;
                 }
         }
@@ -714,10 +850,16 @@ posix_fhandle_pair (xlator_t *this, int fd,
         int sys_ret = -1;
         int ret     = 0;
 
+        if (XATTR_IS_PATHINFO (key)) {
+                ret = -EACCES;
+                goto out;
+        }
+
         sys_ret = sys_fsetxattr (fd, key, value->data,
                                  value->len, flags);
 
         if (sys_ret < 0) {
+                ret = -errno;
                 if (errno == ENOTSUP) {
                         GF_LOG_OCCASIONALLY(gf_xattr_enotsup_log,
                                             this->name,GF_LOG_WARNING,
@@ -744,7 +886,6 @@ posix_fhandle_pair (xlator_t *this, int fd,
 #endif /* DARWIN */
                 }
 
-                ret = -errno;
                 goto out;
         }
 
@@ -886,7 +1027,7 @@ posix_spawn_janitor_thread (xlator_t *this)
         {
                 if (!priv->janitor_present) {
                         ret = gf_thread_create (&priv->janitor, NULL,
-						posix_janitor_thread_proc, this);
+                                                posix_janitor_thread_proc, this);
 
                         if (ret < 0) {
                                 gf_log (this->name, GF_LOG_ERROR,
@@ -1229,7 +1370,7 @@ posix_spawn_health_check_thread (xlator_t *xl)
                         goto unlock;
 
                 ret = gf_thread_create (&priv->health_check, NULL,
-					posix_health_check_thread_proc, xl);
+                                        posix_health_check_thread_proc, xl);
                 if (ret < 0) {
                         priv->health_check_interval = 0;
                         priv->health_check_active = _gf_false;
@@ -1250,89 +1391,89 @@ unlock:
 int
 posix_fsyncer_pick (xlator_t *this, struct list_head *head)
 {
-	struct posix_private *priv = NULL;
-	int count = 0;
+        struct posix_private *priv = NULL;
+        int count = 0;
 
-	priv = this->private;
-	pthread_mutex_lock (&priv->fsync_mutex);
-	{
-		while (list_empty (&priv->fsyncs))
-			pthread_cond_wait (&priv->fsync_cond,
-					   &priv->fsync_mutex);
+        priv = this->private;
+        pthread_mutex_lock (&priv->fsync_mutex);
+        {
+                while (list_empty (&priv->fsyncs))
+                        pthread_cond_wait (&priv->fsync_cond,
+                                           &priv->fsync_mutex);
 
-		count = priv->fsync_queue_count;
-		priv->fsync_queue_count = 0;
-		list_splice_init (&priv->fsyncs, head);
-	}
-	pthread_mutex_unlock (&priv->fsync_mutex);
+                count = priv->fsync_queue_count;
+                priv->fsync_queue_count = 0;
+                list_splice_init (&priv->fsyncs, head);
+        }
+        pthread_mutex_unlock (&priv->fsync_mutex);
 
-	return count;
+        return count;
 }
 
 
 void
 posix_fsyncer_process (xlator_t *this, call_stub_t *stub, gf_boolean_t do_fsync)
 {
-	struct posix_fd *pfd = NULL;
-	int ret = -1;
-	struct posix_private *priv = NULL;
+        struct posix_fd *pfd = NULL;
+        int ret = -1;
+        struct posix_private *priv = NULL;
 
-	priv = this->private;
+        priv = this->private;
 
-	ret = posix_fd_ctx_get (stub->args.fd, this, &pfd);
-	if (ret < 0) {
-		gf_log (this->name, GF_LOG_ERROR,
-			"could not get fdctx for fd(%s)",
-			uuid_utoa (stub->args.fd->inode->gfid));
-		call_unwind_error (stub, -1, EINVAL);
-		return;
-	}
+        ret = posix_fd_ctx_get (stub->args.fd, this, &pfd);
+        if (ret < 0) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "could not get fdctx for fd(%s)",
+                        uuid_utoa (stub->args.fd->inode->gfid));
+                call_unwind_error (stub, -1, EINVAL);
+                return;
+        }
 
-	if (do_fsync) {
+        if (do_fsync) {
 #ifdef HAVE_FDATASYNC
-		if (stub->args.datasync)
-			ret = fdatasync (pfd->fd);
-		else
+                if (stub->args.datasync)
+                        ret = fdatasync (pfd->fd);
+                else
 #endif
-			ret = fsync (pfd->fd);
-	} else {
-		ret = 0;
-	}
+                        ret = fsync (pfd->fd);
+        } else {
+                ret = 0;
+        }
 
-	if (ret) {
-		gf_log (this->name, GF_LOG_ERROR,
-			"could not fstat fd(%s)",
-			uuid_utoa (stub->args.fd->inode->gfid));
-		call_unwind_error (stub, -1, errno);
-		return;
-	}
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "could not fstat fd(%s)",
+                        uuid_utoa (stub->args.fd->inode->gfid));
+                call_unwind_error (stub, -1, errno);
+                return;
+        }
 
-	call_unwind_error (stub, 0, 0);
+        call_unwind_error (stub, 0, 0);
 }
 
 
 static void
 posix_fsyncer_syncfs (xlator_t *this, struct list_head *head)
 {
-	call_stub_t *stub = NULL;
-	struct posix_fd *pfd = NULL;
-	int ret = -1;
+        call_stub_t *stub = NULL;
+        struct posix_fd *pfd = NULL;
+        int ret = -1;
 
-	stub = list_entry (head->prev, call_stub_t, list);
-	ret = posix_fd_ctx_get (stub->args.fd, this, &pfd);
-	if (ret)
-		return;
+        stub = list_entry (head->prev, call_stub_t, list);
+        ret = posix_fd_ctx_get (stub->args.fd, this, &pfd);
+        if (ret)
+                return;
 
 #ifdef GF_LINUX_HOST_OS
-	/* syncfs() is not "declared" in RHEL's glibc even though
-	   the kernel has support.
-	*/
+        /* syncfs() is not "declared" in RHEL's glibc even though
+           the kernel has support.
+        */
 #include <sys/syscall.h>
 #include <unistd.h>
 #ifdef SYS_syncfs
-	syscall (SYS_syncfs, pfd->fd);
+        syscall (SYS_syncfs, pfd->fd);
 #else
-	sync();
+        sync();
 #endif
 #else
         sync();
@@ -1343,49 +1484,49 @@ posix_fsyncer_syncfs (xlator_t *this, struct list_head *head)
 void *
 posix_fsyncer (void *d)
 {
-	xlator_t *this = d;
-	struct posix_private *priv = NULL;
-	call_stub_t *stub = NULL;
-	call_stub_t *tmp = NULL;
-	struct list_head list;
-	int count = 0;
-	gf_boolean_t do_fsync = _gf_true;
+        xlator_t *this = d;
+        struct posix_private *priv = NULL;
+        call_stub_t *stub = NULL;
+        call_stub_t *tmp = NULL;
+        struct list_head list;
+        int count = 0;
+        gf_boolean_t do_fsync = _gf_true;
 
-	priv = this->private;
+        priv = this->private;
 
-	for (;;) {
-		INIT_LIST_HEAD (&list);
+        for (;;) {
+                INIT_LIST_HEAD (&list);
 
-		count = posix_fsyncer_pick (this, &list);
+                count = posix_fsyncer_pick (this, &list);
 
-		usleep (priv->batch_fsync_delay_usec);
+                usleep (priv->batch_fsync_delay_usec);
 
-		gf_log (this->name, GF_LOG_DEBUG,
-			"picked %d fsyncs", count);
+                gf_log (this->name, GF_LOG_DEBUG,
+                        "picked %d fsyncs", count);
 
-		switch (priv->batch_fsync_mode) {
-		case BATCH_NONE:
-		case BATCH_REVERSE_FSYNC:
-			break;
-		case BATCH_SYNCFS:
-		case BATCH_SYNCFS_SINGLE_FSYNC:
-		case BATCH_SYNCFS_REVERSE_FSYNC:
-			posix_fsyncer_syncfs (this, &list);
-			break;
-		}
+                switch (priv->batch_fsync_mode) {
+                case BATCH_NONE:
+                case BATCH_REVERSE_FSYNC:
+                        break;
+                case BATCH_SYNCFS:
+                case BATCH_SYNCFS_SINGLE_FSYNC:
+                case BATCH_SYNCFS_REVERSE_FSYNC:
+                        posix_fsyncer_syncfs (this, &list);
+                        break;
+                }
 
-		if (priv->batch_fsync_mode == BATCH_SYNCFS)
-			do_fsync = _gf_false;
-		else
-			do_fsync = _gf_true;
+                if (priv->batch_fsync_mode == BATCH_SYNCFS)
+                        do_fsync = _gf_false;
+                else
+                        do_fsync = _gf_true;
 
-		list_for_each_entry_safe_reverse (stub, tmp, &list, list) {
-			list_del_init (&stub->list);
+                list_for_each_entry_safe_reverse (stub, tmp, &list, list) {
+                        list_del_init (&stub->list);
 
-			posix_fsyncer_process (this, stub, do_fsync);
+                        posix_fsyncer_process (this, stub, do_fsync);
 
-			if (priv->batch_fsync_mode == BATCH_SYNCFS_SINGLE_FSYNC)
-				do_fsync = _gf_false;
-		}
-	}
+                        if (priv->batch_fsync_mode == BATCH_SYNCFS_SINGLE_FSYNC)
+                                do_fsync = _gf_false;
+                }
+        }
 }
