@@ -4047,6 +4047,20 @@ glusterd_handle_barrier (rpcsvc_request_t *req)
 {
         return glusterd_big_locked_handler (req, __glusterd_handle_barrier);
 }
+
+int
+__glusterd_handle_get_vol_opt (rpcsvc_request_t *req)
+{
+        int          ret     = -1;
+        // TODO: Handle request
+        return ret;
+}
+
+int
+glusterd_handle_get_vol_opt (rpcsvc_request_t *req)
+{
+        return glusterd_big_locked_handler (req, __glusterd_handle_get_vol_opt);
+}
 static int
 get_brickinfo_from_brickid (char *brickid, glusterd_brickinfo_t **brickinfo)
 {
@@ -4526,6 +4540,7 @@ rpcsvc_actor_t gd_svc_cli_actors[GLUSTER_CLI_MAXVALUE] = {
         [GLUSTER_CLI_SYS_EXEC]           = {"SYS_EXEC",           GLUSTER_CLI_SYS_EXEC,         glusterd_handle_sys_exec,              NULL, 0, DRC_NA},
         [GLUSTER_CLI_SNAP]               = {"SNAP",               GLUSTER_CLI_SNAP,             glusterd_handle_snapshot,              NULL, 0, DRC_NA},
         [GLUSTER_CLI_BARRIER_VOLUME] = {"BARRIER_VOLUME", GLUSTER_CLI_BARRIER_VOLUME, glusterd_handle_barrier, NULL, 0, DRC_NA},
+        [GLUSTER_CLI_GET_VOL_OPT] = {"GET_VOL_OPT", GLUSTER_CLI_GET_VOL_OPT, glusterd_handle_get_vol_opt, NULL, 0, DRC_NA},
 };
 
 struct rpcsvc_program gd_svc_cli_prog = {
