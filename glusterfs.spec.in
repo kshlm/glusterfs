@@ -454,6 +454,8 @@ Requires:         %{name}-libs = %{version}-%{release}
 Requires:         %{name}-fuse = %{version}-%{release}
 # Runtime necessity for snapshot
 Requires:         lvm2
+# nfs-utils provides rpc.statd and it is a requirement for gluster-nfs
+Requires:         nfs-utils
 %if ( 0%{?fedora} ) || ( 0%{?rhel} && 0%{?rhel} >= 6 )
 Requires:         rpcbind
 %else
@@ -775,7 +777,7 @@ pidof -c -o %PPID -x glusterd &> /dev/null
 if [ $? -eq 0 ]; then
     kill -9 `pgrep -f gsyncd.py` &> /dev/null
 
-    killall glusterd &> /dev/null
+    killall --wait glusterd &> /dev/null
     glusterd --xlator-option *.upgrade=on -N
 else
     glusterd --xlator-option *.upgrade=on -N
@@ -1033,8 +1035,14 @@ fi
 %ghost      %attr(0600,-,-) %{_sharedstatedir}/glusterd/nfs/run/nfs.pid
 
 %changelog
+* Fri Jun 27 2014 Kaleb S. KEITHLEY <kkeithle@redhat.com>
+- killall --wait in %%post server, (#1113543)
+
 * Thu Jun 12 2014 Varun Shastry <vshastry@redhat.com>
 - Add bash completion config to the cli package
+
+* Tue Jun 03 2014 Vikhyat Umrao <vumrao@redhat.com>
+- add nfs-utils package dependency for server package (#1065654)
 
 * Thu May 22 2014 Poornima G <pgurusid@redhat.com>
 - Rename old hookscripts in an RPM-standard way.
