@@ -2429,7 +2429,6 @@ __glusterd_handle_friend_update (rpcsvc_request_t *req)
         dict_t                  *dict = NULL;
         char                    key[100] = {0,};
         char                    *uuid_buf = NULL;
-        char                    *hostname = NULL;
         int                     i = 1;
         int                     count = 0;
         uuid_t                  uuid = {0,};
@@ -2492,43 +2491,56 @@ __glusterd_handle_friend_update (rpcsvc_request_t *req)
 
         args.mode = GD_MODE_ON;
         while ( i <= count) {
-                /* TODO: This needs to be fixed for existing peers */
-
-                snprintf (key, sizeof (key), "friend%d", i);
-                ret = gd_peerinfo_from_dict (dict, key, &peerinfo);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR, "Could not create "
-                                "peerinfo from dict for prefix %s", key);
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "friend%d.uuid", i);
+                ret = dict_get_str (dict, key, &uuid_buf);
+                if (ret)
                         goto out;
-                }
+                uuid_parse (uuid_buf, uuid);
 
-                if (!uuid_compare (peerinfo->uuid, MY_UUID)) {
-                        gf_log ("", GF_LOG_INFO, "Received my uuid as Friend");
-                        /* A peerinfo object referencing self is not useful */
-                        glusterd_friend_cleanup (peerinfo);
-                        peerinfo = NULL;
+                if (!uuid_compare (uuid, MY_UUID)) {
+                        gf_log (this->name, GF_LOG_INFO,
+                                "Received my uuid as Friend");
                         i++;
                         continue;
                 }
 
-                ret = glusterd_friend_find (peerinfo->uuid, hostname, &tmp);
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "friend%d", i);
 
-                if (!ret) {
-                        if (strcmp (hostname, tmp->hostname) != 0) {
-                                glusterd_friend_hostname_update (tmp, hostname,
-                                                                 _gf_true);
+                ret = glusterd_friend_find (uuid, NULL, &peerinfo);
+                if (ret) {
+                        /* Create a new peer and add it to the list as there is
+                         * no existing peer with the uuid
+                         */
+                        ret = gd_peerinfo_from_dict (dict, key, &peerinfo);
+                        if (ret) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "Could not create peerinfo from dict "
+                                        "for prefix %s", key);
+                                goto out;
                         }
-                        i++;
-                        continue;
+
+                        /* As this is a new peer, it should be added as a
+                         * friend.  The friend state machine will take care of
+                         * correcting the state as required
+                         */
+                        peerinfo->state.state = GD_FRIEND_STATE_BEFRIENDED;
+
+                        ret = glusterd_friend_add_from_peerinfo (peerinfo, 0,
+                                                                 &args);
+                } else {
+                        /* As an existing peer was found, update it with the new
+                         * information
+                         */
+                        ret = gd_update_peerinfo_from_dict (peerinfo, dict,
+                                                            key);
+                        if (ret) {
+                                gf_log (this->name, GF_LOG_ERROR, "Failed to "
+                                        "update peer %s", peerinfo->hostname);
+                                goto out;
+                        }
                 }
-
-                /* If it is a new peer, it should be added as a friend.
-                 * The friend state machine will take care of correcting the
-                 * state as required
-                 */
-                peerinfo->state.state = GD_FRIEND_STATE_BEFRIENDED;
-
-                ret = glusterd_friend_add_from_peerinfo (peerinfo, 0, &args);
 
                 peerinfo = NULL;
                 i++;

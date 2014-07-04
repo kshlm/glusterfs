@@ -76,4 +76,8 @@ gd_find_peerinfo_from_hostname (xlator_t *this, const char *hoststr);
 
 glusterd_peerinfo_t *
 gd_find_peerinfo_from_addrinfo (xlator_t *this, const struct addrinfo *addr);
+
+int
+gd_update_peerinfo_from_dict (glusterd_peerinfo_t *peerinfo, dict_t *dict,
+                              const char *prefix);
 #endif /* _GLUSTERD_PEER_UTILS_H */
