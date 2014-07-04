@@ -3932,9 +3932,7 @@ glusterd_store_retrieve_peers (xlator_t *this)
         struct dirent           *entry = NULL;
         char                    path[PATH_MAX] = {0,};
         glusterd_peerinfo_t     *peerinfo = NULL;
-        uuid_t                  uuid = {0,};
         char                    *hostname = NULL;
-        int32_t                 state = 0;
         gf_store_handle_t       *shandle = NULL;
         char                    filepath[PATH_MAX] = {0,};
         gf_store_iter_t         *iter = NULL;
@@ -4032,6 +4030,7 @@ glusterd_store_retrieve_peers (xlator_t *this)
                 if (ret)
                         goto out;
         }
+        peerinfo = NULL;
 
 out:
         if (peerinfo)
