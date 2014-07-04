@@ -214,16 +214,22 @@ int
 __glusterd_probe_cbk (struct rpc_req *req, struct iovec *iov,
                         int count, void *myframe)
 {
-        gd1_mgmt_probe_rsp    rsp   = {{0},};
-        int                   ret   = 0;
-        glusterd_peerinfo_t           *peerinfo = NULL;
-        glusterd_friend_sm_event_t    *event = NULL;
-        glusterd_probe_ctx_t          *ctx = NULL;
-        xlator_t                      *this = THIS;
+        gd1_mgmt_probe_rsp          rsp      = {{0},};
+        int                         ret      = 0;
+        glusterd_peerinfo_t        *peerinfo = NULL;
+        glusterd_friend_sm_event_t *event    = NULL;
+        glusterd_probe_ctx_t       *ctx      = NULL;
+        xlator_t                   *this     = NULL;
+        glusterd_conf_t            *conf     = NULL;
 
         if (-1 == req->rpc_status) {
                 goto out;
         }
+
+        this = THIS;
+        GF_ASSERT (this != NULL);
+        conf = this->private;
+        GF_VALIDATE_OR_GOTO (this->name, (conf != NULL), out);
 
         ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gd1_mgmt_probe_rsp);
         if (ret < 0) {
@@ -255,29 +261,51 @@ __glusterd_probe_cbk (struct rpc_req *req, struct iovec *iov,
                 ret = rsp.op_ret;
                 goto out;
         }
+
         ret = glusterd_friend_find (rsp.uuid, rsp.hostname, &peerinfo);
         if (ret) {
                 GF_ASSERT (0);
         }
 
-        if (uuid_compare (rsp.uuid, peerinfo->uuid) == 0) {
-                gf_log (THIS->name, GF_LOG_DEBUG, "Adding the Host: %s  with "
-                        "uuid: %s to already present peer info",
-                        rsp.hostname, uuid_utoa (rsp.uuid));
+        /* Only do address list updates if everyone in the cluster can do the
+         * same.
+         */
+        if ((conf->op_version >= GD_OP_VERSION_3_6_0) &&
+            (uuid_compare (rsp.uuid, peerinfo->uuid) == 0)) {
+                gf_log (this->name, GF_LOG_DEBUG, "Adding address '%s' to "
+                        "existing peer %s", rsp.hostname, uuid_utoa (rsp.uuid));
 
+                ret = glusterd_friend_remove (NULL, rsp.hostname);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR, "Could not remove "
+                                "stale peerinfo with name %s", rsp.hostname);
+                        goto reply;
+                }
+
+                ret = gd_add_address_to_peer (peerinfo, rsp.hostname);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Couldn't add hostname to peer list");
+                        goto reply;
+                }
+
+                /* Injecting LOCAL_ACC to send update */
+                ret = glusterd_friend_sm_new_event (GD_FRIEND_EVENT_LOCAL_ACC,
+                                                    &event);
+                if (!ret) {
+                        event->peerinfo = peerinfo;
+                        ret = glusterd_friend_sm_inject_event (event);
+                }
+                rsp.op_errno = GF_PROBE_FRIEND;
+
+reply:
                 ctx = ((call_frame_t *)myframe)->local;
                 ((call_frame_t *)myframe)->local = NULL;
 
                 GF_ASSERT (ctx);
 
-                ret = gd_add_address_to_peer (peerinfo, rsp.hostname);
-                if (ret)
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Couldn't add hostname to peer list");
-
-                rsp.op_errno = GF_PROBE_FRIEND;
                 if (ctx->req) {
-                        glusterd_xfer_cli_probe_resp (ctx->req, rsp.op_ret,
+                        glusterd_xfer_cli_probe_resp (ctx->req, ret,
                                                       rsp.op_errno,
                                                       rsp.op_errstr,
                                                       ctx->hostname, ctx->port,
@@ -285,12 +313,10 @@ __glusterd_probe_cbk (struct rpc_req *req, struct iovec *iov,
                 }
 
                 glusterd_destroy_probe_ctx (ctx);
-                (void) glusterd_friend_remove (NULL, rsp.hostname);
-                ret = rsp.op_ret;
-                goto out;
-        }
 
-        if (strncasecmp (rsp.hostname, peerinfo->hostname, 1024)) {
+                goto out;
+
+        } else if (strncasecmp (rsp.hostname, peerinfo->hostname, 1024)) {
                 gf_log (THIS->name, GF_LOG_INFO, "Host: %s  with uuid: %s "
                         "already present in cluster with alias hostname: %s",
                         rsp.hostname, uuid_utoa (rsp.uuid), peerinfo->hostname);
