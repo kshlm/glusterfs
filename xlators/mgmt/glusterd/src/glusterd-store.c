@@ -3861,7 +3861,7 @@ glusterd_store_peer_write (int fd, glusterd_peerinfo_t *peerinfo)
         list_for_each_entry (hostname, &peerinfo->hostnames, hostname_list) {
                 ret = gf_asprintf (&key, GLUSTERD_STORE_KEY_PEER_HOSTNAME"%d",
                                    i);
-                if (ret)
+                if (ret < 0)
                         goto out;
                 ret = gf_store_save_value (fd, key, hostname->hostname);
                 if (ret)
