@@ -289,7 +289,7 @@ __glusterd_probe_cbk (struct rpc_req *req, struct iovec *iov,
                 /* Presence of ctx->req implies this probe was started by a cli
                  * probe command
                  */
-                if (ctx->req)
+                if (ctx->req == NULL)
                         goto cont;
 
                 gf_log (this->name, GF_LOG_DEBUG, "Adding address '%s' to "
