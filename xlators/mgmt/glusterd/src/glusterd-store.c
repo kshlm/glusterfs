@@ -3926,20 +3926,21 @@ out:
 int32_t
 glusterd_store_retrieve_peers (xlator_t *this)
 {
-        int32_t                 ret = 0;
-        glusterd_conf_t         *priv = NULL;
-        DIR                     *dir = NULL;
-        struct dirent           *entry = NULL;
-        char                    path[PATH_MAX] = {0,};
-        glusterd_peerinfo_t     *peerinfo = NULL;
-        char                    *hostname = NULL;
-        gf_store_handle_t       *shandle = NULL;
-        char                    filepath[PATH_MAX] = {0,};
-        gf_store_iter_t         *iter = NULL;
-        char                    *key = NULL;
-        char                    *value = NULL;
-        glusterd_peerctx_args_t args = {0};
-        gf_store_op_errno_t     op_errno = GD_STORE_SUCCESS;
+        int32_t                   ret                = 0;
+        glusterd_conf_t          *priv               = NULL;
+        DIR                      *dir                = NULL;
+        struct dirent            *entry              = NULL;
+        char                      path[PATH_MAX]     = {0,};
+        glusterd_peerinfo_t      *peerinfo           = NULL;
+        char                     *hostname           = NULL;
+        gf_store_handle_t        *shandle            = NULL;
+        char                      filepath[PATH_MAX] = {0,};
+        gf_store_iter_t          *iter               = NULL;
+        char                     *key                = NULL;
+        char                     *value              = NULL;
+        glusterd_peerctx_args_t   args               = {0};
+        gf_store_op_errno_t       op_errno           = GD_STORE_SUCCESS;
+        glusterd_peer_hostname_t *address            = NULL;
 
         GF_ASSERT (this);
         priv = this->private;
@@ -4014,6 +4015,17 @@ glusterd_store_retrieve_peers (xlator_t *this)
                 }
 
                 (void) gf_store_iter_destroy (iter);
+
+                /* Set first hostname from peerinfo->hostnames to
+                 * peerinfo->hostname
+                 */
+                address = list_entry (peerinfo->hostnames.next,
+                                      glusterd_peer_hostname_t, hostname_list);
+                if (!address) {
+                        ret = -1;
+                        goto out;
+                }
+                peerinfo->hostname = gf_strdup (address->hostname);
 
                 ret = glusterd_friend_add_from_peerinfo (peerinfo, 1, NULL);
                 if (ret)

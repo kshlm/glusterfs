@@ -197,9 +197,10 @@ glusterd_friend_find_by_uuid (uuid_t uuid,
         return ret;
 }
 
-/* glusterd_peerinfo_new will create a new peerinfo object and sets its address
- * into @peerinfo. If any other parameters are given, they will be set in the
- * peerinfo object.
+/* glusterd_peerinfo_new will create a new peerinfo object and set it's members
+ * values using the passed parameters.
+ * @hostname is added as the first entry in peerinfo->hostnames list and also
+ * set to peerinfo->hostname.
  */
 int
 glusterd_peerinfo_new (glusterd_peerinfo_t **peerinfo,
@@ -226,6 +227,11 @@ glusterd_peerinfo_new (glusterd_peerinfo_t **peerinfo,
                 ret = gd_add_address_to_peer (new_peer, hostname);
                 if (ret)
                         goto out;
+                /* Also set it to peerinfo->hostname. Doing this as we use
+                 * peerinfo->hostname in a lot of places and is really hard to
+                 * get everything right
+                 */
+                new_peer->hostname = gf_strdup (hostname);
         }
 
         if (uuid) {
@@ -602,6 +608,9 @@ gd_peerinfo_from_dict (dict_t *dict, char *prefix,
                         "Could not add address to peer");
                 goto out;
         }
+        /* Also set peerinfo->hostname to the first address */
+        if (new_peer->hostname != NULL)
+                GF_FREE (new_peer->hostname);
 
         if (conf->op_version < GD_OP_VERSION_3_6_0) {
                 ret = 0;

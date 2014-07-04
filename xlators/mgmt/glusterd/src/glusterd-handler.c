@@ -2492,6 +2492,8 @@ __glusterd_handle_friend_update (rpcsvc_request_t *req)
 
         args.mode = GD_MODE_ON;
         while ( i <= count) {
+                /* TODO: This needs to be fixed for existing peers */
+
                 snprintf (key, sizeof (key), "friend%d", i);
                 ret = gd_peerinfo_from_dict (dict, key, &peerinfo);
                 if (ret) {
@@ -2509,9 +2511,6 @@ __glusterd_handle_friend_update (rpcsvc_request_t *req)
                         continue;
                 }
 
-                /* TODO: This needs to fixed. The below will not work with
-                 * address lists
-                 */
                 ret = glusterd_friend_find (peerinfo->uuid, hostname, &tmp);
 
                 if (!ret) {
@@ -3060,11 +3059,10 @@ int
 glusterd_friend_rpc_create (xlator_t *this, glusterd_peerinfo_t *peerinfo,
                             glusterd_peerctx_args_t *args)
 {
-        dict_t                 *options = NULL;
-        int                    ret = -1;
-        glusterd_peerctx_t     *peerctx = NULL;
-        data_t                 *data = NULL;
-        glusterd_peer_hostname_t *address = NULL;
+        dict_t                   *options = NULL;
+        int                       ret     = -1;
+        glusterd_peerctx_t       *peerctx = NULL;
+        data_t                   *data    = NULL;
 
         peerctx = GF_CALLOC (1, sizeof (*peerctx), gf_gld_mt_peerctx_t);
         if (!peerctx)
@@ -3075,18 +3073,8 @@ glusterd_friend_rpc_create (xlator_t *this, glusterd_peerinfo_t *peerinfo,
 
         peerctx->peerinfo = peerinfo;
 
-        /* Use the first hostname from the address list to create the peer RPC
-         */
-        address = list_entry (&peerinfo->hostnames, glusterd_peer_hostname_t,
-                              hostname_list);
-        if (!address) {
-                ret = -1;
-                gf_log (this->name, GF_LOG_ERROR, "Could not get the first "
-                        "address for peer");
-                goto out;
-        }
         ret = glusterd_transport_inet_options_build (&options,
-                                                     address->hostname,
+                                                     peerinfo->hostname,
                                                      peerinfo->port);
         if (ret)
                 goto out;
@@ -3226,6 +3214,7 @@ out:
         gf_log (this->name, GF_LOG_INFO, "connect returned %d", ret);
         return ret;
 }
+
 int
 glusterd_probe_begin (rpcsvc_request_t *req, const char *hoststr, int port,
                       dict_t *dict, int *op_errno)
