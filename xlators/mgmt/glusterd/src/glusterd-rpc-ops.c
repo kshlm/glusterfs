@@ -267,11 +267,31 @@ __glusterd_probe_cbk (struct rpc_req *req, struct iovec *iov,
                 GF_ASSERT (0);
         }
 
-        /* Only do address list updates if everyone in the cluster can do the
-         * same.
+        /*
+         * In the case of a fresh probe rsp.uuid and peerinfo.uuid will not
+         * match, as peerinfo->uuid will be NULL.
+         *
+         * In the case of a peer probe being done to add a new network to a
+         * peer, rsp.uuid will match an existing peerinfo.uuid. If we have this
+         * stage it means that the current address/hostname being used isn't
+         * present in the found peerinfo. If it were, we would have found out
+         * earlier in the probe process and wouldn't even reach till here. So,
+         * we need to add the new hostname to the peer.
+         *
+         * This addition should only be done for cluster op-version >=
+         * GD_OP_VERSION_3_6_0 as address lists are only supported from then on.
+         * Also, this update should only be done when an explicit CLI probe
+         * command was used to begin the probe process.
          */
         if ((conf->op_version >= GD_OP_VERSION_3_6_0) &&
             (uuid_compare (rsp.uuid, peerinfo->uuid) == 0)) {
+                ctx = ((call_frame_t *)myframe)->local;
+                /* Presence of ctx->req implies this probe was started by a cli
+                 * probe command
+                 */
+                if (ctx->req)
+                        goto cont;
+
                 gf_log (this->name, GF_LOG_DEBUG, "Adding address '%s' to "
                         "existing peer %s", rsp.hostname, uuid_utoa (rsp.uuid));
 
@@ -340,7 +360,7 @@ reply:
                 ret = rsp.op_ret;
                 goto out;
         }
-
+cont:
         uuid_copy (peerinfo->uuid, rsp.uuid);
 
         ret = glusterd_friend_sm_new_event
