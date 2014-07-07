@@ -49,6 +49,7 @@ glusterd_peerinfo_destroy (glusterd_peerinfo_t *peerinfo)
 {
         int32_t                         ret = -1;
         glusterd_peer_hostname_t *hostname = NULL;
+        glusterd_peer_hostname_t *tmp = NULL;
 
         if (!peerinfo)
                 goto out;
@@ -61,7 +62,8 @@ glusterd_peerinfo_destroy (glusterd_peerinfo_t *peerinfo)
 
         list_del_init (&peerinfo->uuid_list);
 
-        list_for_each_entry (hostname, &peerinfo->hostnames, hostname_list) {
+        list_for_each_entry_safe (hostname, tmp, &peerinfo->hostnames,
+                                  hostname_list) {
                 glusterd_peer_hostname_free (hostname);
         }
 
