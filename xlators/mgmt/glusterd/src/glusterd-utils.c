@@ -7699,9 +7699,9 @@ glusterd_new_brick_validate (char *brick, glusterd_brickinfo_t *brickinfo,
                 }
 
         } else {
-                ret = glusterd_friend_find_by_uuid (newbrickinfo->uuid,
-                                                    &peerinfo);
-                if (ret) {
+                peerinfo = glusterd_peerinfo_find_by_uuid (newbrickinfo->uuid);
+                if (peerinfo == NULL) {
+                        ret = -1;
                         snprintf (op_errstr, len, "Failed to find host %s",
                                   newbrickinfo->hostname);
                         goto out;

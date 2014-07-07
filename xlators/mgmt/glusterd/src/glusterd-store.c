@@ -3830,7 +3830,7 @@ glusterd_store_create_peer_shandle (glusterd_peerinfo_t *peerinfo)
 
         GF_ASSERT (peerinfo);
 
-        if (glusterd_peerinfo_is_uuid_unknown (peerinfo)) {
+        if (glusterd_peerinfo_is_uuid_null (peerinfo)) {
                 ret = glusterd_store_peerinfo_hostname_shandle_create (peerinfo);
         } else {
                 ret = glusterd_peerinfo_hostname_shandle_check_destroy (peerinfo);
@@ -4046,7 +4046,7 @@ glusterd_store_retrieve_peers (xlator_t *this)
 
 out:
         if (peerinfo)
-                glusterd_friend_cleanup (peerinfo);
+                glusterd_peerinfo_cleanup (peerinfo);
 
         if (dir)
                 closedir (dir);

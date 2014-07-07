@@ -313,8 +313,8 @@ glusterd_ac_friend_probe (glusterd_friend_sm_event_t *event, void *ctx)
 
         GF_ASSERT (conf);
 
-        ret = glusterd_friend_find (NULL, probe_ctx->hostname, &peerinfo);
-        if (ret) {
+        peerinfo = glusterd_peerinfo_find (NULL, probe_ctx->hostname);
+        if (peerinfo == NULL) {
                 //We should not reach this state ideally
                 GF_ASSERT (0);
                 goto out;
@@ -616,7 +616,7 @@ glusterd_ac_friend_remove (glusterd_friend_sm_event_t *event, void *ctx)
                 gf_msg (THIS->name, GF_LOG_WARNING, 0, GD_MSG_VOL_CLEANUP_FAIL,
                         "Volumes cleanup failed");
 
-        ret = glusterd_friend_cleanup (event->peerinfo);
+        ret = glusterd_peerinfo_cleanup (event->peerinfo);
         if (ret) {
                 gf_log (THIS->name, GF_LOG_ERROR, "Cleanup returned: %d", ret);
         }

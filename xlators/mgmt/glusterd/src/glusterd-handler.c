@@ -101,9 +101,9 @@ glusterd_handle_friend_req (rpcsvc_request_t *req, uuid_t  uuid,
                 port = GF_DEFAULT_BASE_PORT;
 
         ret = glusterd_remote_hostname_get (req, rhost, sizeof (rhost));
-        ret = glusterd_friend_find (uuid, rhost, &peerinfo);
+        peerinfo = glusterd_peerinfo_find (uuid, rhost);
 
-        if (ret) {
+        if (peerinfo == NULL) {
                 ret = glusterd_xfer_friend_add_resp (req, hostname, rhost, port,
                                                      -1, GF_PROBE_UNKNOWN_PEER);
                 if (friend_req->vols.vols_val) {
@@ -196,9 +196,9 @@ glusterd_handle_unfriend_req (rpcsvc_request_t *req, uuid_t  uuid,
         if (!port)
                 port = GF_DEFAULT_BASE_PORT;
 
-        ret = glusterd_friend_find (uuid, hostname, &peerinfo);
+        peerinfo = glusterd_peerinfo_find (uuid, hostname);
 
-        if (ret) {
+        if (peerinfo == NULL) {
                 gf_log ("glusterd", GF_LOG_CRITICAL,
                         "Received remove-friend from unknown peer %s",
                         hostname);
@@ -551,44 +551,6 @@ out:
         return ret;
 }
 
-int
-glusterd_friend_find (uuid_t uuid, char *hostname,
-                      glusterd_peerinfo_t **peerinfo)
-{
-        int     ret = -1;
-        xlator_t *this = NULL;
-
-        this = THIS;
-        GF_ASSERT (this);
-
-        if (uuid) {
-                ret = glusterd_friend_find_by_uuid (uuid, peerinfo);
-
-                if (ret) {
-                        gf_log (this->name, GF_LOG_DEBUG,
-                                 "Unable to find peer by uuid: %s",
-                                 uuid_utoa (uuid));
-                } else {
-                        goto out;
-                }
-
-        }
-
-        if (hostname) {
-                ret = glusterd_friend_find_by_hostname (hostname, peerinfo);
-
-                if (ret) {
-                        gf_log (this->name, GF_LOG_DEBUG,
-                                "Unable to find hostname: %s", hostname);
-                } else {
-                        goto out;
-                }
-        }
-
-out:
-        return ret;
-}
-
 int32_t
 glusterd_op_txn_begin (rpcsvc_request_t *req, glusterd_op_t op, void *ctx,
                        char *err_str, size_t err_len)
@@ -742,7 +704,6 @@ __glusterd_handle_cluster_lock (rpcsvc_request_t *req)
         gd1_mgmt_cluster_lock_req       lock_req    = {{0},};
         glusterd_op_lock_ctx_t         *ctx         = NULL;
         glusterd_op_t                   op          = GD_OP_EVENT_LOCK;
-        glusterd_peerinfo_t            *peerinfo    = NULL;
         glusterd_op_info_t              txn_op_info = {{0},};
         glusterd_conf_t                *priv        = NULL;
         uuid_t                         *txn_id      = NULL;
@@ -768,7 +729,7 @@ __glusterd_handle_cluster_lock (rpcsvc_request_t *req)
         gf_log (this->name, GF_LOG_DEBUG, "Received LOCK from uuid: %s",
                 uuid_utoa (lock_req.uuid));
 
-        if (glusterd_friend_find_by_uuid (lock_req.uuid, &peerinfo)) {
+        if (glusterd_peerinfo_find_by_uuid (lock_req.uuid) == NULL) {
                 gf_log (this->name, GF_LOG_WARNING, "%s doesn't "
                         "belong to the cluster. Ignoring request.",
                         uuid_utoa (lock_req.uuid));
@@ -881,7 +842,6 @@ __glusterd_handle_stage_op (rpcsvc_request_t *req)
         int32_t                         ret = -1;
         glusterd_req_ctx_t              *req_ctx = NULL;
         gd1_mgmt_stage_op_req           op_req = {{0},};
-        glusterd_peerinfo_t             *peerinfo = NULL;
         xlator_t                        *this = NULL;
         uuid_t                          *txn_id = NULL;
         glusterd_op_info_t              txn_op_info = {{0},};
@@ -917,7 +877,7 @@ __glusterd_handle_stage_op (rpcsvc_request_t *req)
         gf_log (this->name, GF_LOG_DEBUG, "transaction ID = %s",
                 uuid_utoa (*txn_id));
 
-        if (glusterd_friend_find_by_uuid (op_req.uuid, &peerinfo)) {
+        if (glusterd_peerinfo_find_by_uuid (op_req.uuid) == NULL) {
                 gf_log (this->name, GF_LOG_WARNING, "%s doesn't "
                         "belong to the cluster. Ignoring request.",
                         uuid_utoa (op_req.uuid));
@@ -972,7 +932,6 @@ __glusterd_handle_commit_op (rpcsvc_request_t *req)
         int32_t                         ret = -1;
         glusterd_req_ctx_t              *req_ctx = NULL;
         gd1_mgmt_commit_op_req          op_req = {{0},};
-        glusterd_peerinfo_t             *peerinfo = NULL;
         xlator_t                        *this = NULL;
         uuid_t                          *txn_id = NULL;
         glusterd_conf_t                 *priv = NULL;
@@ -994,7 +953,7 @@ __glusterd_handle_commit_op (rpcsvc_request_t *req)
                 goto out;
         }
 
-        if (glusterd_friend_find_by_uuid (op_req.uuid, &peerinfo)) {
+        if (glusterd_peerinfo_find_by_uuid (op_req.uuid) == NULL) {
                 gf_log (this->name, GF_LOG_WARNING, "%s doesn't "
                         "belong to the cluster. Ignoring request.",
                         uuid_utoa (op_req.uuid));
@@ -1109,16 +1068,13 @@ __glusterd_handle_cli_probe (rpcsvc_request_t *req)
                 goto out;
         }
 
-        if (!(ret = glusterd_friend_find_by_hostname (hostname, &peerinfo))) {
-                if (gd_peer_has_address (peerinfo, hostname)) {
-
-                        gf_log ("glusterd", GF_LOG_DEBUG, "Probe host %s port "
-                                "%d already a peer", hostname, port);
-                        glusterd_xfer_cli_probe_resp (req, 0, GF_PROBE_FRIEND,
-                                                      NULL, hostname, port,
-                                                      dict);
-                        goto out;
-                }
+        peerinfo = glusterd_peerinfo_find_by_hostname (hostname);
+        if (peerinfo && gd_peer_has_address (peerinfo, hostname)) {
+                gf_log ("glusterd", GF_LOG_DEBUG, "Probe host %s port %d "
+                        "already a peer", hostname, port);
+                glusterd_xfer_cli_probe_resp (req, 0, GF_PROBE_FRIEND, NULL,
+                                              hostname, port, dict);
+                goto out;
         }
         ret = glusterd_probe_begin (req, hostname, port, dict, &op_errno);
 
@@ -2011,9 +1967,8 @@ __glusterd_handle_fsm_log (rpcsvc_request_t *req)
                 conf = this->private;
                 log = &conf->op_sm_log;
         } else {
-                ret = glusterd_friend_find_by_hostname (cli_req.name,
-                                                        &peerinfo);
-                if (ret) {
+                peerinfo = glusterd_peerinfo_find_by_hostname (cli_req.name);
+                if (!peerinfo) {
                         snprintf (msg, sizeof (msg), "%s is not a peer",
                                   cli_req.name);
                         goto out;
@@ -2140,7 +2095,6 @@ __glusterd_handle_cluster_unlock (rpcsvc_request_t *req)
         gd1_mgmt_cluster_unlock_req     unlock_req = {{0}, };
         int32_t                         ret = -1;
         glusterd_op_lock_ctx_t          *ctx = NULL;
-        glusterd_peerinfo_t             *peerinfo = NULL;
         xlator_t                        *this = NULL;
         uuid_t                          *txn_id = NULL;
         glusterd_conf_t                 *priv = NULL;
@@ -2166,7 +2120,7 @@ __glusterd_handle_cluster_unlock (rpcsvc_request_t *req)
         gf_log (this->name, GF_LOG_DEBUG,
                 "Received UNLOCK from uuid: %s", uuid_utoa (unlock_req.uuid));
 
-        if (glusterd_friend_find_by_uuid (unlock_req.uuid, &peerinfo)) {
+        if (glusterd_peerinfo_find_by_uuid (unlock_req.uuid) == NULL) {
                 gf_log (this->name, GF_LOG_WARNING, "%s doesn't "
                         "belong to the cluster. Ignoring request.",
                         uuid_utoa (unlock_req.uuid));
@@ -2396,7 +2350,6 @@ glusterd_friend_hostname_update (glusterd_peerinfo_t *peerinfo,
                                 char *hostname,
                                 gf_boolean_t store_update)
 {
-        char                    *new_hostname = NULL;
         int                     ret = 0;
 
         GF_ASSERT (peerinfo);
@@ -2424,7 +2377,6 @@ __glusterd_handle_friend_update (rpcsvc_request_t *req)
         glusterd_peerinfo_t     *peerinfo = NULL;
         glusterd_conf_t         *priv = NULL;
         xlator_t                *this = NULL;
-        glusterd_peerinfo_t     *tmp = NULL;
         gd1_mgmt_friend_update_rsp rsp = {{0},};
         dict_t                  *dict = NULL;
         char                    key[100] = {0,};
@@ -2450,8 +2402,8 @@ __glusterd_handle_friend_update (rpcsvc_request_t *req)
                 goto out;
         }
 
-        ret = glusterd_friend_find (friend_req.uuid, NULL, &tmp);
-        if (ret) {
+        if (glusterd_peerinfo_find (friend_req.uuid, NULL) == NULL) {
+                ret = -1;
                 gf_log ("", GF_LOG_CRITICAL, "Received friend update request "
                         "from unknown peer %s", uuid_utoa (friend_req.uuid));
                 goto out;
@@ -2508,8 +2460,8 @@ __glusterd_handle_friend_update (rpcsvc_request_t *req)
                 memset (key, 0, sizeof (key));
                 snprintf (key, sizeof (key), "friend%d", i);
 
-                ret = glusterd_friend_find (uuid, NULL, &peerinfo);
-                if (ret) {
+                peerinfo = glusterd_peerinfo_find (uuid, NULL);
+                if (peerinfo == NULL) {
                         /* Create a new peer and add it to the list as there is
                          * no existing peer with the uuid
                          */
@@ -2559,7 +2511,7 @@ out:
         }
 
         if (peerinfo)
-                glusterd_friend_cleanup (peerinfo);
+                glusterd_peerinfo_cleanup (peerinfo);
 
         glusterd_friend_sm ();
         glusterd_op_sm ();
@@ -2628,11 +2580,11 @@ __glusterd_handle_probe_query (rpcsvc_request_t *req)
                 gf_log ("", GF_LOG_ERROR, "Unable to get the remote hostname");
                 goto out;
         }
-        ret = glusterd_friend_find (probe_req.uuid, remote_hostname, &peerinfo);
-        if ((ret != 0 ) && (!list_empty (&conf->peers))) {
+        peerinfo = glusterd_peerinfo_find (probe_req.uuid, remote_hostname);
+        if ((peerinfo == NULL) && (!list_empty (&conf->peers))) {
                 rsp.op_ret = -1;
                 rsp.op_errno = GF_PROBE_ANOTHER_CLUSTER;
-        } else if (ret) {
+        } else if (peerinfo == NULL) {
                 gf_log ("glusterd", GF_LOG_INFO, "Unable to find peerinfo"
                         " for host: %s (%d)", remote_hostname, port);
                 args.mode = GD_MODE_ON;
@@ -2954,17 +2906,17 @@ glusterd_handle_umount (rpcsvc_request_t *req)
 int
 glusterd_friend_remove (uuid_t uuid, char *hostname)
 {
-        int                           ret = 0;
+        int                           ret = -1;
         glusterd_peerinfo_t           *peerinfo = NULL;
 
-        ret = glusterd_friend_find (uuid, hostname, &peerinfo);
-        if (ret)
+        peerinfo = glusterd_peerinfo_find (uuid, hostname);
+        if (peerinfo == NULL)
                 goto out;
 
         ret = glusterd_friend_remove_cleanup_vols (peerinfo->uuid);
         if (ret)
                 gf_log (THIS->name, GF_LOG_WARNING, "Volumes cleanup failed");
-        ret = glusterd_friend_cleanup (peerinfo);
+        ret = glusterd_peerinfo_cleanup (peerinfo);
 out:
         gf_log ("", GF_LOG_DEBUG, "returning %d", ret);
         return ret;
@@ -3139,9 +3091,11 @@ glusterd_friend_add (const char *hoststr, int port,
         conf = this->private;
         GF_ASSERT (conf);
         GF_ASSERT (hoststr);
+        GF_ASSERT (friend);
 
-        ret = glusterd_peerinfo_new (friend, state, uuid, hoststr, port);
-        if (ret) {
+        *friend = glusterd_peerinfo_new (state, uuid, hoststr, port);
+        if (*friend == NULL) {
+                ret = -1;
                 goto out;
         }
 
@@ -3170,7 +3124,7 @@ glusterd_friend_add (const char *hoststr, int port,
         }
 
         if (ret) {
-                (void) glusterd_friend_cleanup (*friend);
+                (void) glusterd_peerinfo_cleanup (*friend);
                 *friend = NULL;
         }
 
@@ -3238,15 +3192,15 @@ glusterd_probe_begin (rpcsvc_request_t *req, const char *hoststr, int port,
 
         GF_ASSERT (hoststr);
 
-        ret = glusterd_friend_find (NULL, (char *)hoststr, &peerinfo);
+        peerinfo = glusterd_peerinfo_find (NULL, hoststr);
 
-        if (ret) {
+        if (peerinfo == NULL) {
                 gf_log ("glusterd", GF_LOG_INFO, "Unable to find peerinfo"
                         " for host: %s (%d)", hoststr, port);
                 args.mode = GD_MODE_ON;
                 args.req  = req;
                 args.dict = dict;
-                ret = glusterd_friend_add ((char *)hoststr, port,
+                ret = glusterd_friend_add (hoststr, port,
                                            GD_FRIEND_STATE_DEFAULT,
                                            NULL, &peerinfo, 0, &args);
                 if ((!ret) && (!peerinfo->connected)) {
@@ -3297,9 +3251,10 @@ glusterd_deprobe_begin (rpcsvc_request_t *req, const char *hoststr, int port,
         GF_ASSERT (hoststr);
         GF_ASSERT (req);
 
-        ret = glusterd_friend_find (uuid, (char *)hoststr, &peerinfo);
+        peerinfo = glusterd_peerinfo_find (uuid, hoststr);
 
-        if (ret) {
+        if (peerinfo == NULL) {
+                ret = -1;
                 gf_log ("glusterd", GF_LOG_INFO, "Unable to find peerinfo"
                         " for host: %s %d", hoststr, port);
                 goto out;

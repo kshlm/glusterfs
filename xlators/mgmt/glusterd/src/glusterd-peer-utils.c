@@ -13,7 +13,7 @@
 #include "common-utils.h"
 
 int32_t
-glusterd_friend_cleanup (glusterd_peerinfo_t *peerinfo)
+glusterd_peerinfo_cleanup (glusterd_peerinfo_t *peerinfo)
 {
         GF_ASSERT (peerinfo);
         glusterd_peerctx_t      *peerctx = NULL;
@@ -37,7 +37,7 @@ glusterd_friend_cleanup (glusterd_peerinfo_t *peerinfo)
                         GF_FREE (peerctx);
                 }
         }
-        glusterd_peer_destroy (peerinfo);
+        gd_peerinfo_destroy (peerinfo);
 
         if (quorum_action)
                 glusterd_do_quorum_action ();
@@ -45,7 +45,7 @@ glusterd_friend_cleanup (glusterd_peerinfo_t *peerinfo)
 }
 
 int32_t
-glusterd_peer_destroy (glusterd_peerinfo_t *peerinfo)
+gd_peerinfo_destroy (glusterd_peerinfo_t *peerinfo)
 {
         int32_t                         ret = -1;
         glusterd_peer_hostname_t *hostname = NULL;
@@ -75,34 +75,32 @@ out:
         return ret;
 }
 
-/* glusterd_friend_find_by_hostname searches for a peer which matches the
- * hostname @hoststr and if found stores the pointer to peerinfo object in
- * @peerinfo.
- * Returns 0 on success and -1 on failure.
+/* glusterd_peerinfo_find_by_hostname searches for a peer which matches the
+ * hostname @hoststr and if found returns the pointer to peerinfo object.
+ * Returns NULL otherwise.
  *
  * It first attempts a quick search by string matching @hoststr. If that fails,
  * it'll attempt a more thorough match by resolving the addresses and matching
  * the resolved addrinfos.
  */
-int
-glusterd_friend_find_by_hostname (const char *hoststr,
-                                  glusterd_peerinfo_t  **peerinfo)
+glusterd_peerinfo_t *
+glusterd_peerinfo_find_by_hostname (const char *hoststr)
 {
-        int                             ret             = -1;
-        struct addrinfo                *addr            = NULL;
-        struct addrinfo                *p               = NULL;
-        xlator_t                       *this            = NULL;
+        int                  ret      = -1;
+        struct addrinfo     *addr     = NULL;
+        struct addrinfo     *p        = NULL;
+        xlator_t            *this     = NULL;
+        glusterd_peerinfo_t *peerinfo = NULL;
 
 
         this = THIS;
         GF_ASSERT (hoststr);
-        GF_ASSERT (peerinfo);
 
-        *peerinfo = NULL;
+        peerinfo = NULL;
 
-        *peerinfo = gd_find_peerinfo_from_hostname (this, hoststr);
-        if (*peerinfo)
-                return 0;
+        peerinfo = gd_find_peerinfo_from_hostname (this, hoststr);
+        if (peerinfo)
+                return peerinfo;
 
         ret = getaddrinfo (hoststr, NULL, NULL, &addr);
         if (ret != 0) {
@@ -113,10 +111,10 @@ glusterd_friend_find_by_hostname (const char *hoststr,
         }
 
         for (p = addr; p != NULL; p = p->ai_next) {
-                *peerinfo = gd_find_peerinfo_from_addrinfo (this, p);
-                if (*peerinfo) {
+                peerinfo = gd_find_peerinfo_from_addrinfo (this, p);
+                if (peerinfo) {
                         freeaddrinfo (addr);
-                        return 0;
+                        return peerinfo;
                 }
         }
 
@@ -124,7 +122,7 @@ out:
         gf_log (this->name, GF_LOG_DEBUG, "Unable to find friend: %s", hoststr);
         if (addr)
                 freeaddrinfo (addr);
-        return -1;
+        return NULL;
 }
 
 int
@@ -143,43 +141,43 @@ glusterd_hostname_to_uuid (char *hostname, uuid_t uuid)
         priv = this->private;
         GF_ASSERT (priv);
 
-        ret = glusterd_friend_find_by_hostname (hostname, &peerinfo);
-        if (ret) {
+        peerinfo = glusterd_peerinfo_find_by_hostname (hostname);
+        if (peerinfo) {
+                ret = 0;
+                uuid_copy (uuid, peerinfo->uuid);
+        } else {
                 if (gf_is_local_addr (hostname)) {
                         uuid_copy (uuid, MY_UUID);
                         ret = 0;
                 } else {
-                        goto out;
+                        ret = -1;
                 }
-        } else {
-                uuid_copy (uuid, peerinfo->uuid);
         }
 
-out:
         gf_log (this->name, GF_LOG_DEBUG, "returning %d", ret);
         return ret;
 }
 
-int
-glusterd_friend_find_by_uuid (uuid_t uuid,
-                              glusterd_peerinfo_t  **peerinfo)
+/* glusterd_peerinfo_find_by_uuid searches for a peer which matches the
+ * uuid @uuid and if found returns the pointer to peerinfo object.
+ * Returns NULL otherwise.
+ */
+glusterd_peerinfo_t *
+glusterd_peerinfo_find_by_uuid (uuid_t uuid)
 {
-        int                     ret = -1;
         glusterd_conf_t         *priv = NULL;
         glusterd_peerinfo_t     *entry = NULL;
         xlator_t                *this = NULL;
 
         this = THIS;
         GF_ASSERT (this);
-        GF_ASSERT (peerinfo);
 
-        *peerinfo = NULL;
         priv    = this->private;
 
         GF_ASSERT (priv);
 
         if (uuid_is_null (uuid))
-                return -1;
+                return NULL;
 
         list_for_each_entry (entry, &priv->peers, uuid_list) {
                 if (!uuid_compare (entry->uuid, uuid)) {
@@ -187,14 +185,53 @@ glusterd_friend_find_by_uuid (uuid_t uuid,
                         gf_log (this->name, GF_LOG_DEBUG,
                                  "Friend found... state: %s",
                         glusterd_friend_sm_state_name_get (entry->state.state));
-                        *peerinfo = entry;
-                        return 0;
+                        return entry;
                 }
         }
 
         gf_log (this->name, GF_LOG_DEBUG, "Friend with uuid: %s, not found",
                 uuid_utoa (uuid));
-        return ret;
+        return NULL;
+}
+
+/* glusterd_peerinfo_find will search for a peer matching either @uuid or
+ * @hostname and return a pointer to the peerinfo object
+ * Returns NULL otherwise.
+ */
+glusterd_peerinfo_t *
+glusterd_peerinfo_find (uuid_t uuid, const char *hostname)
+{
+        glusterd_peerinfo_t *peerinfo = NULL;
+        xlator_t            *this     = NULL;
+
+        this = THIS;
+        GF_ASSERT (this);
+
+
+        if (uuid) {
+                peerinfo = glusterd_peerinfo_find_by_uuid (uuid);
+
+                if (peerinfo) {
+                        return peerinfo;
+                } else {
+                        gf_log (this->name, GF_LOG_DEBUG,
+                                 "Unable to find peer by uuid: %s",
+                                 uuid_utoa (uuid));
+                }
+
+        }
+
+        if (hostname) {
+                peerinfo = glusterd_peerinfo_find_by_hostname (hostname);
+
+                if (peerinfo) {
+                        return peerinfo;
+                } else {
+                        gf_log (this->name, GF_LOG_DEBUG,
+                                "Unable to find hostname: %s", hostname);
+                }
+        }
+        return NULL;
 }
 
 /* glusterd_peerinfo_new will create a new peerinfo object and set it's members
@@ -251,13 +288,13 @@ glusterd_peerinfo_new (glusterd_peerinfo_t **peerinfo,
         *peerinfo = new_peer;
 out:
         if (ret && new_peer)
-                glusterd_friend_cleanup (new_peer);
+                glusterd_peerinfo_cleanup (new_peer);
         gf_log ("", GF_LOG_DEBUG, "returning %d", ret);
         return ret;
 }
 
 gf_boolean_t
-glusterd_peerinfo_is_uuid_unknown (glusterd_peerinfo_t *peerinfo)
+glusterd_peerinfo_is_uuid_null (glusterd_peerinfo_t *peerinfo)
 {
         GF_ASSERT (peerinfo);
 
@@ -651,7 +688,7 @@ cont:
         new_peer = NULL;
 out:
         if (new_peer)
-                glusterd_friend_cleanup (new_peer);
+                glusterd_peerinfo_cleanup (new_peer);
 
         gf_log (this ? this->name : "glusterd", GF_LOG_DEBUG, "Returning %d",
                 ret);
