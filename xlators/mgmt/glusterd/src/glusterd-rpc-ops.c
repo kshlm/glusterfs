@@ -262,8 +262,8 @@ __glusterd_probe_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
         }
 
-        ret = glusterd_peerinfo_find (rsp.uuid, rsp.hostname, &peerinfo);
-        if (ret) {
+        peerinfo = glusterd_peerinfo_find (rsp.uuid, rsp.hostname);
+        if (peerinfo == NULL) {
                 GF_ASSERT (0);
         }
 
@@ -435,9 +435,9 @@ __glusterd_friend_add_cbk (struct rpc_req * req, struct iovec *iov,
                 "Received %s from uuid: %s, host: %s, port: %d",
                 (op_ret)?"RJT":"ACC", uuid_utoa (rsp.uuid), rsp.hostname, rsp.port);
 
-        ret = glusterd_peerinfo_find (rsp.uuid, rsp.hostname, &peerinfo);
-
-        if (ret) {
+        peerinfo = glusterd_peerinfo_find (rsp.uuid, rsp.hostname);
+        if (peerinfo == NULL) {
+                ret = -1;
                 gf_log ("", GF_LOG_ERROR, "received friend add response from"
                         " unknown peer uuid: %s", uuid_utoa (rsp.uuid));
                 goto out;
@@ -546,11 +546,11 @@ __glusterd_friend_remove_cbk (struct rpc_req * req, struct iovec *iov,
                 (op_ret)?"RJT":"ACC", uuid_utoa (rsp.uuid), rsp.hostname, rsp.port);
 
 inject:
-        ret = glusterd_peerinfo_find (rsp.uuid, ctx->hostname, &peerinfo);
-
-        if (ret) {
+        peerinfo = glusterd_peerinfo_find (rsp.uuid, ctx->hostname);
+        if (peerinfo == NULL) {
                 //can happen as part of rpc clnt connection cleanup
                 //when the frame timeout happens after 30 minutes
+                ret = -1;
                 goto respond;
         }
 
@@ -687,9 +687,9 @@ out:
                 "Received lock %s from uuid: %s", (op_ret) ? "RJT" : "ACC",
                 uuid_utoa (rsp.uuid));
 
-        ret = glusterd_peerinfo_find (rsp.uuid, NULL, &peerinfo);
-
-        if (ret) {
+        peerinfo = glusterd_peerinfo_find (rsp.uuid, NULL);
+        if (peerinfo == NULL) {
+                ret = -1;
                 gf_log (this->name, GF_LOG_CRITICAL, "Lock response received "
                         "from unknown peer: %s", uuid_utoa (rsp.uuid));
         }
@@ -764,8 +764,9 @@ glusterd_mgmt_v3_lock_peers_cbk_fn (struct rpc_req *req, struct iovec *iov,
                 "Received mgmt_v3 lock %s from uuid: %s",
                 (op_ret) ? "RJT" : "ACC", uuid_utoa (rsp.uuid));
 
-        ret = glusterd_peerinfo_find (rsp.uuid, NULL, &peerinfo);
-        if (ret) {
+        peerinfo = glusterd_peerinfo_find (rsp.uuid, NULL);
+        if (peerinfo == NULL) {
+                ret = -1;
                 gf_log (this->name, GF_LOG_CRITICAL,
                         "mgmt_v3 lock response received "
                         "from unknown peer: %s. Ignoring response",
@@ -845,9 +846,9 @@ glusterd_mgmt_v3_unlock_peers_cbk_fn (struct rpc_req *req, struct iovec *iov,
                 (op_ret) ? "RJT" : "ACC",
                 uuid_utoa (rsp.uuid));
 
-        ret = glusterd_peerinfo_find (rsp.uuid, NULL, &peerinfo);
-
-        if (ret) {
+        peerinfo = glusterd_peerinfo_find (rsp.uuid, NULL);
+        if (peerinfo == NULL) {
+                ret = -1;
                 gf_log (this->name, GF_LOG_CRITICAL,
                         "mgmt_v3 unlock response received "
                         "from unknown peer: %s. Ignoring response",
@@ -928,9 +929,9 @@ out:
                 "Received unlock %s from uuid: %s",
                 (op_ret)?"RJT":"ACC", uuid_utoa (rsp.uuid));
 
-        ret = glusterd_peerinfo_find (rsp.uuid, NULL, &peerinfo);
-
-        if (ret) {
+        peerinfo = glusterd_peerinfo_find (rsp.uuid, NULL);
+        if (peerinfo == NULL) {
+                ret = -1;
                 gf_log (this->name, GF_LOG_CRITICAL, "Unlock response received "
                         "from unknown peer %s", uuid_utoa (rsp.uuid));
         }
@@ -1036,11 +1037,13 @@ out:
         gf_log (this->name, GF_LOG_DEBUG, "transaction ID = %s",
                 uuid_utoa (*txn_id));
 
-        ret = glusterd_peerinfo_find (rsp.uuid, NULL, &peerinfo);
-        if (ret)
+        peerinfo = glusterd_peerinfo_find (rsp.uuid, NULL);
+        if (peerinfo == NULL) {
+                ret = -1;
                 gf_log (this->name, GF_LOG_CRITICAL, "Stage response received "
                         "from unknown peer: %s. Ignoring response.",
                         uuid_utoa (rsp.uuid));
+        }
 
         if (op_ret) {
                 event_type = GD_OP_EVENT_RCVD_RJT;
@@ -1171,8 +1174,9 @@ __glusterd_commit_op_cbk (struct rpc_req *req, struct iovec *iov,
         gf_log (this->name, GF_LOG_DEBUG, "transaction ID = %s",
                 uuid_utoa (*txn_id));
 
-        ret = glusterd_peerinfo_find (rsp.uuid, NULL, &peerinfo);
-        if (ret) {
+        peerinfo = glusterd_peerinfo_find (rsp.uuid, NULL);
+        if (peerinfo == NULL) {
+                ret = -1;
                 gf_log (this->name, GF_LOG_CRITICAL, "Commit response for "
                         "'Volume %s' received from unknown peer: %s",
                         gd_op_list[opinfo.op], uuid_utoa (rsp.uuid));

@@ -3977,10 +3977,12 @@ glusterd_store_retrieve_peers (xlator_t *this)
                 /* Create an empty peerinfo object before reading in the
                  * details
                  */
-                ret = glusterd_peerinfo_new (&peerinfo, GD_FRIEND_STATE_DEFAULT,
-                                             NULL, NULL, 0);
-                if (ret)
+                peerinfo = glusterd_peerinfo_new (GD_FRIEND_STATE_DEFAULT, NULL,
+                                                  NULL, 0);
+                if (peerinfo == NULL) {
+                        ret = -1;
                         goto out;
+                }
 
                 while (!ret) {
 

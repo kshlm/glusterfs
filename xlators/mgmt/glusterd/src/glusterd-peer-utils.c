@@ -37,7 +37,7 @@ glusterd_peerinfo_cleanup (glusterd_peerinfo_t *peerinfo)
                         GF_FREE (peerctx);
                 }
         }
-        gd_peerinfo_destroy (peerinfo);
+        glusterd_peerinfo_destroy (peerinfo);
 
         if (quorum_action)
                 glusterd_do_quorum_action ();
@@ -238,18 +238,16 @@ glusterd_peerinfo_find (uuid_t uuid, const char *hostname)
  * values using the passed parameters.
  * @hostname is added as the first entry in peerinfo->hostnames list and also
  * set to peerinfo->hostname.
+ * It returns a pointer to peerinfo object if successfull and returns NULL
+ * otherwise. The caller should take care of freeing the created peerinfo
+ * object.
  */
-int
-glusterd_peerinfo_new (glusterd_peerinfo_t **peerinfo,
-                       glusterd_friend_sm_state_t state, uuid_t *uuid,
+glusterd_peerinfo_t *
+glusterd_peerinfo_new (glusterd_friend_sm_state_t state, uuid_t *uuid,
                        const char *hostname, int port)
 {
         glusterd_peerinfo_t      *new_peer = NULL;
         int                      ret = -1;
-
-        GF_ASSERT (peerinfo);
-        if (!peerinfo)
-                goto out;
 
         new_peer = GF_CALLOC (1, sizeof (*new_peer), gf_gld_mt_peerinfo_t);
         if (!new_peer)
@@ -285,12 +283,12 @@ glusterd_peerinfo_new (glusterd_peerinfo_t **peerinfo,
         if (new_peer->state.state == GD_FRIEND_STATE_BEFRIENDED)
                 new_peer->quorum_contrib = QUORUM_WAITING;
         new_peer->port = port;
-        *peerinfo = new_peer;
 out:
-        if (ret && new_peer)
+        if (ret && new_peer) {
                 glusterd_peerinfo_cleanup (new_peer);
-        gf_log ("", GF_LOG_DEBUG, "returning %d", ret);
-        return ret;
+                new_peer = NULL;
+        }
+        return new_peer;
 }
 
 gf_boolean_t
@@ -614,9 +612,10 @@ gd_peerinfo_from_dict (dict_t *dict, char *prefix,
         GF_VALIDATE_OR_GOTO (this->name, (prefix != NULL), out);
         GF_VALIDATE_OR_GOTO (this->name, (peerinfo != NULL), out);
 
-        ret = glusterd_peerinfo_new (&new_peer, GD_FRIEND_STATE_DEFAULT, NULL,
-                                     NULL, 0);
-        if (ret) {
+        new_peer = glusterd_peerinfo_new (GD_FRIEND_STATE_DEFAULT, NULL, NULL,
+                                          0);
+        if (new_peer == NULL) {
+                ret = -1;
                 gf_log (this->name, GF_LOG_ERROR, "Could not create peerinfo "
                         "object");
                 goto out;
