@@ -569,7 +569,6 @@ gd_add_friend_to_dict (glusterd_peerinfo_t *friend, dict_t *dict,
                         goto out;
                 }
                 count++;
-                address = NULL;
         }
         memset (key, 0, sizeof (key));
         snprintf (key, sizeof (key), "%s.address-count", prefix);
