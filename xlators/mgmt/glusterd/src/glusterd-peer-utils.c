@@ -45,7 +45,7 @@ glusterd_peerinfo_cleanup (glusterd_peerinfo_t *peerinfo)
 }
 
 int32_t
-gd_peerinfo_destroy (glusterd_peerinfo_t *peerinfo)
+glusterd_peerinfo_destroy (glusterd_peerinfo_t *peerinfo)
 {
         int32_t                         ret = -1;
         glusterd_peer_hostname_t *hostname = NULL;
