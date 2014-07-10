@@ -93,7 +93,7 @@ struct glusterd_peerinfo_ {
         rpc_clnt_prog_t                 *peer;
         rpc_clnt_prog_t                 *mgmt_v3;
         int                             connected;
-        gf_store_handle_t         *shandle;
+        gf_store_handle_t               *shandle;
         glusterd_sm_tr_log_t            sm_log;
         gf_boolean_t                    quorum_action;
         gd_quorum_contrib_t             quorum_contrib;

@@ -2398,9 +2398,8 @@ out:
 }
 
 int
-glusterd_friend_hostname_update (glusterd_peerinfo_t *peerinfo,
-                                char *hostname,
-                                gf_boolean_t store_update)
+glusterd_peer_hostname_update (glusterd_peerinfo_t *peerinfo,
+                               const char *hostname, gf_boolean_t store_update)
 {
         int                     ret = 0;
 
@@ -3268,8 +3267,8 @@ glusterd_probe_begin (rpcsvc_request_t *req, const char *hoststr, int port,
                                 *op_errno = GF_PROBE_FRIEND_DETACHING;
                         goto out;
                 }
-                ret = glusterd_friend_hostname_update (peerinfo, (char*)hoststr,
-                                                       _gf_false);
+                ret = glusterd_peer_hostname_update (peerinfo, hoststr,
+                                                     _gf_false);
                 if (ret)
                         goto out;
                 //this is just to rename so inject local acc for cluster update
