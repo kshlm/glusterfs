@@ -2517,8 +2517,9 @@ __glusterd_handle_friend_update (rpcsvc_request_t *req)
                         /* Create a new peer and add it to the list as there is
                          * no existing peer with the uuid
                          */
-                        ret = gd_peerinfo_from_dict (dict, key, &peerinfo);
-                        if (ret) {
+                        peerinfo = gd_peerinfo_from_dict (dict, key);
+                        if (peerinfo == NULL) {
+                                ret = -1;
                                 gf_log (this->name, GF_LOG_ERROR,
                                         "Could not create peerinfo from dict "
                                         "for prefix %s", key);

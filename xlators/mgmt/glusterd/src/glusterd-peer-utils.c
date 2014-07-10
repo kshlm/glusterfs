@@ -57,10 +57,13 @@ glusterd_peerinfo_destroy (glusterd_peerinfo_t *peerinfo)
         ret = glusterd_store_delete_peerinfo (peerinfo);
 
         if (ret) {
-                gf_log ("", GF_LOG_ERROR, "Deleting peer info failed");
+                gf_log ("glusterd", GF_LOG_ERROR, "Deleting peer info failed");
         }
 
         list_del_init (&peerinfo->uuid_list);
+
+        GF_FREE (peerinfo->hostname);
+        peerinfo->hostname = NULL;
 
         list_for_each_entry_safe (hostname, tmp, &peerinfo->hostnames,
                                   hostname_list) {
@@ -100,7 +103,7 @@ glusterd_peerinfo_find_by_hostname (const char *hoststr)
 
         peerinfo = NULL;
 
-        peerinfo = gd_find_peerinfo_from_hostname (this, hoststr);
+        peerinfo = gd_find_peerinfo_from_hostname (hoststr);
         if (peerinfo)
                 return peerinfo;
 
@@ -113,7 +116,7 @@ glusterd_peerinfo_find_by_hostname (const char *hoststr)
         }
 
         for (p = addr; p != NULL; p = p->ai_next) {
-                peerinfo = gd_find_peerinfo_from_addrinfo (this, p);
+                peerinfo = gd_find_peerinfo_from_addrinfo (p);
                 if (peerinfo) {
                         freeaddrinfo (addr);
                         return peerinfo;
@@ -401,11 +404,11 @@ glusterd_are_vol_all_peers_up (glusterd_volinfo_t *volinfo,
                                 goto out;
                         }
                 }
-       }
+        }
 
         ret = _gf_true;
 out:
-        gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
+        gf_log ("glusterd", GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
 
@@ -432,7 +435,7 @@ glusterd_peer_hostname_new (const char *hostname,
         ret = 0;
 
 out:
-        gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
+        gf_log ("glusterd", GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
 
@@ -585,132 +588,24 @@ out:
         return ret;
 }
 
-/* gd_peerinfo_from_dict creates a peerinfo object from details of peer with
- * @prefix in @dict and stores its address into @peerinfo.
- * All the parmeters are necessary
- */
-int
-gd_peerinfo_from_dict (dict_t *dict, char *prefix,
-                       glusterd_peerinfo_t **peerinfo)
-{
-        int                  ret      = -1;
-        xlator_t            *this     = NULL;
-        glusterd_conf_t     *conf     = NULL;
-        glusterd_peerinfo_t *new_peer = NULL;
-        char                 key[100] = {0,};
-        char                *uuid_str = NULL;
-        char                *hostname = NULL;
-        int                  count    = 0;
-        int                  i        = 0;
-
-        this = THIS;
-        GF_VALIDATE_OR_GOTO ("glusterd", (this != NULL), out);
-
-        conf = this->private;
-        GF_VALIDATE_OR_GOTO (this->name, (conf != NULL), out);
-
-        GF_VALIDATE_OR_GOTO (this->name, (dict != NULL), out);
-        GF_VALIDATE_OR_GOTO (this->name, (prefix != NULL), out);
-        GF_VALIDATE_OR_GOTO (this->name, (peerinfo != NULL), out);
-
-        new_peer = glusterd_peerinfo_new (GD_FRIEND_STATE_DEFAULT, NULL, NULL,
-                                          0);
-        if (new_peer == NULL) {
-                ret = -1;
-                gf_log (this->name, GF_LOG_ERROR, "Could not create peerinfo "
-                        "object");
-                goto out;
-        }
-
-        snprintf (key, sizeof (key), "%s.uuid", prefix);
-        ret = dict_get_str (dict, key, &uuid_str);
-        if (ret) {
-                gf_log (this->name, GF_LOG_ERROR, "Key %s not present in "
-                        "dictionary", key);
-                goto out;
-        }
-        uuid_parse (uuid_str, new_peer->uuid);
-
-        memset (key, 0, sizeof (key));
-        snprintf (key, sizeof (key), "%s.hostname", prefix);
-        ret = dict_get_str (dict, key, &hostname);
-        if (ret) {
-                gf_log (this->name, GF_LOG_ERROR, "Key %s not present in "
-                        "dictionary", key);
-                goto out;
-        }
-        ret = gd_add_address_to_peer (new_peer, hostname);
-        if (ret) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "Could not add address to peer");
-                goto out;
-        }
-        /* Also set peerinfo->hostname to the first address */
-        if (new_peer->hostname != NULL)
-                GF_FREE (new_peer->hostname);
-        new_peer->hostname = gf_strdup (hostname);
-
-        if (conf->op_version < GD_OP_VERSION_3_6_0) {
-                ret = 0;
-                goto cont;
-        }
-
-        memset (key, 0, sizeof (key));
-        snprintf (key, sizeof (key), "%s.address-count", prefix);
-        ret = dict_get_int32 (dict, key, &count);
-        if (ret) {
-                gf_log (this->name, GF_LOG_ERROR, "Key %s not present in "
-                        "dictionary", key);
-                goto out;
-        }
-        hostname = NULL;
-        for (i = 0; i < count; i++) {
-                memset (key, 0, sizeof (key));
-                snprintf (key, sizeof (key), "%s.hostname%d",prefix, i);
-                ret = dict_get_str (dict, key, &hostname);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR, "Key %s not present "
-                                "in dictionary", key);
-                        goto out;
-                }
-                ret = gd_add_address_to_peer (new_peer, hostname);
-                if (ret) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "Could not add address to peer");
-                        goto out;
-                }
-
-                hostname = NULL;
-        }
-
-cont:
-        *peerinfo = new_peer;
-        new_peer = NULL;
-out:
-        if (new_peer)
-                glusterd_peerinfo_cleanup (new_peer);
-
-        gf_log (this ? this->name : "glusterd", GF_LOG_DEBUG, "Returning %d",
-                ret);
-        return ret;
-}
-
 /* gd_find_peerinfo_from_hostname iterates over all the addresses saved for each
  * peer and matches it to @hoststr.
  * Returns the matched peer if found else returns NULL
  */
 glusterd_peerinfo_t *
-gd_find_peerinfo_from_hostname (xlator_t *this, const char *hoststr)
+gd_find_peerinfo_from_hostname (const char *hoststr)
 {
+        xlator_t                 *this    = NULL;
+        glusterd_conf_t          *priv    = NULL;
         glusterd_peerinfo_t      *peer    = NULL;
         glusterd_peer_hostname_t *tmphost = NULL;
-        glusterd_conf_t          *priv    = NULL;
 
+        this = THIS;
         GF_ASSERT (this != NULL);
-        GF_VALIDATE_OR_GOTO (this->name, (hoststr != NULL), out);
-
         priv = this->private;
         GF_VALIDATE_OR_GOTO (this->name, (priv != NULL), out);
+
+        GF_VALIDATE_OR_GOTO (this->name, (hoststr != NULL), out);
 
         list_for_each_entry (peer, &priv->peers, uuid_list) {
                 list_for_each_entry (tmphost, &peer->hostnames,hostname_list) {
@@ -737,20 +632,22 @@ out:
  * Returns the matched peer if found else returns NULL
  */
 glusterd_peerinfo_t *
-gd_find_peerinfo_from_addrinfo (xlator_t *this, const struct addrinfo *addr)
+gd_find_peerinfo_from_addrinfo (const struct addrinfo *addr)
 {
+        xlator_t                 *this    = NULL;
         glusterd_conf_t          *conf    = NULL;
         glusterd_peerinfo_t      *peer    = NULL;
         glusterd_peer_hostname_t *address = NULL;
-        int ret = 0;
+        int                       ret     = 0;
         struct addrinfo          *paddr   = NULL;
         struct addrinfo          *tmp     = NULL;
 
+        this = THIS;
         GF_ASSERT (this != NULL);
-        GF_VALIDATE_OR_GOTO (this->name, (addr != NULL), out);
-
         conf = this->private;
         GF_VALIDATE_OR_GOTO (this->name, (conf != NULL), out);
+
+        GF_VALIDATE_OR_GOTO (this->name, (addr != NULL), out);
 
         list_for_each_entry (peer, &conf->peers, uuid_list) {
                 list_for_each_entry (address, &peer->hostnames, hostname_list) {
@@ -783,6 +680,10 @@ out:
         return NULL;
 }
 
+/* gd_update_peerinfo_from_dict will update the hostnames for @peerinfo from
+ * peer details with @prefix in @dict.
+ * Returns 0 on sucess and -1 on failure.
+ */
 int
 gd_update_peerinfo_from_dict (glusterd_peerinfo_t *peerinfo, dict_t *dict,
                               const char *prefix)
@@ -796,7 +697,7 @@ gd_update_peerinfo_from_dict (glusterd_peerinfo_t *peerinfo, dict_t *dict,
         int                  i        = 0;
 
         this = THIS;
-        GF_VALIDATE_OR_GOTO ("glusterd", (this != NULL), out);
+        GF_ASSERT (this != NULL);
 
         conf = this->private;
         GF_VALIDATE_OR_GOTO (this->name, (conf != NULL), out);
@@ -858,7 +759,59 @@ gd_update_peerinfo_from_dict (glusterd_peerinfo_t *peerinfo, dict_t *dict,
         }
 
 out:
-        gf_log (this ? this->name : "glusterd", GF_LOG_DEBUG, "Returning %d",
-                ret);
+        gf_log (this->name, GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
+}
+
+/* gd_peerinfo_from_dict creates a peerinfo object from details of peer with
+ * @prefix in @dict.
+ * Returns a pointer to the created peerinfo object on success, and NULL on
+ * failure.
+ */
+glusterd_peerinfo_t *
+gd_peerinfo_from_dict (dict_t *dict, const char *prefix)
+{
+        int                  ret      = -1;
+        xlator_t            *this     = NULL;
+        glusterd_conf_t     *conf     = NULL;
+        glusterd_peerinfo_t *new_peer = NULL;
+        char                 key[100] = {0,};
+        char                *uuid_str = NULL;
+
+        this = THIS;
+        GF_VALIDATE_OR_GOTO ("glusterd", (this != NULL), out);
+
+        conf = this->private;
+        GF_VALIDATE_OR_GOTO (this->name, (conf != NULL), out);
+
+        GF_VALIDATE_OR_GOTO (this->name, (dict != NULL), out);
+        GF_VALIDATE_OR_GOTO (this->name, (prefix != NULL), out);
+
+        new_peer = glusterd_peerinfo_new (GD_FRIEND_STATE_DEFAULT, NULL, NULL,
+                                          0);
+        if (new_peer == NULL) {
+                ret = -1;
+                gf_log (this->name, GF_LOG_ERROR, "Could not create peerinfo "
+                        "object");
+                goto out;
+        }
+
+        snprintf (key, sizeof (key), "%s.uuid", prefix);
+        ret = dict_get_str (dict, key, &uuid_str);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Key %s not present in "
+                        "dictionary", key);
+                goto out;
+        }
+        uuid_parse (uuid_str, new_peer->uuid);
+
+        ret = gd_update_peerinfo_from_dict (new_peer, dict, prefix);
+
+out:
+        if ((ret != 0) && (new_peer != NULL)) {
+                glusterd_peerinfo_cleanup (new_peer);
+                new_peer = NULL;
+        }
+
+        return new_peer;
 }

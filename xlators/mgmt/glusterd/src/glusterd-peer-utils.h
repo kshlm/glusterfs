@@ -68,17 +68,16 @@ int
 gd_add_friend_to_dict (glusterd_peerinfo_t *friend, dict_t *dict,
                        const char *prefix);
 
-int
-gd_peerinfo_from_dict (dict_t *dict, char *prefix,
-                       glusterd_peerinfo_t **peerinfo);
+glusterd_peerinfo_t *
+gd_find_peerinfo_from_hostname (const char *hoststr);
 
 glusterd_peerinfo_t *
-gd_find_peerinfo_from_hostname (xlator_t *this, const char *hoststr);
-
-glusterd_peerinfo_t *
-gd_find_peerinfo_from_addrinfo (xlator_t *this, const struct addrinfo *addr);
+gd_find_peerinfo_from_addrinfo (const struct addrinfo *addr);
 
 int
 gd_update_peerinfo_from_dict (glusterd_peerinfo_t *peerinfo, dict_t *dict,
                               const char *prefix);
+
+glusterd_peerinfo_t *
+gd_peerinfo_from_dict (dict_t *dict, const char *prefix);
 #endif /* _GLUSTERD_PEER_UTILS_H */
