@@ -23,11 +23,6 @@ glusterd_peerinfo_cleanup (glusterd_peerinfo_t *peerinfo)
         if (peerinfo->quorum_contrib != QUORUM_NONE)
                 quorum_action = _gf_true;
         if (peerinfo->rpc) {
-                /* cleanup the saved-frames before last unref */
-                synclock_unlock (&priv->big_lock);
-                rpc_clnt_connection_cleanup (&peerinfo->rpc->conn);
-                synclock_lock (&priv->big_lock);
-
                 peerctx = peerinfo->rpc->mydata;
                 peerinfo->rpc->mydata = NULL;
                 peerinfo->rpc = glusterd_rpc_clnt_unref (priv, peerinfo->rpc);
@@ -54,13 +49,12 @@ glusterd_peerinfo_destroy (glusterd_peerinfo_t *peerinfo)
         if (!peerinfo)
                 goto out;
 
-        ret = glusterd_store_delete_peerinfo (peerinfo);
+        list_del_init (&peerinfo->uuid_list);
 
+        ret = glusterd_store_delete_peerinfo (peerinfo);
         if (ret) {
                 gf_log ("glusterd", GF_LOG_ERROR, "Deleting peer info failed");
         }
-
-        list_del_init (&peerinfo->uuid_list);
 
         GF_FREE (peerinfo->hostname);
         peerinfo->hostname = NULL;
@@ -103,7 +97,7 @@ glusterd_peerinfo_find_by_hostname (const char *hoststr)
 
         peerinfo = NULL;
 
-        peerinfo = gd_find_peerinfo_from_hostname (hoststr);
+        peerinfo = gd_peerinfo_find_from_hostname (hoststr);
         if (peerinfo)
                 return peerinfo;
 
@@ -116,7 +110,7 @@ glusterd_peerinfo_find_by_hostname (const char *hoststr)
         }
 
         for (p = addr; p != NULL; p = p->ai_next) {
-                peerinfo = gd_find_peerinfo_from_addrinfo (p);
+                peerinfo = gd_peerinfo_find_from_addrinfo (p);
                 if (peerinfo) {
                         freeaddrinfo (addr);
                         return peerinfo;
@@ -294,16 +288,6 @@ out:
                 new_peer = NULL;
         }
         return new_peer;
-}
-
-gf_boolean_t
-glusterd_peerinfo_is_uuid_null (glusterd_peerinfo_t *peerinfo)
-{
-        GF_ASSERT (peerinfo);
-
-        if (uuid_is_null (peerinfo->uuid))
-                return _gf_true;
-        return _gf_false;
 }
 
 /* Check if the all peers are connected and befriended, except the peer
@@ -562,6 +546,7 @@ gd_add_friend_to_dict (glusterd_peerinfo_t *friend, dict_t *dict,
         }
 
         address = NULL;
+        count = 0;
         list_for_each_entry (address, &friend->hostnames, hostname_list) {
                 GF_VALIDATE_OR_GOTO (this->name, (address != NULL), out);
 
@@ -588,12 +573,12 @@ out:
         return ret;
 }
 
-/* gd_find_peerinfo_from_hostname iterates over all the addresses saved for each
+/* gd_peerinfo_find_from_hostname iterates over all the addresses saved for each
  * peer and matches it to @hoststr.
  * Returns the matched peer if found else returns NULL
  */
 glusterd_peerinfo_t *
-gd_find_peerinfo_from_hostname (const char *hoststr)
+gd_peerinfo_find_from_hostname (const char *hoststr)
 {
         xlator_t                 *this    = NULL;
         glusterd_conf_t          *priv    = NULL;
@@ -621,7 +606,7 @@ out:
         return NULL;
 }
 
-/* gd_find_peerinfo_from_addrinfo iterates over all the addresses saved for each
+/* gd_peerinfo_find_from_addrinfo iterates over all the addresses saved for each
  * peer, resolves them and compares them to @addr.
  *
  *
@@ -632,7 +617,7 @@ out:
  * Returns the matched peer if found else returns NULL
  */
 glusterd_peerinfo_t *
-gd_find_peerinfo_from_addrinfo (const struct addrinfo *addr)
+gd_peerinfo_find_from_addrinfo (const struct addrinfo *addr)
 {
         xlator_t                 *this    = NULL;
         glusterd_conf_t          *conf    = NULL;
@@ -814,4 +799,104 @@ out:
         }
 
         return new_peer;
+}
+
+int
+gd_add_peer_hostnames_to_dict (glusterd_peerinfo_t *peerinfo, dict_t *dict,
+                               const char *prefix)
+{
+        int                       ret      = -1;
+        xlator_t                 *this     = NULL;
+        glusterd_conf_t          *conf     = NULL;
+        char                      key[256] = {0,};
+        glusterd_peer_hostname_t *addr     = NULL;
+        int                       count    = 0;
+
+        this = THIS;
+        GF_ASSERT (this != NULL);
+
+        conf = this->private;
+        GF_VALIDATE_OR_GOTO (this->name, (conf != NULL), out);
+
+        if (conf->op_version < GD_OP_VERSION_3_6_0) {
+                ret = 0;
+                goto out;
+        }
+
+        GF_VALIDATE_OR_GOTO (this->name, (peerinfo != NULL), out);
+        GF_VALIDATE_OR_GOTO (this->name, (dict != NULL), out);
+        GF_VALIDATE_OR_GOTO (this->name, (prefix != NULL), out);
+
+        list_for_each_entry (addr, &peerinfo->hostnames, hostname_list) {
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.hostname%d", prefix, count);
+                ret = dict_set_dynstr_with_alloc (dict, key, addr->hostname);
+                if (ret)
+                        goto out;
+                count++;
+        }
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.hostname_count", prefix);
+        ret = dict_set_int32 (dict, key, count);
+
+out:
+        return ret;
+}
+
+int
+gd_add_peer_detail_to_dict (glusterd_peerinfo_t *peerinfo, dict_t *friends,
+                            int count)
+{
+
+        int             ret = -1;
+        char            key[256] = {0, };
+        char           *peer_uuid_str = NULL;
+
+        GF_ASSERT (peerinfo);
+        GF_ASSERT (friends);
+
+        snprintf (key, sizeof (key), "friend%d.uuid", count);
+        peer_uuid_str = gd_peer_uuid_str (peerinfo);
+        ret = dict_set_str (friends, key, peer_uuid_str);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "friend%d.hostname", count);
+        ret = dict_set_str (friends, key, peerinfo->hostname);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "friend%d.port", count);
+        ret = dict_set_int32 (friends, key, peerinfo->port);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "friend%d.stateId", count);
+        ret = dict_set_int32 (friends, key, peerinfo->state.state);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "friend%d.state", count);
+        ret = dict_set_str (friends, key,
+                    glusterd_friend_sm_state_name_get(peerinfo->state.state));
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "friend%d.connected", count);
+        ret = dict_set_int32 (friends, key, (int32_t)peerinfo->connected);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "friend%d", count);
+        ret = gd_add_peer_hostnames_to_dict (peerinfo, friends, key);
+
+out:
+        return ret;
 }

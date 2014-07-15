@@ -238,6 +238,7 @@ gf_cli_output_peer_hostnames (dict_t *dict, int count, char *prefix)
 
         return ret;
 }
+
 int
 gf_cli_output_peer_status (dict_t *dict, int count)
 {

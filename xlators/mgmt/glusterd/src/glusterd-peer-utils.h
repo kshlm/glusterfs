@@ -37,9 +37,6 @@ glusterd_peerinfo_new (glusterd_friend_sm_state_t state, uuid_t *uuid,
                        const char *hostname, int port);
 
 gf_boolean_t
-glusterd_peerinfo_is_uuid_null (glusterd_peerinfo_t *peerinfo);
-
-gf_boolean_t
 glusterd_chk_peers_connected_befriended (uuid_t skip_uuid);
 
 char *
@@ -69,10 +66,10 @@ gd_add_friend_to_dict (glusterd_peerinfo_t *friend, dict_t *dict,
                        const char *prefix);
 
 glusterd_peerinfo_t *
-gd_find_peerinfo_from_hostname (const char *hoststr);
+gd_peerinfo_find_from_hostname (const char *hoststr);
 
 glusterd_peerinfo_t *
-gd_find_peerinfo_from_addrinfo (const struct addrinfo *addr);
+gd_peerinfo_find_from_addrinfo (const struct addrinfo *addr);
 
 int
 gd_update_peerinfo_from_dict (glusterd_peerinfo_t *peerinfo, dict_t *dict,
@@ -80,4 +77,11 @@ gd_update_peerinfo_from_dict (glusterd_peerinfo_t *peerinfo, dict_t *dict,
 
 glusterd_peerinfo_t *
 gd_peerinfo_from_dict (dict_t *dict, const char *prefix);
+
+int
+gd_add_peer_hostnames_to_dict (glusterd_peerinfo_t *peerinfo, dict_t *dict,
+                               const char *prefix);
+int
+gd_add_peer_detail_to_dict (glusterd_peerinfo_t *peerinfo, dict_t *friends,
+                            int count);
 #endif /* _GLUSTERD_PEER_UTILS_H */

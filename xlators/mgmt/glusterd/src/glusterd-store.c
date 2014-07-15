@@ -3853,7 +3853,7 @@ glusterd_store_create_peer_shandle (glusterd_peerinfo_t *peerinfo)
 
         GF_ASSERT (peerinfo);
 
-        if (glusterd_peerinfo_is_uuid_null (peerinfo)) {
+        if (uuid_is_null (peerinfo->uuid)) {
                 ret = glusterd_store_peerinfo_hostname_shandle_create (peerinfo);
         } else {
                 ret = glusterd_peerinfo_hostname_shandle_check_destroy (peerinfo);
