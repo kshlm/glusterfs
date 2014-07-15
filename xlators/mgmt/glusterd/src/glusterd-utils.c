@@ -536,6 +536,8 @@ glusterd_volinfo_dup (glusterd_volinfo_t *volinfo,
         new_volinfo->type = volinfo->type;
         new_volinfo->replica_count = volinfo->replica_count;
         new_volinfo->stripe_count = volinfo->stripe_count;
+        new_volinfo->disperse_count = volinfo->disperse_count;
+        new_volinfo->redundancy_count = volinfo->redundancy_count;
         new_volinfo->dist_leaf_count = volinfo->dist_leaf_count;
         new_volinfo->sub_count = volinfo->sub_count;
         new_volinfo->transport_type = volinfo->transport_type;
@@ -2455,6 +2457,18 @@ glusterd_add_volume_to_dict (glusterd_volinfo_t *volinfo,
                 goto out;
 
         memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s%d.disperse_count", prefix, count);
+        ret = dict_set_int32 (dict, key, volinfo->disperse_count);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s%d.redundancy_count", prefix, count);
+        ret = dict_set_int32 (dict, key, volinfo->redundancy_count);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
         snprintf (key, sizeof (key), "%s%d.dist_count", prefix, count);
         ret = dict_set_int32 (dict, key, volinfo->dist_leaf_count);
         if (ret)
@@ -4132,6 +4146,24 @@ glusterd_import_volinfo (dict_t *peer_data, int count,
         memset (key, 0, sizeof (key));
         snprintf (key, sizeof (key), "%s%d.replica_count", prefix, count);
         ret = dict_get_int32 (peer_data, key, &new_volinfo->replica_count);
+        if (ret)
+                gf_log (THIS->name, GF_LOG_INFO,
+                        "peer is possibly old version");
+
+        /* not having a 'disperse_count' key is not a error
+           (as peer may be of old version) */
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s%d.disperse_count", prefix, count);
+        ret = dict_get_int32 (peer_data, key, &new_volinfo->disperse_count);
+        if (ret)
+                gf_log (THIS->name, GF_LOG_INFO,
+                        "peer is possibly old version");
+
+        /* not having a 'redundancy_count' key is not a error
+           (as peer may be of old version) */
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s%d.redundancy_count", prefix, count);
+        ret = dict_get_int32 (peer_data, key, &new_volinfo->redundancy_count);
         if (ret)
                 gf_log (THIS->name, GF_LOG_INFO,
                         "peer is possibly old version");
@@ -6861,6 +6893,9 @@ glusterd_get_dist_leaf_count (glusterd_volinfo_t *volinfo)
 {
     int rcount = volinfo->replica_count;
     int scount = volinfo->stripe_count;
+
+    if (volinfo->type == GF_CLUSTER_TYPE_DISPERSE)
+        return volinfo->disperse_count;
 
     return (rcount ? rcount : 1) * (scount ? scount : 1);
 }
@@ -10396,6 +10431,19 @@ glusterd_snap_create_use_rsp_dict (dict_t *dst, dict_t *src)
                 goto out;
         }
 
+        ret = dict_get_str (src, "snapuuid", &buf);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "failed to get snap UUID");
+                goto out;
+        }
+
+        ret = dict_set_dynstr_with_alloc (dst, "snapuuid", buf);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Failed to set snap uuid in dict");
+                goto out;
+        }
+
         /* set in dst dictionary soft-limit-reach only if soft-limit-reach
          * is present src dictionary */
         ret = dict_get_int8 (src, "soft-limit-reach", &soft_limit_flag);
@@ -11327,6 +11375,13 @@ gd_update_volume_op_versions (glusterd_volinfo_t *volinfo)
                         if (volinfo->client_op_version < 2)
                                 volinfo->client_op_version = 2;
                 }
+        }
+
+        if (volinfo->type == GF_CLUSTER_TYPE_DISPERSE) {
+                if (volinfo->op_version < GD_OP_VERSION_3_6_0)
+                        volinfo->op_version = GD_OP_VERSION_3_6_0;
+                if (volinfo->client_op_version < GD_OP_VERSION_3_6_0)
+                        volinfo->client_op_version = GD_OP_VERSION_3_6_0;
         }
 
         return;
@@ -12373,7 +12428,7 @@ glusterd_volume_quorum_calculate (glusterd_volinfo_t *volinfo, dict_t *dict,
                 goto out;
         }
 
-        up_count = volinfo->replica_count - down_count;
+        up_count = volinfo->dist_leaf_count - down_count;
 
         if (quorum_type && !strcmp (quorum_type, "fixed")) {
                 if (up_count >= quorum_count) {
@@ -12381,7 +12436,8 @@ glusterd_volume_quorum_calculate (glusterd_volinfo_t *volinfo, dict_t *dict,
                         goto out;
                 }
         } else {
-                if (volinfo->replica_count % 2 == 0) {
+                if ((GF_CLUSTER_TYPE_DISPERSE != volinfo->type) &&
+                    (volinfo->dist_leaf_count % 2 == 0)) {
                         if ((up_count > quorum_count) ||
                             ((up_count == quorum_count) && first_brick_on)) {
                                 quorum_met = _gf_true;
@@ -12434,8 +12490,9 @@ glusterd_volume_quorum_check (glusterd_volinfo_t *volinfo, int64_t index,
                 goto out;
         }
 
-        if (!glusterd_is_volume_replicate (volinfo) ||
-            volinfo->replica_count < 3) {
+        if ((!glusterd_is_volume_replicate (volinfo) ||
+             volinfo->replica_count < 3) &&
+            (GF_CLUSTER_TYPE_DISPERSE != volinfo->type)) {
                 for (i = 0; i < volinfo->brick_count ; i++) {
                         /* for a pure distribute volume, and replica volume
                            with replica count 2, quorum is not met if even
@@ -12457,7 +12514,8 @@ glusterd_volume_quorum_check (glusterd_volinfo_t *volinfo, int64_t index,
                 ret = 0;
                 quorum_met = _gf_true;
         } else {
-             distribute_subvols = volinfo->brick_count / volinfo->replica_count;
+             distribute_subvols = volinfo->brick_count /
+                                  volinfo->dist_leaf_count;
              for (j = 0; j < distribute_subvols; j++) {
                         // by default assume quorum is not met
                         /* TODO: Handle distributed striped replicate volumes
@@ -12466,11 +12524,11 @@ glusterd_volume_quorum_check (glusterd_volinfo_t *volinfo, int64_t index,
                         */
                         ret = 1;
                         quorum_met = _gf_false;
-                        for (i = 0; i < volinfo->replica_count; i++) {
+                        for (i = 0; i < volinfo->dist_leaf_count; i++) {
                                 snprintf (key, sizeof (key),
                                           "%s%"PRId64".brick%"PRId64".status", key_prefix,
                                           index,
-                                          (j * volinfo->replica_count) + i);
+                                          (j * volinfo->dist_leaf_count) + i);
                                 ret = dict_get_int32 (dict, key, &brick_online);
                                 if (ret || !brick_online) {
                                         if (i == 0)
@@ -12642,6 +12700,9 @@ glusterd_snap_quorum_check_for_create (dict_t *dict, gf_boolean_t snap_volume,
                         else
                                 quorum_count =
                                         volinfo->replica_count/2 + 1;
+                } else if (GF_CLUSTER_TYPE_DISPERSE == volinfo->type) {
+                        quorum_count = volinfo->disperse_count -
+                                       volinfo->redundancy_count;
                 } else {
                         quorum_count = volinfo->brick_count;
                 }
@@ -12660,8 +12721,22 @@ glusterd_snap_quorum_check_for_create (dict_t *dict, gf_boolean_t snap_volume,
                            if the quorum-type option is not set to auto,
                            the behavior is set to the default behavior)
                         */
-                        if (!ret)
-                                quorum_count = tmp;
+                        if (!ret) {
+                                /* for dispersed volumes, only allow quorums
+                                   equal or larger than minimum functional
+                                   value.
+                                */
+                                if ((GF_CLUSTER_TYPE_DISPERSE !=
+                                                              volinfo->type) ||
+                                    (tmp >= quorum_count)) {
+                                        quorum_count = tmp;
+                                } else {
+                                        gf_log(this->name, GF_LOG_INFO,
+                                               "Ignoring small quorum-count "
+                                               "(%d) on dispersed volume", tmp);
+                                        quorum_type = NULL;
+                                }
+                        }
                         else
                                 quorum_type = NULL;
                 }

@@ -770,6 +770,34 @@ glusterd_snapshot_restore (dict_t *dict, char **op_errstr, dict_t *rsp_dict)
                         goto out;
                 }
 
+                ret = dict_set_dynstr_with_alloc (rsp_dict, "snapuuid",
+                                                  uuid_utoa (snap->snap_id));
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR, "Failed to set snap "
+                                "uuid in response dictionary for %s snapshot",
+                                snap->snapname);
+                        goto out;
+                }
+
+
+                ret = dict_set_dynstr_with_alloc (rsp_dict, "volname",
+                                                  snap_volinfo->parent_volname);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR, "Failed to set snap "
+                                "uuid in response dictionary for %s snapshot",
+                                snap->snapname);
+                        goto out;
+                }
+
+                ret = dict_set_dynstr_with_alloc (rsp_dict, "volid",
+                                        uuid_utoa (parent_volinfo->volume_id));
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR, "Failed to set snap "
+                                "uuid in response dictionary for %s snapshot",
+                                snap->snapname);
+                        goto out;
+                }
+
                 /* Take backup of the volinfo folder */
                 ret = glusterd_snapshot_backup_vol (parent_volinfo);
                 if (ret) {
@@ -2768,7 +2796,7 @@ glusterd_snapshot_get_all_snap_info (dict_t *dict)
                 }
         }
 
-        ret = dict_set_int32 (dict, "snap-count", snapcount);
+        ret = dict_set_int32 (dict, "snapcount", snapcount);
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR, "Failed to set snapcount");
                 goto out;
@@ -2870,7 +2898,7 @@ glusterd_snapshot_get_info_by_volume (dict_t *dict, char *volname,
                         goto out;
                 }
         }
-        ret = dict_set_int32 (dict, "snap-count", snapcount);
+        ret = dict_set_int32 (dict, "snapcount", snapcount);
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR, "Failed to set snapcount");
                 goto out;
@@ -2941,7 +2969,7 @@ glusterd_handle_snapshot_info (rpcsvc_request_t *req, glusterd_op_t op,
                                 goto out;
                         }
 
-                        ret = dict_set_int32 (dict, "snap-count", 1);
+                        ret = dict_set_int32 (dict, "snapcount", 1);
                         if (ret) {
                                 gf_log (this->name, GF_LOG_ERROR,
                                         "Failed to set snapcount");
@@ -3047,7 +3075,7 @@ glusterd_snapshot_get_all_snapnames (dict_t *dict)
                 }
         }
 
-        ret = dict_set_int32 (dict, "snap-count", snapcount);
+        ret = dict_set_int32 (dict, "snapcount", snapcount);
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR, "Failed to set snapcount");
                 goto out;
@@ -3096,7 +3124,7 @@ glusterd_snapshot_get_vol_snapnames (dict_t *dict, glusterd_volinfo_t *volinfo)
                 }
         }
 
-        ret = dict_set_int32 (dict, "snap-count", snapcount);
+        ret = dict_set_int32 (dict, "snapcount", snapcount);
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR, "Failed to set snapcount");
                 goto out;
@@ -3856,6 +3884,7 @@ glusterd_update_fstype (char *orig_brick_path,
 
         ret = 0;
 out:
+        GF_FREE (mnt_pt);
         return ret;
 }
 
@@ -3898,17 +3927,22 @@ glusterd_add_brick_to_snap_volume (dict_t *dict, dict_t *rsp_dict,
                 goto out;
         }
 
-        /* Update the backend file-system type of snap brick in
-         * snap volinfo. */
-        ret = glusterd_update_fstype (original_brickinfo->path, snap_brickinfo,
-                                      original_brickinfo->fstype,
-                                      sizeof(original_brickinfo->fstype));
-        if (ret) {
-                gf_log (this->name, GF_LOG_ERROR, "Failed to update "
-                        "file-system type for %s brick",
-                        snap_brickinfo->path);
-                /* We should not fail snapshot operation if we fail to get
-                 * the file-system type */
+        /* Update fstype for the local bricks only */
+        if (!uuid_compare (original_brickinfo->uuid, MY_UUID)) {
+                /* Update the backend file-system type of snap brick in
+                 * snap volinfo. */
+                ret = glusterd_update_fstype
+                                          (original_brickinfo->path,
+                                           snap_brickinfo,
+                                           original_brickinfo->fstype,
+                                           sizeof(original_brickinfo->fstype));
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR, "Failed to update "
+                                "file-system type for %s brick",
+                                snap_brickinfo->path);
+                        /* We should not fail snapshot operation if we fail to
+                         * get the file-system type */
+                }
         }
 
         snprintf (key, sizeof(key) - 1, "vol%"PRId64".brickdir%d", volcount,
@@ -4538,6 +4572,15 @@ glusterd_snapshot_remove_prevalidate (dict_t *dict, char **op_errstr,
                 goto out;
         }
 
+        ret = dict_set_dynstr_with_alloc (dict, "snapuuid",
+                                          uuid_utoa (snap->snap_id));
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to set snap "
+                        "uuid in response dictionary for %s snapshot",
+                        snap->snapname);
+                goto out;
+        }
+
         ret = 0;
 out:
         return ret;
@@ -4699,6 +4742,16 @@ glusterd_snapshot_activate_commit (dict_t *dict, char **op_errstr,
                         snap_volinfo->volname, snap->snapname);
                 goto out;
         }
+
+        ret = dict_set_dynstr_with_alloc (rsp_dict, "snapuuid",
+                                          uuid_utoa (snap->snap_id));
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to set snap "
+                        "uuid in response dictionary for %s snapshot",
+                        snap->snapname);
+                goto out;
+        }
+
         ret = 0;
 out:
         return ret;
@@ -4759,6 +4812,15 @@ glusterd_snapshot_deactivate_commit (dict_t *dict, char **op_errstr,
                 goto out;
         }
 
+        ret = dict_set_dynstr_with_alloc (rsp_dict, "snapuuid",
+                                          uuid_utoa (snap->snap_id));
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to set snap "
+                        "uuid in response dictionary for %s snapshot",
+                        snap->snapname);
+                goto out;
+        }
+
         ret = 0;
 out:
         return ret;
@@ -4802,6 +4864,15 @@ glusterd_snapshot_remove_commit (dict_t *dict, char **op_errstr,
                 gf_log (this->name, GF_LOG_ERROR, "Snap %s does not exist",
                         snapname);
                 ret = -1;
+                goto out;
+        }
+
+        ret = dict_set_dynstr_with_alloc (rsp_dict, "snapuuid",
+                                          uuid_utoa (snap->snap_id));
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to set snap uuid in "
+                        "response dictionary for %s snapshot",
+                        snap->snapname);
                 goto out;
         }
 
@@ -5275,6 +5346,17 @@ glusterd_snapshot_create_commit (dict_t *dict, char **op_errstr,
                         goto out;
                 }
         }
+
+        ret = dict_set_dynstr_with_alloc (rsp_dict, "snapuuid",
+                                          uuid_utoa (snap->snap_id));
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to set snap "
+                        "uuid in response dictionary for %s snapshot",
+                        snap->snapname);
+                goto out;
+        }
+
+        ret = 0;
 
 out:
         if (ret) {
@@ -6324,6 +6406,7 @@ glusterd_snapshot_create_postvalidate (dict_t *dict, int32_t op_ret,
                         if (ret) {
                                 gf_log (this->name, GF_LOG_WARNING, "cleanup "
                                         "operation failed");
+                                goto out;
                         }
                 }
                 /* Irrespective of status of cleanup its better
@@ -6331,6 +6414,7 @@ glusterd_snapshot_create_postvalidate (dict_t *dict, int32_t op_ret,
                  * following this block is not required to be
                  * executed in case of failure scenario.
                  */
+                ret = 0;
                 goto out;
         }
 
