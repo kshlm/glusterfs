@@ -50,7 +50,6 @@
 #define SSL_DH_PARAM_OPT    "transport.socket.ssl-dh-param"
 #define SSL_EC_CURVE_OPT    "transport.socket.ssl-ec-curve"
 #define SSL_CRL_PATH_OPT    "transport.socket.ssl-crl-path"
-#define OWN_THREAD_OPT      "transport.socket.own-thread"
 
 /* TBD: do automake substitutions etc. (ick) to set these. */
 #if !defined(DEFAULT_ETC_SSL)
@@ -203,11 +202,11 @@ struct tid_wrap {
         pthread_t tid;
 };
 
-/* _socket_reap_own_threads iterated over the queue of tid's and pthread_joins
+/* _socket_reap_ssl_threads iterated over the queue of tid's and pthread_joins
  * them.  If a thread join fails, it logs the failure and continues
  */
 static void
-_socket_reap_own_threads() {
+_socket_reap_ssl_threads() {
         struct tid_wrap *node = NULL;
         struct tid_wrap *tmp = NULL;
         pthread_t tid = 0;
@@ -243,7 +242,7 @@ socket_thread_reaper () {
         gf_timer_call_cancel (THIS->ctx, reap_timer);
         reap_timer = 0;
 
-        _socket_reap_own_threads();
+        _socket_reap_ssl_threads();
 
         reap_timer = gf_timer_call_after (THIS->ctx, reap_ts,
                                           socket_thread_reaper, NULL);
@@ -809,7 +808,7 @@ __socket_disconnect (rpc_transport_t *this)
 
         if (priv->sock != -1) {
                 ret = __socket_shutdown(this);
-		if (priv->own_thread) {
+		if (priv->ssl_enabled) {
                         /*
                          * Without this, reconnect (= disconnect + connect)
                          * won't work except by accident.
@@ -819,9 +818,6 @@ __socket_disconnect (rpc_transport_t *this)
                         gf_log (this->name, GF_LOG_TRACE,
                                 "OT_PLEASE_DIE on %p", this);
                         priv->ot_state = OT_PLEASE_DIE;
-                }
-                else if (priv->use_ssl) {
-                        ssl_teardown_connection(priv);
                 }
         }
 
@@ -1190,7 +1186,7 @@ __socket_ioq_churn_entry (rpc_transport_t *this, struct ioq *entry, int direct)
                 GF_ASSERT (entry->pending_count == 0);
                 __socket_ioq_entry_free (entry);
 		priv = this->private;
-		if (priv->own_thread) {
+		if (priv->ssl_enabled) {
 			/*
 			 * The pipe should only remain readable if there are
 			 * more entries after this, so drain the byte
@@ -1229,7 +1225,7 @@ __socket_ioq_churn (rpc_transport_t *this)
                         break;
         }
 
-        if (!priv->own_thread && list_empty (&priv->ioq)) {
+        if (!priv->ssl_enabled && list_empty (&priv->ioq)) {
                 /* all pending writes done, not interested in POLLOUT */
                 priv->idx = event_select_on (this->ctx->event_pool,
                                              priv->sock, priv->idx, -1, 0);
@@ -2816,23 +2812,11 @@ socket_server_event_handler (int fd, int idx, void *data,
                         }
 
 			new_priv->sock = new_sock;
-			new_priv->own_thread = priv->own_thread;
+			new_priv->ssl_enabled = priv->ssl_enabled;
 
                         new_priv->ssl_ctx = priv->ssl_ctx;
-			if (new_priv->use_ssl && !new_priv->own_thread) {
-				cname = ssl_setup_connection(new_trans,1);
-                                if (!cname) {
-					gf_log(this->name,GF_LOG_ERROR,
-					       "server setup failed");
-					sys_close (new_sock);
-                                        GF_FREE (new_trans->name);
-                                        GF_FREE (new_trans);
-					goto unlock;
-				}
-                                this->ssl_name = cname;
-			}
 
-                        if (!priv->bio && !priv->own_thread) {
+                        if (!priv->bio && !priv->ssl_enabled) {
                                 ret = __socket_nonblock (new_sock);
 
                                 if (ret == -1) {
@@ -2850,7 +2834,7 @@ socket_server_event_handler (int fd, int idx, void *data,
                         pthread_mutex_lock (&new_priv->lock);
                         {
                                 /*
-                                 * In the own_thread case, this is used to
+                                 * In the ssl_enabled case, this is used to
                                  * indicate that we're initializing a server
                                  * connection.
                                  */
@@ -2858,26 +2842,28 @@ socket_server_event_handler (int fd, int idx, void *data,
                                 new_priv->is_server = _gf_true;
                                 rpc_transport_ref (new_trans);
 
-				if (new_priv->own_thread) {
-					if (pipe(new_priv->pipe) < 0) {
-						gf_log(this->name,GF_LOG_ERROR,
-						       "could not create pipe");
-					}
+                                if (priv->ssl_enabled) {
+                                        if (pipe (new_priv->pipe) < 0) {
+                                                gf_log (this->name,GF_LOG_ERROR,
+                                                       "could not create pipe");
+                                        }
                                         socket_spawn(new_trans);
-				}
-				else {
-					new_priv->idx =
-						event_register (ctx->event_pool,
-								new_sock,
-								socket_event_handler,
-								new_trans,
-								1, 0);
-					if (new_priv->idx == -1)
-						ret = -1;
-				}
+                                        ret = 0; // socket_poller handles errors
+                                                 // on its own
+                                } else {
+                                        new_priv->idx =
+                                                event_register (ctx->event_pool,
+                                                                new_sock,
+                                                                socket_event_handler,
+                                                                new_trans,
+                                                                1, 0);
+                                        if (new_priv->idx == -1)
+                                                ret = -1;
 
+                                }
                         }
                         pthread_mutex_unlock (&new_priv->lock);
+
                         if (ret == -1) {
                                 gf_log (this->name, GF_LOG_WARNING,
                                         "failed to register the socket with event");
@@ -2886,7 +2872,7 @@ socket_server_event_handler (int fd, int idx, void *data,
                                 goto unlock;
                         }
 
-                        if (!priv->own_thread) {
+                        if (!priv->ssl_enabled) {
                                 ret = rpc_transport_notify (this,
                                         RPC_TRANSPORT_ACCEPT, new_trans);
                         }
@@ -3110,7 +3096,7 @@ socket_connect (rpc_transport_t *this, int port)
                         goto handler;
                 }
 
-                if (!priv->use_ssl && !priv->bio && !priv->own_thread) {
+                if (!priv->bio && !priv->ssl_enabled) {
                         ret = __socket_nonblock (priv->sock);
                         if (ret == -1) {
                                 gf_log (this->name, GF_LOG_ERROR,
@@ -3145,24 +3131,7 @@ socket_connect (rpc_transport_t *this, int port)
                         ret = 0;
                 }
 
-                if (priv->use_ssl && !priv->own_thread) {
-                        cname = ssl_setup_connection(this,0);
-                        if (!cname) {
-                                errno = ENOTCONN;
-                                ret = -1;
-                                gf_log(this->name,GF_LOG_ERROR,
-                                       "client setup failed");
-                                goto handler;
-                        }
-                        if (priv->connected) {
-                                this->ssl_name = cname;
-                        }
-                        else {
-                                GF_FREE(cname);
-                        }
-                }
-
-                if (!priv->bio && !priv->own_thread) {
+                if (!priv->bio && !priv->ssl_enabled) {
                         ret = __socket_nonblock (priv->sock);
 
                         if (ret == -1) {
@@ -3183,7 +3152,7 @@ handler:
                 }
 
                 /*
-                 * In the own_thread case, this is used to indicate that we're
+                 * In the ssl_enabled case, this is used to indicate that we're
                  * initializing a client connection.
                  */
                 priv->connected = 0;
@@ -3191,7 +3160,7 @@ handler:
                 rpc_transport_ref (this);
                 refd = _gf_true;
 
-                if (priv->own_thread) {
+                if (priv->ssl_enabled) {
                         if (pipe(priv->pipe) < 0) {
                                 gf_log(this->name,GF_LOG_ERROR,
                                 "could not create pipe");
@@ -3199,8 +3168,8 @@ handler:
 
                         this->listener = this;
                         socket_spawn(this);
-                }
-                else {
+                        ret = 0; // socket_poller handles its own errors
+                } else {
                         priv->idx = event_register (ctx->event_pool, priv->sock,
                                                     socket_event_handler,
                                                     this, 1, 1);
@@ -3443,7 +3412,7 @@ socket_submit_request (rpc_transport_t *this, rpc_transport_req_t *req)
 
                 if (need_append) {
                         list_add_tail (&entry->list, &priv->ioq);
-			if (priv->own_thread) {
+			if (priv->ssl_enabled) {
 				/*
 				 * Make sure the polling thread wakes up, by
 				 * writing a byte to represent this entry.
@@ -3455,7 +3424,7 @@ socket_submit_request (rpc_transport_t *this, rpc_transport_req_t *req)
 			}
                         ret = 0;
                 }
-                if (!priv->own_thread && need_poll_out) {
+                if (!priv->ssl_enabled && need_poll_out) {
                         /* first entry to wait. continue writing on POLLOUT */
                         priv->idx = event_select_on (ctx->event_pool,
                                                      priv->sock,
@@ -3517,7 +3486,7 @@ socket_submit_reply (rpc_transport_t *this, rpc_transport_reply_t *reply)
 
                 if (need_append) {
                         list_add_tail (&entry->list, &priv->ioq);
-			if (priv->own_thread) {
+			if (priv->ssl_enabled) {
 				/*
 				 * Make sure the polling thread wakes up, by
 				 * writing a byte to represent this entry.
@@ -3529,7 +3498,7 @@ socket_submit_reply (rpc_transport_t *this, rpc_transport_reply_t *reply)
 			}
                         ret = 0;
                 }
-                if (!priv->own_thread && need_poll_out) {
+                if (!priv->ssl_enabled && need_poll_out) {
                         /* first entry to wait. continue writing on POLLOUT */
                         priv->idx = event_select_on (ctx->event_pool,
                                                      priv->sock,
@@ -4049,17 +4018,9 @@ socket_init (rpc_transport_t *this)
          */
         priv->use_ssl = priv->ssl_enabled;
 
-	priv->own_thread = priv->use_ssl;
-	if (dict_get_str(this->options,OWN_THREAD_OPT,&optstr) == 0) {
-                gf_log (this->name, GF_LOG_INFO, "OWN_THREAD_OPT found");
-                if (gf_string2boolean (optstr, &priv->own_thread) != 0) {
-                        gf_log (this->name, GF_LOG_WARNING,
-				"invalid value given for own-thread boolean");
-		}
-	}
-	gf_log(this->name, priv->own_thread ? GF_LOG_INFO: GF_LOG_DEBUG,
+	gf_log(this->name, priv->ssl_enabled ? GF_LOG_INFO: GF_LOG_DEBUG,
                "using %s polling thread",
-	       priv->own_thread ? "private" : "system");
+	       priv->ssl_enabled ? "private" : "system");
 
         if (!dict_get_int32 (this->options, SSL_CERT_DEPTH_OPT, &cert_depth)) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -4078,7 +4039,7 @@ socket_init (rpc_transport_t *this)
                         "using EC curve %s", ec_curve);
         }
 
-	if (priv->ssl_enabled || priv->mgmt_ssl) {
+	if (priv->ssl_enabled) {
                 BIO *bio = NULL;
 
                 /*
@@ -4243,7 +4204,7 @@ socket_init (rpc_transport_t *this)
                 SSL_CTX_set_purpose(priv->ssl_ctx, X509_PURPOSE_ANY);
 	}
 
-        if (priv->own_thread) {
+        if (priv->ssl_enabled){
                 priv->ot_state = OT_IDLE;
         }
 
@@ -4402,9 +4363,6 @@ struct volume_options options[] = {
 	},
 	{ .key   = {SSL_CRL_PATH_OPT},
 	  .type  = GF_OPTION_TYPE_STR
-	},
-	{ .key   = {OWN_THREAD_OPT},
-	  .type  = GF_OPTION_TYPE_BOOL
 	},
         { .key   = {"ssl-own-cert"},
           .type  = GF_OPTION_TYPE_STR,

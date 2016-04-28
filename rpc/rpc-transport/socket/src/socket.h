@@ -235,7 +235,6 @@ typedef struct {
 	char                  *ssl_ca_list;
 	pthread_t              thread;
 	int                    pipe[2];
-	gf_boolean_t           own_thread;
         ot_state_t             ot_state;
         uint32_t               ot_gen;
         gf_boolean_t           is_server;
