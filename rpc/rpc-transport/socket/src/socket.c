@@ -2844,19 +2844,22 @@ socket_server_event_handler (int fd, int idx, void *data,
 
                                 if (priv->ssl_enabled) {
                                         if (pipe (new_priv->pipe) < 0) {
-                                                gf_log (this->name,GF_LOG_ERROR,
+                                                gf_log (this->name,
+                                                        GF_LOG_ERROR,
                                                        "could not create pipe");
                                         }
                                         socket_spawn(new_trans);
-                                        ret = 0; // socket_poller handles errors
-                                                 // on its own
+                                        /*
+                                         * socket_poller handles errors
+                                         * on its own, return 0
+                                         */
+                                        ret = 0;
                                 } else {
                                         new_priv->idx =
-                                                event_register (ctx->event_pool,
-                                                                new_sock,
-                                                                socket_event_handler,
-                                                                new_trans,
-                                                                1, 0);
+                                                event_register
+                                                (ctx->event_pool, new_sock,
+                                                 socket_event_handler,
+                                                 new_trans, 1, 0);
                                         if (new_priv->idx == -1)
                                                 ret = -1;
 
@@ -3168,7 +3171,10 @@ handler:
 
                         this->listener = this;
                         socket_spawn(this);
-                        ret = 0; // socket_poller handles its own errors
+                        /*
+                         * socket_poller handles its own errors, return 0
+                         */
+                        ret = 0;
                 } else {
                         priv->idx = event_register (ctx->event_pool, priv->sock,
                                                     socket_event_handler,
@@ -4018,7 +4024,7 @@ socket_init (rpc_transport_t *this)
          */
         priv->use_ssl = priv->ssl_enabled;
 
-	gf_log(this->name, priv->ssl_enabled ? GF_LOG_INFO: GF_LOG_DEBUG,
+	gf_log (this->name, priv->ssl_enabled ? GF_LOG_INFO : GF_LOG_DEBUG,
                "using %s polling thread",
 	       priv->ssl_enabled ? "private" : "system");
 
@@ -4204,7 +4210,7 @@ socket_init (rpc_transport_t *this)
                 SSL_CTX_set_purpose(priv->ssl_ctx, X509_PURPOSE_ANY);
 	}
 
-        if (priv->ssl_enabled){
+        if (priv->ssl_enabled) {
                 priv->ot_state = OT_IDLE;
         }
 
