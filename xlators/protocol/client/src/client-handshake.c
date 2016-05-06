@@ -1539,11 +1539,12 @@ client_query_portmap_cbk (struct rpc_req *req, struct iovec *iov, int count, voi
 
         conf->portmap_err_logged = 0;
         conf->disconnect_err_logged = 0;
-        config.remote_port = rsp.port;
-        rpc_clnt_reconfig (conf->rpc, &config);
-
         conf->skip_notify = 1;
-	conf->quick_reconnect = 1;
+
+        ret = dict_set_int32 (this->options, "remote-port", rsp.port);
+        if (ret)
+                gf_msg (this->name, GF_LOG_ERROR, 0, PC_MSG_DICT_SET_FAILED,
+                        "failed to set remote-port in options dict");
 
 out:
         if (frame)
@@ -1552,7 +1553,12 @@ out:
         if (conf) {
                 /* Need this to connect the same transport on different port */
                 /* ie, glusterd to glusterfsd */
-                rpc_transport_disconnect (conf->rpc->conn.trans);
+                dict_unref (conf->rpc->conn.trans->options);
+                rpc_clnt_unref (conf->rpc);
+                conf->rpc = NULL;
+                ret = client_init_rpc (this);
+                if (!ret)
+                        ret = rpc_clnt_start (conf->rpc);
         }
 
         return ret;

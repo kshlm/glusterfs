@@ -2506,6 +2506,7 @@ client_init_rpc (xlator_t *this)
 {
         int          ret  = -1;
         clnt_conf_t *conf = NULL;
+        dict_t      *options = NULL;
 
         conf = this->private;
 
@@ -2517,7 +2518,42 @@ client_init_rpc (xlator_t *this)
                 goto out;
         }
 
-        conf->rpc = rpc_clnt_new (this->options, this, this->name, 0);
+        /* If remote-port is not present, we need to do a portmap query
+         * Copying the options dictionary and setting the options required for
+         * portmap, which could be different from the actual connection to the
+         * brick.
+         */
+        if (dict_get (this->options, "remote-port") == NULL) {
+                options = dict_new ();
+                dict_copy (this->options, options);
+                /* Set ssl-enabled to the correct value for
+                 * management-encryption
+                 */
+                ret = dict_set_dynstr_with_alloc
+                        (options, "transport.socket.ssl-enabled",
+                         (this->ctx->secure_mgmt ? "yes" : "no"));
+                if (ret) {
+                        gf_msg (this->name, GF_LOG_ERROR, 0,
+                                PC_MSG_DICT_SET_FAILED,
+                                "failed to set ssl-enabled in dict");
+                        goto out;
+                }
+                /* Also set the remote-port explicitly to 24007 */
+                /*
+                 *ret = dict_set_int32 (options, "remote-port", 24007);
+                 *if (ret) {
+                 *        gf_msg (this->name, GF_LOG_ERROR, 0,
+                 *                PC_MSG_DICT_SET_FAILED,
+                 *                "failed to set remote-port in dict");
+                 *        goto out;
+                 *}
+                 */
+
+        } else {
+                options = this->options;
+        }
+
+        conf->rpc = rpc_clnt_new (options, this, this->name, 0);
         if (!conf->rpc) {
                 gf_msg (this->name, GF_LOG_ERROR, 0, PC_MSG_RPC_INIT_FAILED,
                         "failed to initialize RPC");
@@ -2533,6 +2569,9 @@ client_init_rpc (xlator_t *this)
 
         conf->handshake = &clnt_handshake_prog;
         conf->dump      = &clnt_dump_prog;
+
+        /* Enable quick-reconnect to connect to the next address */
+        conf->quick_reconnect = _gf_true;
 
         ret = rpcclnt_cbk_program_register (conf->rpc, &gluster_cbk_prog,
                                             this);

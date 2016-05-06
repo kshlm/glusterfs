@@ -380,4 +380,6 @@ int
 serialize_req_locklist (lock_migration_info_t *locklist,
                         gfs3_setactivelk_req *req);
 
+int
+client_init_rpc (xlator_t *this);
 #endif /* !_CLIENT_H */
