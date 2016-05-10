@@ -4060,6 +4060,9 @@ glusterd_import_friend_volume (dict_t *peer_data, size_t count)
         glusterd_volinfo_t      *old_volinfo = NULL;
         glusterd_volinfo_t      *new_volinfo = NULL;
         glusterd_svc_t          *svc         = NULL;
+        gf_boolean_t            newexportvalue;
+        gf_boolean_t            oldexportvalue;
+        char                    *value     = NULL;
 
         GF_ASSERT (peer_data);
 
@@ -4080,6 +4083,8 @@ glusterd_import_friend_volume (dict_t *peer_data, size_t count)
 
         ret = glusterd_volinfo_find (new_volinfo->volname, &old_volinfo);
         if (0 == ret) {
+                oldexportvalue = glusterd_check_ganesha_export (old_volinfo);
+
                 /* Ref count the old_volinfo such that deleting it doesn't crash
                  * if its been already in use by other thread
                  */
@@ -4106,6 +4111,31 @@ glusterd_import_friend_volume (dict_t *peer_data, size_t count)
                 }
         }
 
+        ret = glusterd_volinfo_get (new_volinfo, "ganesha.enable", &value);
+        if (ret)
+                goto out;
+        ret = gf_string2boolean (value, &newexportvalue);
+        if (ret)
+                goto out;
+
+        /* *
+         * if new and old export value is off, then there is no point in calling
+         * ganesha_manage_export
+         */
+        if (!((newexportvalue == oldexportvalue) &&
+               newexportvalue == _gf_false)) {
+                ret = ganesha_manage_export (new_volinfo->volname, value,
+                                             NULL, _gf_true);
+                if (ret) {
+                        gf_msg (this->name, GF_LOG_ERROR, 0,
+                                GD_MSG_NFS_GNS_OP_HANDLE_FAIL,
+                                "Returning from ganesha_manage_export with"
+                                " ret: %d for volume %s ganesha.enable %s",
+                                ret, new_volinfo->volname,
+                                value);
+                        goto out;
+                }
+        }
         ret = glusterd_store_volinfo (new_volinfo, GLUSTERD_VOLINFO_VER_AC_NONE);
         if (ret) {
                 gf_msg (this->name, GF_LOG_ERROR, 0,
@@ -7295,6 +7325,8 @@ glusterd_volume_defrag_restart (glusterd_volinfo_t *volinfo, char *op_errstr,
         case GF_DEFRAG_STATUS_NOT_STARTED:
                 ret = glusterd_handle_defrag_start (volinfo, op_errstr, len,
                                 cmd, cbk, volinfo->rebal.op);
+                if (ret)
+                        volinfo->rebal.defrag_status = GF_DEFRAG_STATUS_FAILED;
                 break;
         default:
                 gf_msg (this->name, GF_LOG_ERROR, 0,
@@ -7306,6 +7338,7 @@ glusterd_volume_defrag_restart (glusterd_volinfo_t *volinfo, char *op_errstr,
         }
 out:
         return ret;
+
 }
 
 void
@@ -7367,9 +7400,6 @@ glusterd_restart_rebalance_for_volume (glusterd_volinfo_t *volinfo)
         int             ret = -1;
         char          op_errstr[PATH_MAX];
 
-        if (!volinfo->rebal.defrag_cmd)
-                return -1;
-
         if (!gd_should_i_start_rebalance (volinfo)) {
 
                 /* Store the rebalance-id and rebalance command even if
@@ -7380,11 +7410,17 @@ glusterd_restart_rebalance_for_volume (glusterd_volinfo_t *volinfo)
                  * Storing this is needed for having 'volume status'
                  * work correctly.
                  */
+                volinfo->rebal.defrag_status = GF_DEFRAG_STATUS_NOT_STARTED;
                 if (volinfo->type == GF_CLUSTER_TYPE_TIER)
                         glusterd_store_perform_node_state_store (volinfo);
 
                 return 0;
         }
+        if (!volinfo->rebal.defrag_cmd) {
+                volinfo->rebal.defrag_status = GF_DEFRAG_STATUS_FAILED;
+                return -1;
+        }
+
         ret = glusterd_volume_defrag_restart (volinfo, op_errstr, PATH_MAX,
                                 volinfo->rebal.defrag_cmd,
                                 volinfo->rebal.op == GD_OP_REMOVE_BRICK ?
@@ -7399,7 +7435,6 @@ glusterd_restart_rebalance_for_volume (glusterd_volinfo_t *volinfo)
                         volinfo->decommission_in_progress = 1;
                 }
         }
-
         return ret;
 }
 int
