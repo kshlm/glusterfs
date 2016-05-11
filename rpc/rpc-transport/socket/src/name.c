@@ -389,7 +389,7 @@ af_inet_server_get_local_sockaddr (rpc_transport_t *this,
         {
                 listen_host = data_to_str (listen_host_data);
         } else {
-                if (addr->sa_family == AF_INET6) {
+                if (addr->sa_family == AF_INET6 || addr->sa_family == AF_UNSPEC) {
                         struct sockaddr_in6 *in = (struct sockaddr_in6 *) addr;
                         in->sin6_addr = in6addr_any;
                         in->sin6_port = htons(listen_port);
@@ -571,13 +571,14 @@ server_fill_address_family (rpc_transport_t *this, sa_family_t *sa_family)
                 } else {
                         gf_log (this->name, GF_LOG_ERROR,
                                 "unknown address family (%s) specified", address_family);
-                        *sa_family = AF_UNSPEC;
+                        *sa_family = AF_INET6;
                         goto out;
                 }
         } else {
                 gf_log (this->name, GF_LOG_DEBUG,
-                        "option address-family not specified, defaulting to inet");
-                *sa_family = AF_INET;
+                        "option address-family not specified, defaulting to "
+                        "unspec");
+                *sa_family = AF_INET6;
         }
 
         ret = 0;
