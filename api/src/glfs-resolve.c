@@ -129,6 +129,11 @@ glfs_refresh_inode_safe (xlator_t *subvol, inode_t *oldinode,
                 if (newinode == loc.inode)
                         inode_ctx_set (newinode, THIS, &ctx_value);
                 inode_lookup (newinode);
+        } else {
+                gf_msg (subvol->name, GF_LOG_WARNING, errno,
+                        API_MSG_INODE_LINK_FAILED,
+                        "inode linking of %s failed",
+                        uuid_utoa ((unsigned char *)&iatt.ia_gfid));
         }
 
 	loc_wipe (&loc);
@@ -313,6 +318,7 @@ glfs_resolve_component (struct glfs *fs, xlator_t *subvol, inode_t *parent,
                         inode_unlink(loc.inode, loc.parent,
                                      loc.name);
 		inode_unref (loc.inode);
+	        gf_uuid_clear (loc.gfid);
 		loc.inode = inode_new (parent->table);
 		if (!loc.inode) {
 			errno = ENOMEM;
@@ -341,7 +347,14 @@ glfs_resolve_component (struct glfs *fs, xlator_t *subvol, inode_t *parent,
 		goto out;
 
 	inode = inode_link (loc.inode, loc.parent, component, &ciatt);
-        if (inode == loc.inode)
+
+        if (!inode) {
+                gf_msg (subvol->name, GF_LOG_WARNING, errno,
+                        API_MSG_INODE_LINK_FAILED,
+                        "inode linking of %s failed",
+                        uuid_utoa ((unsigned char *)&ciatt.ia_gfid));
+                goto out;
+        } else if (inode == loc.inode)
                 inode_ctx_set (inode, THIS, &ctx_value);
 found:
 	if (inode)
